@@ -3,6 +3,7 @@ import { useExpiries, useOptionChain } from './hooks/useOptionChain';
 import { OptionChainTable } from './components/chain/OptionChainTable';
 import { PremiumChart } from './components/charts/PremiumChart';
 import { IVChart } from './components/charts/IVChart';
+import { LogViewer } from './components/logs/LogViewer';
 import { Spinner } from './components/ui/Spinner';
 import type { OptionLeg } from './types/api';
 import './App.css';
@@ -12,6 +13,7 @@ export default function App() {
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   const [selectedLeg, setSelectedLeg] = useState<OptionLeg | null>(null);
   const [tab, setTab] = useState<'chain' | 'premium' | 'iv'>('chain');
+  const [showLogs, setShowLogs] = useState(false);
 
   const { data: chain, loading: chainLoading, error, refetch } = useOptionChain(selectedExpiry, true);
 
@@ -57,6 +59,14 @@ export default function App() {
           />
         </div>
 
+        <button
+          className="btn-refresh"
+          onClick={() => setShowLogs(v => !v)}
+          style={{ background: showLogs ? '#1f6feb' : undefined }}
+        >
+          {showLogs ? '✕ Logs' : '📋 Logs'}
+        </button>
+
         <button className="btn-refresh" onClick={refetch} disabled={chainLoading}>
           {chainLoading ? <Spinner size={14} /> : '↻ Refresh'}
         </button>
@@ -74,6 +84,13 @@ export default function App() {
           </div>
         )}
       </header>
+
+      {/* Log Viewer Panel */}
+      {showLogs && (
+        <div style={{ height: 380, padding: '0 12px 12px', background: '#010409' }}>
+          <LogViewer />
+        </div>
+      )}
 
       {/* Main */}
       <main className="main">

@@ -36,4 +36,7 @@ export const api = {
 
   getIVRV: (expiry: string, window: number) =>
     fetcher<IVRVResponse>('/plot-data/iv-rv', { expiry, window: String(window) }),
+
+  getLogs: (file: 'api' | 'errors', lines: number) =>
+    fetcher<{ file: string; lines: string[]; total: number }>('/logs', { file, lines: String(lines) }),
 };

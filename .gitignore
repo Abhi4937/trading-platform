@@ -46,7 +46,7 @@ Thumbs.db
 
 # Logs
 *.log
-logs/
+backend/logs/
 
 # Docker
 .docker/
