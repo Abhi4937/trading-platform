@@ -2,41 +2,56 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../../services/api';
 
 type LogFile = 'api' | 'errors';
-type Filter = 'ALL' | 'INFO' | 'ERROR' | 'CACHE' | 'DELTA';
+type Filter = 'ALL' | 'INBOUND' | 'OUTBOUND' | 'CACHE HIT' | 'CACHE MISS' | 'ERROR';
 
-const FILTERS: Filter[] = ['ALL', 'INFO', 'ERROR', 'CACHE', 'DELTA'];
+const FILTERS: Filter[] = ['ALL', 'INBOUND', 'OUTBOUND', 'CACHE HIT', 'CACHE MISS', 'ERROR'];
 const LINE_OPTIONS = [100, 200, 500];
 const REFRESH_INTERVAL = 5000;
 
 function levelColor(line: string): string {
-  if (line.includes('ERROR'))             return '#ff5555';
-  if (line.includes('WARNING'))           return '#ffb86c';
-  if (line.includes('CACHE  HIT'))        return '#50fa7b';
-  if (line.includes('CACHE  MISS'))       return '#ff9580';
-  if (line.includes('DELTA'))             return '#8be9fd';
-  if (line.includes('INFO'))              return '#f8f8f2';
+  if (line.includes('ERROR'))        return '#ff5555';
+  if (line.includes('WARNING'))      return '#ffb86c';
+  if (line.includes('CACHE  HIT'))   return '#50fa7b';
+  if (line.includes('CACHE  MISS'))  return '#ff9580';
+  if (line.includes('DELTA  GET'))   return '#8be9fd';
+  if (line.includes('  api  '))      return '#bd93f9';
   return '#6272a4';
 }
 
 function matchesFilter(line: string, filter: Filter): boolean {
-  if (filter === 'ALL')   return true;
-  if (filter === 'ERROR') return line.includes('ERROR');
-  if (filter === 'INFO')  return line.includes('INFO') && !line.includes('CACHE') && !line.includes('DELTA');
-  if (filter === 'CACHE') return line.includes('CACHE');
-  if (filter === 'DELTA') return line.includes('DELTA');
-  return true;
+  switch (filter) {
+    case 'ALL':        return true;
+    case 'INBOUND':    return line.includes('  api  ');
+    case 'OUTBOUND':   return line.includes('DELTA  GET');
+    case 'CACHE HIT':  return line.includes('CACHE  HIT');
+    case 'CACHE MISS': return line.includes('CACHE  MISS');
+    case 'ERROR':      return line.includes('ERROR') || line.includes('WARNING');
+    default:           return true;
+  }
+}
+
+function filterBorderColor(f: Filter): string {
+  switch (f) {
+    case 'INBOUND':    return '#bd93f9';
+    case 'OUTBOUND':   return '#8be9fd';
+    case 'CACHE HIT':  return '#50fa7b';
+    case 'CACHE MISS': return '#ff9580';
+    case 'ERROR':      return '#ff5555';
+    default:           return '#30363d';
+  }
 }
 
 export function LogViewer() {
-  const [logFile, setLogFile] = useState<LogFile>('api');
-  const [lineCount, setLineCount] = useState(200);
-  const [filter, setFilter] = useState<Filter>('ALL');
-  const [lines, setLines] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [logFile, setLogFile]       = useState<LogFile>('api');
+  const [lineCount, setLineCount]   = useState(200);
+  const [filter, setFilter]         = useState<Filter>('ALL');
+  const [lines, setLines]           = useState<string[]>([]);
+  const [loading, setLoading]       = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [search, setSearch] = useState('');
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [search, setSearch]         = useState('');
+  const prevLengthRef               = useRef(0);
+  const bottomRef                   = useRef<HTMLDivElement>(null);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
@@ -59,14 +74,26 @@ export function LogViewer() {
     return () => clearInterval(id);
   }, [autoRefresh, fetchLogs]);
 
+  // Only auto-scroll when new lines actually arrive
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (lines.length > prevLengthRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+    prevLengthRef.current = lines.length;
   }, [lines]);
 
   const filtered = lines.filter(l =>
     matchesFilter(l, filter) &&
     (search === '' || l.toLowerCase().includes(search.toLowerCase()))
   );
+
+  const counts = {
+    INBOUND:    lines.filter(l => matchesFilter(l, 'INBOUND')).length,
+    OUTBOUND:   lines.filter(l => matchesFilter(l, 'OUTBOUND')).length,
+    'CACHE HIT':  lines.filter(l => matchesFilter(l, 'CACHE HIT')).length,
+    'CACHE MISS': lines.filter(l => matchesFilter(l, 'CACHE MISS')).length,
+    ERROR:      lines.filter(l => matchesFilter(l, 'ERROR')).length,
+  };
 
   return (
     <div style={styles.container}>
@@ -85,23 +112,36 @@ export function LogViewer() {
           ))}
         </div>
 
+        <div style={styles.divider} />
+
         {/* Filters */}
         <div style={styles.group}>
           {FILTERS.map(f => (
             <button
               key={f}
-              style={{ ...styles.pill, ...(filter === f ? styles.pillActive : {}), ...filterColor(f) }}
+              style={{
+                ...styles.pill,
+                ...(filter === f ? { ...styles.pillActive, borderColor: filterBorderColor(f) } : { borderColor: filterBorderColor(f) }),
+              }}
               onClick={() => setFilter(f)}
+              title={f !== 'ALL' ? `${counts[f as keyof typeof counts] ?? lines.length} entries` : `${lines.length} entries`}
             >
               {f}
+              {f !== 'ALL' && (
+                <span style={styles.badge}>
+                  {counts[f as keyof typeof counts] ?? 0}
+                </span>
+              )}
             </button>
           ))}
         </div>
 
+        <div style={styles.divider} />
+
         {/* Search */}
         <input
           style={styles.search}
-          placeholder="Search logs..."
+          placeholder="Search..."
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
@@ -112,10 +152,10 @@ export function LogViewer() {
           value={lineCount}
           onChange={e => setLineCount(Number(e.target.value))}
         >
-          {LINE_OPTIONS.map(n => <option key={n} value={n}>Last {n} lines</option>)}
+          {LINE_OPTIONS.map(n => <option key={n} value={n}>Last {n}</option>)}
         </select>
 
-        {/* Auto refresh */}
+        {/* Auto refresh toggle */}
         <button
           style={{ ...styles.pill, ...(autoRefresh ? styles.pillActive : {}) }}
           onClick={() => setAutoRefresh(v => !v)}
@@ -135,6 +175,16 @@ export function LogViewer() {
         )}
       </div>
 
+      {/* Legend */}
+      <div style={styles.legend}>
+        <span style={{ color: '#bd93f9' }}>■ Inbound</span>
+        <span style={{ color: '#8be9fd' }}>■ Outbound (Delta)</span>
+        <span style={{ color: '#50fa7b' }}>■ Cache HIT</span>
+        <span style={{ color: '#ff9580' }}>■ Cache MISS</span>
+        <span style={{ color: '#ff5555' }}>■ Error</span>
+        <span style={{ color: '#ffb86c' }}>■ Warning</span>
+      </div>
+
       {/* Log output */}
       <div style={styles.output}>
         {filtered.length === 0 ? (
@@ -150,13 +200,6 @@ export function LogViewer() {
       </div>
     </div>
   );
-}
-
-function filterColor(f: Filter): React.CSSProperties {
-  if (f === 'ERROR') return { borderColor: '#ff5555' };
-  if (f === 'CACHE') return { borderColor: '#50fa7b' };
-  if (f === 'DELTA') return { borderColor: '#8be9fd' };
-  return {};
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -180,11 +223,28 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#161b22',
     borderBottom: '1px solid #30363d',
   },
+  legend: {
+    display: 'flex',
+    gap: 16,
+    padding: '4px 12px',
+    background: '#161b22',
+    borderBottom: '1px solid #30363d',
+    fontSize: 11,
+  },
   group: {
     display: 'flex',
     gap: 4,
   },
+  divider: {
+    width: 1,
+    height: 20,
+    background: '#30363d',
+    margin: '0 2px',
+  },
   pill: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
     padding: '3px 10px',
     borderRadius: 4,
     border: '1px solid #30363d',
@@ -199,6 +259,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     borderColor: '#388bfd',
   },
+  badge: {
+    background: '#30363d',
+    borderRadius: 8,
+    padding: '0 5px',
+    fontSize: 10,
+    color: '#8b949e',
+  },
   search: {
     padding: '3px 8px',
     borderRadius: 4,
@@ -207,7 +274,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#f0f6fc',
     fontSize: 11,
     fontFamily: 'inherit',
-    width: 160,
+    width: 140,
     outline: 'none',
   },
   select: {
