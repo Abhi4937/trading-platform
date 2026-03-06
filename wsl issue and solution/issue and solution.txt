@@ -1,0 +1,2 @@
+Wsl installation issue due to pc reset
+earlier wsl was installed but then when I reset my pc regiestery got broke and then need to solve the issue

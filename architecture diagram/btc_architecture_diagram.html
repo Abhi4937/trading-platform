@@ -1,0 +1,1558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BTC Options — Architecture Flow</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #080c14;
+    --bg2:       #0d1320;
+    --bg3:       #111827;
+    --border:    #1e2d45;
+    --border2:   #253550;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --dim:       #334155;
+
+    --browser:   #3b82f6;
+    --vite:      #a78bfa;
+    --nginx:     #22c55e;
+    --react:     #38bdf8;
+    --fastapi:   #fb923c;
+    --redis:     #f43f5e;
+    --delta:     #fbbf24;
+    --greeks:    #34d399;
+    --models:    #818cf8;
+
+    --glow-blue:   0 0 20px rgba(59,130,246,0.3);
+    --glow-purple: 0 0 20px rgba(167,139,250,0.3);
+    --glow-green:  0 0 20px rgba(34,197,94,0.3);
+    --glow-orange: 0 0 20px rgba(251,146,60,0.3);
+    --glow-red:    0 0 20px rgba(244,63,94,0.3);
+    --glow-yellow: 0 0 20px rgba(251,191,36,0.3);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Background grid */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(30,45,69,0.3) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(30,45,69,0.3) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page { position: relative; z-index: 1; padding: 40px 32px; max-width: 1400px; margin: 0 auto; }
+
+  /* Header */
+  .header { text-align: center; margin-bottom: 48px; }
+  .header-badge {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--fastapi);
+    border: 1px solid var(--fastapi);
+    padding: 4px 14px;
+    border-radius: 2px;
+    margin-bottom: 16px;
+    opacity: 0.8;
+  }
+  .header h1 {
+    font-size: clamp(24px, 4vw, 42px);
+    font-weight: 700;
+    letter-spacing: -1px;
+    line-height: 1.1;
+    background: linear-gradient(135deg, #e2e8f0 0%, #94a3b8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .header p {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 14px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 32px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    width: fit-content;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .tab {
+    padding: 8px 20px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .tab.active {
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid var(--border2);
+  }
+  .tab:hover:not(.active) { color: var(--text); }
+
+  /* View panels */
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* ── OVERVIEW DIAGRAM ─────────────────────────────────── */
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+  }
+
+  .layer {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+  }
+  .layer-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Node cards */
+  .node {
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.25s;
+    position: relative;
+    overflow: hidden;
+  }
+  .node::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.25s;
+    border-radius: 8px;
+  }
+  .node:hover { transform: translateY(-2px); }
+  .node:hover::before { opacity: 1; }
+
+  .node-browser  { background: rgba(59,130,246,0.08);  border-color: rgba(59,130,246,0.3);  }
+  .node-browser::before  { background: rgba(59,130,246,0.06); }
+  .node-browser:hover  { border-color: var(--browser);  box-shadow: var(--glow-blue); }
+
+  .node-vite    { background: rgba(167,139,250,0.08); border-color: rgba(167,139,250,0.3); }
+  .node-vite::before { background: rgba(167,139,250,0.06); }
+  .node-vite:hover   { border-color: var(--vite);   box-shadow: var(--glow-purple); }
+
+  .node-nginx   { background: rgba(34,197,94,0.08);  border-color: rgba(34,197,94,0.3);  }
+  .node-nginx::before { background: rgba(34,197,94,0.06); }
+  .node-nginx:hover   { border-color: var(--nginx);  box-shadow: var(--glow-green); }
+
+  .node-react   { background: rgba(56,189,248,0.08); border-color: rgba(56,189,248,0.3); }
+  .node-react:hover   { border-color: var(--react);  box-shadow: 0 0 20px rgba(56,189,248,0.3); }
+
+  .node-fastapi { background: rgba(251,146,60,0.08); border-color: rgba(251,146,60,0.3); }
+  .node-fastapi:hover { border-color: var(--fastapi); box-shadow: var(--glow-orange); }
+
+  .node-redis   { background: rgba(244,63,94,0.08);  border-color: rgba(244,63,94,0.3);  }
+  .node-redis:hover   { border-color: var(--redis);  box-shadow: var(--glow-red); }
+
+  .node-delta   { background: rgba(251,191,36,0.08); border-color: rgba(251,191,36,0.3); }
+  .node-delta:hover   { border-color: var(--delta);  box-shadow: var(--glow-yellow); }
+
+  .node-greeks  { background: rgba(52,211,153,0.08); border-color: rgba(52,211,153,0.3); }
+  .node-greeks:hover  { border-color: var(--greeks); box-shadow: 0 0 20px rgba(52,211,153,0.3); }
+
+  .node-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .node-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .node-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .node-tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-top: 6px;
+  }
+
+  /* ── FLOW ARROWS SECTION ─────────────────────────────── */
+  .flow-container {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 24px;
+  }
+  .flow-title {
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* SVG arrow diagram */
+  .svg-flow { width: 100%; overflow: visible; }
+
+  /* ── CALL CHAIN VIEW ─────────────────────────────────── */
+  .call-chain { display: flex; flex-direction: column; gap: 0; }
+
+  .call-step {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 0;
+    position: relative;
+  }
+  .call-step::after {
+    content: '';
+    position: absolute;
+    left: 179px;
+    top: 50%;
+    bottom: -50%;
+    width: 1px;
+    background: var(--border2);
+    z-index: 0;
+  }
+  .call-step:last-child::after { display: none; }
+
+  .step-caller {
+    padding: 12px 16px 12px 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    padding-top: 18px;
+  }
+  .step-caller-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  .step-body {
+    padding: 12px 0 12px 24px;
+    border-left: 1px solid var(--border2);
+    position: relative;
+  }
+  .step-body::before {
+    content: '';
+    position: absolute;
+    left: -5px;
+    top: 20px;
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    border: 2px solid var(--border2);
+    background: var(--bg);
+    z-index: 1;
+  }
+  .step-arrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .arrow-line {
+    height: 1px;
+    flex: 1;
+    max-width: 120px;
+    background: linear-gradient(90deg, var(--border2), transparent);
+  }
+  .step-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 4px;
+  }
+  .step-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .step-card-detail {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .step-card-code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 6px;
+    background: var(--bg);
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    line-height: 1.7;
+  }
+  .highlight { color: var(--fastapi); }
+  .highlight-blue { color: var(--browser); }
+  .highlight-green { color: var(--nginx); }
+  .highlight-purple { color: var(--vite); }
+  .highlight-red { color: var(--redis); }
+  .highlight-yellow { color: var(--delta); }
+  .highlight-teal { color: var(--greeks); }
+
+  /* ── FILE MAP VIEW ───────────────────────────────────── */
+  .file-tree {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .file-section {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .file-section-title {
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .file-item {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(30,45,69,0.5);
+    align-items: start;
+  }
+  .file-item:last-child { border-bottom: none; }
+  .file-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text);
+  }
+  .file-role {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .file-calls {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 3px;
+  }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 28px;
+    padding: 16px 20px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--muted);
+  }
+  .legend-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* Data flow section */
+  .data-flows { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 24px; }
+  .data-flow-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .data-flow-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .flow-num {
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .flow-text {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .flow-code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .arch-grid { grid-template-columns: 1fr; }
+    .file-tree { grid-template-columns: 1fr; }
+    .data-flows { grid-template-columns: 1fr; }
+  }
+
+  /* Animate in */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .node { animation: fadeUp 0.4s ease both; }
+  .node:nth-child(1) { animation-delay: 0.05s; }
+  .node:nth-child(2) { animation-delay: 0.10s; }
+  .node:nth-child(3) { animation-delay: 0.15s; }
+  .node:nth-child(4) { animation-delay: 0.20s; }
+
+  /* Pulse dot for live items */
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .pulse { animation: pulse 2s ease infinite; }
+
+  /* Tooltip */
+  .tooltip {
+    position: fixed;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 1000;
+    max-width: 260px;
+    display: none;
+    line-height: 1.6;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .tooltip.show { display: block; }
+  .tooltip-title { font-weight: 600; margin-bottom: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .tooltip-body { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <div class="header">
+    <div class="header-badge">Architecture Map</div>
+    <h1>BTC Options Chain</h1>
+    <p>btc-options / full-stack — every file, every call, every connection</p>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('overview')">Overview</button>
+    <button class="tab" onclick="switchTab('callchain')">Request Flow</button>
+    <button class="tab" onclick="switchTab('filemap')">File Map</button>
+    <button class="tab" onclick="switchTab('dataflow')">Data Flow</button>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--browser)"></div>Browser</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--vite)"></div>Vite Dev Server</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--nginx)"></div>Nginx</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--react)"></div>React / TypeScript</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--fastapi)"></div>FastAPI / Python</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--redis)"></div>Redis Cache</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--delta)"></div>Delta Exchange API</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--greeks)"></div>Black-Scholes Engine</div>
+  </div>
+
+  <!-- ═══ OVERVIEW TAB ═══════════════════════════════════════════════ -->
+  <div id="tab-overview" class="view active">
+
+    <div class="arch-grid">
+
+      <!-- FRONTEND LAYER -->
+      <div class="layer">
+        <div class="layer-label">Frontend Layer</div>
+
+        <div class="node node-browser"
+             data-tip="Browser" data-desc="Chrome/Firefox running on your machine. Sends HTTP requests. Renders React. Never talks directly to FastAPI when proxy is active.">
+          <div class="node-title">
+            <div class="node-dot pulse" style="background:var(--browser)"></div>
+            Browser (Chrome/Firefox)
+          </div>
+          <div class="node-sub">localhost:3000<br>Renders React app</div>
+          <div class="node-tag" style="background:rgba(59,130,246,0.1);color:var(--browser);border:1px solid rgba(59,130,246,0.3)">CLIENT</div>
+        </div>
+
+        <div class="node node-vite"
+             data-tip="Vite Dev Server" data-desc="Runs during npm run dev. Serves React files with hot reload. Proxies all /api requests to FastAPI on :8000. Only active in development — NOT in Docker.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--vite)"></div>
+            Vite Dev Server
+          </div>
+          <div class="node-sub">vite.config.ts<br>port: 3000 → proxy /api → :8000<br>Hot reload on file change</div>
+          <div class="node-tag" style="background:rgba(167,139,250,0.1);color:var(--vite);border:1px solid rgba(167,139,250,0.3)">DEV ONLY</div>
+        </div>
+
+        <div class="node node-nginx"
+             data-tip="Nginx" data-desc="Runs inside Docker frontend container. Serves pre-built React dist/ files. Proxies /api/ to FastAPI. Fixes React Router with try_files. Only active in Docker — NOT in npm run dev.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--nginx)"></div>
+            Nginx
+          </div>
+          <div class="node-sub">nginx.conf<br>port: 80 (mapped to host :3000)<br>Serves dist/ + proxies /api/</div>
+          <div class="node-tag" style="background:rgba(34,197,94,0.1);color:var(--nginx);border:1px solid rgba(34,197,94,0.3)">DOCKER ONLY</div>
+        </div>
+
+        <div class="node node-react"
+             data-tip="React App" data-desc="TypeScript + React 18. Components: App.tsx, OptionChainTable, PremiumChart, IVChart, Spinner. Hooks: useExpiries, useOptionChain (auto-refreshes every 15s). API calls via api.ts fetcher.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--react)"></div>
+            React + TypeScript
+          </div>
+          <div class="node-sub">
+            App.tsx → renders entire UI<br>
+            useOptionChain → auto-refresh 15s<br>
+            api.ts → all fetch calls<br>
+            Recharts → charts
+          </div>
+          <div class="node-tag" style="background:rgba(56,189,248,0.1);color:var(--react);border:1px solid rgba(56,189,248,0.3)">UI LAYER</div>
+        </div>
+      </div>
+
+      <!-- BACKEND LAYER -->
+      <div class="layer">
+        <div class="layer-label">Backend Layer</div>
+
+        <div class="node node-fastapi"
+             data-tip="FastAPI" data-desc="Python ASGI server. Runs uvicorn with 2 workers. Routers: /api/v1/expiries, /api/v1/spot, /api/v1/options, /api/v1/plot-data/*. Middlewares: CORSMiddleware, GZipMiddleware.">
+          <div class="node-title">
+            <div class="node-dot pulse" style="background:var(--fastapi)"></div>
+            FastAPI (main.py)
+          </div>
+          <div class="node-sub">
+            port: 8000, workers: 2<br>
+            CORSMiddleware → local dev<br>
+            GZipMiddleware → compress responses<br>
+            lifespan → init/close Redis
+          </div>
+          <div class="node-tag" style="background:rgba(251,146,60,0.1);color:var(--fastapi);border:1px solid rgba(251,146,60,0.3)">API SERVER</div>
+        </div>
+
+        <div class="node node-fastapi"
+             data-tip="API Routers" data-desc="4 routers register routes. expiries.py: GET /expiries, GET /spot. options.py: GET /options?expiry=. plot_data.py: GET /plot-data/premium, /iv-smile, /iv-rv. health.py: GET /health.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--fastapi)"></div>
+            API Routers
+          </div>
+          <div class="node-sub">
+            expiries.py → /expiries, /spot<br>
+            options.py → /options?expiry=<br>
+            plot_data.py → /plot-data/*<br>
+            health.py → /health
+          </div>
+        </div>
+
+        <div class="node node-greeks"
+             data-tip="option_chain_service.py" data-desc="Core business logic. get_option_chain(): checks Redis, fetches products + spot in parallel with asyncio.gather(), batches ticker requests 20 at a time, computes IV and Greeks for every strike. get_expiries(): parses settlement times. get_spot(): BTC price.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--greeks)"></div>
+            option_chain_service.py
+          </div>
+          <div class="node-sub">
+            get_option_chain() → main logic<br>
+            asyncio.gather() → parallel fetches<br>
+            Batch 20 tickers at a time<br>
+            Builds demo chain if no API key
+          </div>
+          <div class="node-tag" style="background:rgba(52,211,153,0.1);color:var(--greeks);border:1px solid rgba(52,211,153,0.3)">CORE LOGIC</div>
+        </div>
+
+        <div class="node node-greeks"
+             data-tip="greeks.py" data-desc="Pure Python Black-Scholes implementation. compute_greeks(S,K,T,r,σ,type) returns delta, gamma, theta, vega, rho, theoretical price. implied_vol() uses Newton-Raphson iteration (200 max) to find IV from market price. No external library — all math implemented from scratch.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--greeks)"></div>
+            greeks.py (Black-Scholes)
+          </div>
+          <div class="node-sub">
+            compute_greeks(S,K,T,r,σ) → Δ,Γ,Θ,V,ρ<br>
+            implied_vol() → Newton-Raphson<br>
+            _norm_cdf(), _norm_pdf() → pure math<br>
+            No external library
+          </div>
+          <div class="node-tag" style="background:rgba(52,211,153,0.1);color:var(--greeks);border:1px solid rgba(52,211,153,0.3)">MATH ENGINE</div>
+        </div>
+
+        <div class="node" style="background:rgba(129,140,248,0.08);border-color:rgba(129,140,248,0.3);"
+             data-tip="config.py + models.py" data-desc="config.py: Pydantic Settings reads .env. REDIS_URL, CORS_ORIGINS, TTL values, Delta credentials. lru_cache prevents re-reading. models.py: Pydantic models for all API responses — OptionLeg, ChainRow, OptionChainResponse, Greeks etc.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--models)"></div>
+            config.py + models.py
+          </div>
+          <div class="node-sub">
+            Settings reads .env with lru_cache<br>
+            CORS_ORIGINS, TTLs, API keys<br>
+            Pydantic models validate all data<br>
+            OptionLeg, ChainRow, SpotResponse
+          </div>
+        </div>
+      </div>
+
+      <!-- EXTERNAL LAYER -->
+      <div class="layer">
+        <div class="layer-label">External &amp; Storage Layer</div>
+
+        <div class="node node-redis"
+             data-tip="Redis Cache" data-desc="redis:7-alpine in Docker. In-memory key-value cache. TTLs: spot=5s, chain=15s, expiries=300s, candles=60s. Falls back gracefully if unavailable — redis_cache.py handles None. Persistent via redis_data Docker volume.">
+          <div class="node-title">
+            <div class="node-dot pulse" style="background:var(--redis)"></div>
+            Redis Cache
+          </div>
+          <div class="node-sub">
+            port: 6379<br>
+            spot TTL: 5s<br>
+            chain TTL: 15s<br>
+            expiries TTL: 300s<br>
+            candles TTL: 60s<br>
+            Fallback: in-memory if down
+          </div>
+          <div class="node-tag" style="background:rgba(244,63,94,0.1);color:var(--redis);border:1px solid rgba(244,63,94,0.3)">CACHE</div>
+        </div>
+
+        <div class="node"
+             style="background:rgba(244,63,94,0.06);border-color:rgba(244,63,94,0.2);"
+             data-tip="redis_cache.py" data-desc="Async wrapper around redis.asyncio. init_cache() connects on startup, close_cache() disconnects on shutdown. get(key) returns parsed JSON or None. set(key, value, ttl) stores JSON. All errors caught silently — cache miss just calls API.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--redis)"></div>
+            redis_cache.py
+          </div>
+          <div class="node-sub">
+            init_cache() / close_cache()<br>
+            get(key) → JSON or None<br>
+            set(key, value, ttl)<br>
+            Silent fallback on error
+          </div>
+        </div>
+
+        <div class="node node-delta"
+             data-tip="Delta Exchange API" data-desc="delta_client.py wraps httpx.AsyncClient. HMAC-SHA256 authentication using API key + secret. Endpoints: /v2/tickers/{symbol} for prices, /v2/products for option listings, /v2/history/candles for OHLCV. Falls back to demo data if no API key.">
+          <div class="node-title">
+            <div class="node-dot pulse" style="background:var(--delta)"></div>
+            Delta Exchange API
+          </div>
+          <div class="node-sub">
+            https://api.delta.exchange<br>
+            Auth: HMAC-SHA256 signed headers<br>
+            /v2/products → option listings<br>
+            /v2/tickers → live prices<br>
+            /v2/history/candles → OHLCV
+          </div>
+          <div class="node-tag" style="background:rgba(251,191,36,0.1);color:var(--delta);border:1px solid rgba(251,191,36,0.3)">EXTERNAL API</div>
+        </div>
+
+        <div class="node node-delta"
+             data-tip="delta_client.py" data-desc="DeltaClient class wraps httpx.AsyncClient. _auth_headers() builds HMAC signature: method+timestamp+path signed with API secret. get_spot_price() tries multiple symbols. get_btc_option_products() fetches calls+puts. get_ticker(symbol) for live price. get_candles() for OHLCV.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--delta)"></div>
+            delta_client.py
+          </div>
+          <div class="node-sub">
+            DeltaClient (httpx.AsyncClient)<br>
+            HMAC-SHA256 auth headers<br>
+            get_spot_price()<br>
+            get_btc_option_products()<br>
+            get_ticker(symbol)<br>
+            get_candles(symbol, tf)
+          </div>
+        </div>
+
+        <div class="node"
+             style="background:rgba(30,45,69,0.4);border-color:rgba(30,45,69,0.8);"
+             data-tip="Docker Volumes" data-desc="redis_data named volume persists Redis data to /var/lib/docker/volumes/redis_data/. Survives docker compose down. Data is lost only with docker compose down -v.">
+          <div class="node-title">
+            <div class="node-dot" style="background:var(--dim)"></div>
+            Docker Volume (redis_data)
+          </div>
+          <div class="node-sub">
+            Persists Redis data<br>
+            Survives container restarts<br>
+            Lost only on: down -v
+          </div>
+          <div class="node-tag" style="background:rgba(51,65,85,0.3);color:var(--dim);border:1px solid var(--border)">STORAGE</div>
+        </div>
+      </div>
+
+    </div><!-- /arch-grid -->
+
+    <!-- SVG Connection Diagram -->
+    <div class="flow-container">
+      <div class="flow-title">Connection Map — Who Calls What</div>
+      <svg class="svg-flow" viewBox="0 0 1100 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arr-blue"   markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/></marker>
+          <marker id="arr-purple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#a78bfa"/></marker>
+          <marker id="arr-green"  markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#22c55e"/></marker>
+          <marker id="arr-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#fb923c"/></marker>
+          <marker id="arr-red"    markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f43f5e"/></marker>
+          <marker id="arr-yellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#fbbf24"/></marker>
+          <marker id="arr-teal"   markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#34d399"/></marker>
+          <marker id="arr-grey"   markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#475569"/></marker>
+        </defs>
+
+        <!-- Boxes -->
+        <!-- Browser -->
+        <rect x="20" y="170" width="120" height="50" rx="6" fill="rgba(59,130,246,0.1)" stroke="rgba(59,130,246,0.5)" stroke-width="1.5"/>
+        <text x="80" y="191" text-anchor="middle" fill="#3b82f6" font-family="JetBrains Mono" font-size="10" font-weight="600">BROWSER</text>
+        <text x="80" y="207" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="9">localhost:3000</text>
+
+        <!-- Vite -->
+        <rect x="185" y="100" width="120" height="50" rx="6" fill="rgba(167,139,250,0.1)" stroke="rgba(167,139,250,0.5)" stroke-width="1.5"/>
+        <text x="245" y="121" text-anchor="middle" fill="#a78bfa" font-family="JetBrains Mono" font-size="10" font-weight="600">VITE PROXY</text>
+        <text x="245" y="137" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="9">dev only</text>
+
+        <!-- Nginx -->
+        <rect x="185" y="240" width="120" height="50" rx="6" fill="rgba(34,197,94,0.1)" stroke="rgba(34,197,94,0.5)" stroke-width="1.5"/>
+        <text x="245" y="261" text-anchor="middle" fill="#22c55e" font-family="JetBrains Mono" font-size="10" font-weight="600">NGINX</text>
+        <text x="245" y="277" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="9">docker only</text>
+
+        <!-- FastAPI -->
+        <rect x="380" y="170" width="130" height="50" rx="6" fill="rgba(251,146,60,0.1)" stroke="rgba(251,146,60,0.5)" stroke-width="1.5"/>
+        <text x="445" y="191" text-anchor="middle" fill="#fb923c" font-family="JetBrains Mono" font-size="10" font-weight="600">FASTAPI</text>
+        <text x="445" y="207" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="9">:8000 / 2 workers</text>
+
+        <!-- Service -->
+        <rect x="570" y="80" width="145" height="50" rx="6" fill="rgba(52,211,153,0.1)" stroke="rgba(52,211,153,0.4)" stroke-width="1.5"/>
+        <text x="642" y="101" text-anchor="middle" fill="#34d399" font-family="JetBrains Mono" font-size="9" font-weight="600">option_chain_service</text>
+        <text x="642" y="117" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="8">asyncio.gather()</text>
+
+        <!-- Greeks -->
+        <rect x="570" y="170" width="145" height="50" rx="6" fill="rgba(52,211,153,0.08)" stroke="rgba(52,211,153,0.3)" stroke-width="1.5"/>
+        <text x="642" y="191" text-anchor="middle" fill="#34d399" font-family="JetBrains Mono" font-size="9" font-weight="600">greeks.py</text>
+        <text x="642" y="207" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="8">Black-Scholes + IV</text>
+
+        <!-- Redis -->
+        <rect x="570" y="270" width="145" height="50" rx="6" fill="rgba(244,63,94,0.1)" stroke="rgba(244,63,94,0.5)" stroke-width="1.5"/>
+        <text x="642" y="291" text-anchor="middle" fill="#f43f5e" font-family="JetBrains Mono" font-size="10" font-weight="600">REDIS</text>
+        <text x="642" y="307" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="9">:6379 — TTL cache</text>
+
+        <!-- Delta -->
+        <rect x="790" y="80" width="140" height="50" rx="6" fill="rgba(251,191,36,0.1)" stroke="rgba(251,191,36,0.5)" stroke-width="1.5"/>
+        <text x="860" y="101" text-anchor="middle" fill="#fbbf24" font-family="JetBrains Mono" font-size="9" font-weight="600">DELTA EXCHANGE</text>
+        <text x="860" y="117" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="8">HTTPS / HMAC auth</text>
+
+        <!-- delta_client -->
+        <rect x="790" y="170" width="140" height="50" rx="6" fill="rgba(251,191,36,0.06)" stroke="rgba(251,191,36,0.3)" stroke-width="1.5"/>
+        <text x="860" y="191" text-anchor="middle" fill="#fbbf24" font-family="JetBrains Mono" font-size="9" font-weight="600">delta_client.py</text>
+        <text x="860" y="207" text-anchor="middle" fill="#64748b" font-family="JetBrains Mono" font-size="8">httpx.AsyncClient</text>
+
+        <!-- Volume -->
+        <rect x="790" y="270" width="140" height="50" rx="6" fill="rgba(30,45,69,0.6)" stroke="rgba(51,65,85,0.8)" stroke-width="1.5"/>
+        <text x="860" y="291" text-anchor="middle" fill="#475569" font-family="JetBrains Mono" font-size="9" font-weight="600">DOCKER VOLUME</text>
+        <text x="860" y="307" text-anchor="middle" fill="#334155" font-family="JetBrains Mono" font-size="8">redis_data (persist)</text>
+
+        <!-- ── Arrows ── -->
+        <!-- Browser → Vite (dev) -->
+        <path d="M140 183 L185 125" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr-purple)"/>
+        <text x="152" y="147" fill="#a78bfa" font-family="JetBrains Mono" font-size="8" transform="rotate(-35,152,147)">dev only</text>
+
+        <!-- Browser → Nginx (docker) -->
+        <path d="M140 197 L185 265" stroke="#22c55e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr-green)"/>
+        <text x="143" y="242" fill="#22c55e" font-family="JetBrains Mono" font-size="8" transform="rotate(35,143,242)">docker</text>
+
+        <!-- Vite → FastAPI -->
+        <path d="M305 125 Q350 125 380 185" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arr-purple)"/>
+        <text x="320" y="147" fill="#a78bfa" font-family="JetBrains Mono" font-size="8">/api proxy</text>
+
+        <!-- Nginx → FastAPI -->
+        <path d="M305 265 Q350 265 380 205" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arr-green)"/>
+        <text x="320" y="250" fill="#22c55e" font-family="JetBrains Mono" font-size="8">proxy_pass</text>
+
+        <!-- FastAPI → service -->
+        <path d="M510 183 L570 105" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+        <text x="524" y="135" fill="#fb923c" font-family="JetBrains Mono" font-size="8">calls</text>
+
+        <!-- FastAPI → greeks -->
+        <path d="M510 195 L570 195" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-teal)"/>
+        <text x="524" y="188" fill="#34d399" font-family="JetBrains Mono" font-size="8">compute</text>
+
+        <!-- FastAPI → Redis (via service) -->
+        <path d="M510 207 Q540 280 570 285" stroke="#f43f5e" stroke-width="1.5" marker-end="url(#arr-red)"/>
+        <text x="515" y="260" fill="#f43f5e" font-family="JetBrains Mono" font-size="8">cache R/W</text>
+
+        <!-- service → delta_client -->
+        <path d="M715 105 L790 195" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr-yellow)"/>
+        <text x="732" y="142" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" transform="rotate(45,732,142)">via client</text>
+
+        <!-- delta_client → Delta Exchange -->
+        <path d="M860 170 L860 130" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr-yellow)"/>
+        <text x="865" y="155" fill="#fbbf24" font-family="JetBrains Mono" font-size="8">HTTPS</text>
+
+        <!-- Redis → Volume -->
+        <path d="M715 300 L790 295" stroke="#475569" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arr-grey)"/>
+        <text x="730" y="292" fill="#475569" font-family="JetBrains Mono" font-size="8">persist</text>
+
+        <!-- service → greeks -->
+        <path d="M642 130 L642 170" stroke="#34d399" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-teal)"/>
+
+        <!-- Labels at top -->
+        <text x="80"  y="60" text-anchor="middle" fill="#475569" font-family="JetBrains Mono" font-size="9" letter-spacing="2">YOUR MACHINE</text>
+        <text x="245" y="60" text-anchor="middle" fill="#475569" font-family="JetBrains Mono" font-size="9" letter-spacing="2">PROXY LAYER</text>
+        <text x="445" y="60" text-anchor="middle" fill="#475569" font-family="JetBrains Mono" font-size="9" letter-spacing="2">API LAYER</text>
+        <text x="642" y="60" text-anchor="middle" fill="#475569" font-family="JetBrains Mono" font-size="9" letter-spacing="2">LOGIC LAYER</text>
+        <text x="860" y="60" text-anchor="middle" fill="#475569" font-family="JetBrains Mono" font-size="9" letter-spacing="2">EXTERNAL</text>
+
+        <!-- Divider lines -->
+        <line x1="165" y1="50" x2="165" y2="380" stroke="#1e2d45" stroke-width="1" stroke-dasharray="4,4"/>
+        <line x1="365" y1="50" x2="365" y2="380" stroke="#1e2d45" stroke-width="1" stroke-dasharray="4,4"/>
+        <line x1="560" y1="50" x2="560" y2="380" stroke="#1e2d45" stroke-width="1" stroke-dasharray="4,4"/>
+        <line x1="775" y1="50" x2="775" y2="380" stroke="#1e2d45" stroke-width="1" stroke-dasharray="4,4"/>
+      </svg>
+    </div>
+
+  </div><!-- /overview -->
+
+
+  <!-- ═══ CALL CHAIN TAB ══════════════════════════════════════════════ -->
+  <div id="tab-callchain" class="view">
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+
+      <!-- Flow 1: Option Chain Request -->
+      <div class="flow-container">
+        <div class="flow-title">Flow 1 — GET /api/v1/options?expiry=2025-03-28</div>
+        <div class="call-chain">
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(56,189,248,0.1);color:var(--react);border:1px solid rgba(56,189,248,0.3)">useOptionChain</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">calls every 15s <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--react)">useOptionChain.ts</div>
+                <div class="step-card-detail">Auto-refreshes with setInterval(fetch, 15_000). Calls api.getOptionChain(expiry).</div>
+                <div class="step-card-code">api.getOptionChain(expiry)<br>→ fetcher&lt;OptionChainResponse&gt;('/options', {expiry})</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(167,139,250,0.1);color:var(--vite);border:1px solid rgba(167,139,250,0.3)">api.ts</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">fetch() <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--vite)">api.ts → Vite proxy</div>
+                <div class="step-card-detail">fetch('/api/v1/options?expiry=...') hits Vite proxy which forwards to localhost:8000</div>
+                <div class="step-card-code">BASE = '/api/v1'<br>fetch('/api/v1/options?expiry=2025-03-28')</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(251,146,60,0.1);color:var(--fastapi);border:1px solid rgba(251,146,60,0.3)">options.py</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">router handles <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--fastapi)">GET /options router</div>
+                <div class="step-card-detail">Validates expiry date is in future. Calls get_option_chain(expiry).</div>
+                <div class="step-card-code">if expiry &lt; date.today(): raise 400<br>return await get_option_chain(expiry)</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(244,63,94,0.1);color:var(--redis);border:1px solid rgba(244,63,94,0.3)">service</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">check cache first <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--redis)">redis_cache.get("chain:BTC:2025-03-28")</div>
+                <div class="step-card-detail">Cache hit → return instantly. Cache miss → fetch from Delta Exchange.</div>
+                <div class="step-card-code">cached = await redis_cache.get(cache_key)<br>if cached: return OptionChainResponse(**cached)</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(251,191,36,0.1);color:var(--delta);border:1px solid rgba(251,191,36,0.3)">service</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">parallel fetch <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--delta)">asyncio.gather() — parallel Delta API calls</div>
+                <div class="step-card-detail">Fetches spot price AND all option products simultaneously. Then batches ticker requests 20 at a time.</div>
+                <div class="step-card-code">spot, products = await asyncio.gather(<br>  client.get_spot_price(),<br>  client.get_btc_option_products()<br>)</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(52,211,153,0.1);color:var(--greeks);border:1px solid rgba(52,211,153,0.3)">service</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">for each strike <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--greeks)">compute_greeks() for every call + put</div>
+                <div class="step-card-detail">Gets IV from exchange mark_iv or Newton-Raphson. Then computes Δ, Γ, Θ, V, ρ with Black-Scholes.</div>
+                <div class="step-card-code">iv = float(mark_iv)/100 or implied_vol(...)<br>g = compute_greeks(spot,K,T,r,iv,type)<br>→ delta, gamma, theta, vega, rho</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(244,63,94,0.1);color:var(--redis);border:1px solid rgba(244,63,94,0.3)">service</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">store result <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--redis)">redis_cache.set(key, data, TTL=15s)</div>
+                <div class="step-card-detail">Stores full chain response. Next request within 15s returns instantly from cache.</div>
+                <div class="step-card-code">await redis_cache.set(cache_key, resp.model_dump(), 15)</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(56,189,248,0.1);color:var(--react);border:1px solid rgba(56,189,248,0.3)">React</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">renders data <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--react)">OptionChainTable renders strikes</div>
+                <div class="step-card-detail">setData(res) updates state. OptionChainTable shows all strikes ±10 around ATM. User clicks LTP to see PremiumChart.</div>
+                <div class="step-card-code">setData(res) → re-render<br>OptionChainTable chain={chain.chain}<br>onSelectLeg → setTab('premium')</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Flow 2: Spot + Expiries on load -->
+      <div class="flow-container">
+        <div class="flow-title">Flow 2 — App Load (useExpiries)</div>
+        <div class="call-chain">
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(56,189,248,0.1);color:var(--react);border:1px solid rgba(56,189,248,0.3)">App.tsx</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">on mount <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--react)">useExpiries() hook mounts</div>
+                <div class="step-card-detail">Called once on App mount. Fetches expiry list and spot price together.</div>
+                <div class="step-card-code">const {expiries, spot, loading} = useExpiries()</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(251,146,60,0.1);color:var(--fastapi);border:1px solid rgba(251,146,60,0.3)">FastAPI</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">two routes <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--fastapi)">GET /expiries → list_expiries()</div>
+                <div class="step-card-detail">Checks Redis first (TTL 300s). If miss, calls Delta for products + spot in parallel. Parses settlement times, filters future dates.</div>
+                <div class="step-card-code">cached = await redis_cache.get("expiries:BTC")<br>spot, products = await asyncio.gather(...)<br>→ ExpiryListResponse</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(251,146,60,0.1);color:var(--fastapi);border:1px solid rgba(251,146,60,0.3)">FastAPI</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">spot route <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--fastapi)">GET /spot → spot_price()</div>
+                <div class="step-card-detail">Checks Redis (TTL 5s). If miss, tries BTCUSDT → BTCUSD → BTC_USDT symbols until one works. Falls back to 95000 demo.</div>
+                <div class="step-card-code">for sym in ["BTCUSDT","BTCUSD","BTC_USDT"]:<br>  try: return float(ticker.close)<br>fallback: return 95000.0</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="call-step">
+            <div class="step-caller">
+              <span class="step-caller-badge" style="background:rgba(56,189,248,0.1);color:var(--react);border:1px solid rgba(56,189,248,0.3)">App.tsx</span>
+            </div>
+            <div class="step-body">
+              <div class="step-arrow">populates UI <div class="arrow-line"></div></div>
+              <div class="step-card">
+                <div class="step-card-title" style="color:var(--react)">Expiry dropdown + BTC price header</div>
+                <div class="step-card-detail">setExpiries(r.expiries) fills dropdown. setSpot(r.spot_price) shows in topbar. First expiry auto-selected via useEffect.</div>
+                <div class="step-card-code">useEffect(() => {<br>  if (expiries.length > 0 && !selectedExpiry)<br>    setSelectedExpiry(expiries[0].date)<br>}, [expiries])</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Flow 3 -->
+        <div style="margin-top:24px">
+          <div class="flow-title">Flow 3 — No API Key (Demo Mode)</div>
+          <div class="call-chain">
+            <div class="call-step">
+              <div class="step-caller">
+                <span class="step-caller-badge" style="background:rgba(251,191,36,0.1);color:var(--delta);border:1px solid rgba(251,191,36,0.3)">delta_client</span>
+              </div>
+              <div class="step-body">
+                <div class="step-arrow">no key check <div class="arrow-line"></div></div>
+                <div class="step-card">
+                  <div class="step-card-title" style="color:var(--delta)">_auth_headers() returns {}</div>
+                  <div class="step-card-detail">If DELTA_API_KEY is empty, returns empty headers. Public endpoints still work. Private endpoints return 401.</div>
+                </div>
+              </div>
+            </div>
+            <div class="call-step">
+              <div class="step-caller">
+                <span class="step-caller-badge" style="background:rgba(52,211,153,0.1);color:var(--greeks);border:1px solid rgba(52,211,153,0.3)">service</span>
+              </div>
+              <div class="step-body">
+                <div class="step-arrow">fallback <div class="arrow-line"></div></div>
+                <div class="step-card">
+                  <div class="step-card-title" style="color:var(--greeks)">_build_demo_chain() generates synthetic data</div>
+                  <div class="step-card-detail">Creates 21 strikes around ATM. Applies IV smile curve. Computes real Black-Scholes Greeks. Realistic-looking data even without API key.</div>
+                  <div class="step-card-code">if not exp_products:<br>  return _build_demo_chain(expiry, spot)</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ═══ FILE MAP TAB ══════════════════════════════════════════════ -->
+  <div id="tab-filemap" class="view">
+    <div class="file-tree">
+
+      <div class="file-section">
+        <div class="file-section-title" style="color:var(--fastapi)">Backend — Python</div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--fastapi)">app/main.py</div>
+            <div class="file-calls">imports: expiries, options, plot_data, health, redis_cache, settings</div>
+          </div>
+          <div class="file-role">Entry point. Creates FastAPI app. Registers CORSMiddleware, GZipMiddleware. Registers all 4 routers. Lifespan connects/disconnects Redis.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--fastapi)">app/api/options.py</div>
+            <div class="file-calls">calls: option_chain_service.get_option_chain()</div>
+          </div>
+          <div class="file-role">GET /options?expiry=. Validates date is future. Raises 400 if past. Raises 502 if Delta API fails.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--fastapi)">app/api/expiries.py</div>
+            <div class="file-calls">calls: get_expiries(), get_spot()</div>
+          </div>
+          <div class="file-role">GET /expiries and GET /spot. Both delegate to option_chain_service.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--fastapi)">app/api/plot_data.py</div>
+            <div class="file-calls">calls: redis_cache, get_option_chain(), delta_client.get_candles(), compute_greeks()</div>
+          </div>
+          <div class="file-role">3 endpoints: /premium (OHLCV candles), /iv-smile (IV across strikes), /iv-rv (IV vs realised vol series). Has own Redis caching. Generates demo data if no API key.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--greeks)">app/services/option_chain_service.py</div>
+            <div class="file-calls">calls: redis_cache, delta_client, compute_greeks, implied_vol</div>
+          </div>
+          <div class="file-role">Core business logic. get_option_chain(): Redis check → parallel Delta fetch → batch ticker requests (20 at a time) → compute Greeks → cache result. Also get_expiries(), get_spot(), _build_demo_chain().</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--greeks)">app/services/delta_client.py</div>
+            <div class="file-calls">calls: httpx.AsyncClient → api.delta.exchange</div>
+          </div>
+          <div class="file-role">HTTP client for Delta Exchange. HMAC-SHA256 auth. Methods: get_spot_price(), get_btc_option_products(), get_ticker(sym), get_candles(). Singleton via get_delta_client().</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--greeks)">app/core/greeks.py</div>
+            <div class="file-calls">pure math — no external calls</div>
+          </div>
+          <div class="file-role">Black-Scholes from scratch. compute_greeks(S,K,T,r,σ) → Greeks dataclass. implied_vol() → Newton-Raphson 200 iterations. _norm_cdf(), _norm_pdf() implemented without scipy.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--redis)">app/cache/redis_cache.py</div>
+            <div class="file-calls">calls: redis.asyncio</div>
+          </div>
+          <div class="file-role">Async Redis wrapper. init_cache() / close_cache() for lifespan. get(key) → JSON or None. set(key, value, ttl). Silent fallback — all errors caught, returns None.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--models)">app/core/config.py</div>
+            <div class="file-calls">reads: .env file</div>
+          </div>
+          <div class="file-role">Pydantic BaseSettings. All config: DELTA keys, REDIS_URL, TTLs, CORS_ORIGINS, RISK_FREE_RATE. lru_cache singleton. Extra fields ignored so .env can have comments.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--models)">app/models/models.py</div>
+            <div class="file-calls">used by: all routers + services</div>
+          </div>
+          <div class="file-role">All Pydantic response models. OptionLeg (all Greeks + prices), ChainRow (call+put pair), OptionChainResponse, ExpiryListResponse, SpotResponse, CandleBar, IVSmileResponse, IVRVResponse.</div>
+        </div>
+
+      </div>
+
+      <div class="file-section">
+        <div class="file-section-title" style="color:var(--react)">Frontend — TypeScript / React</div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--react)">src/App.tsx</div>
+            <div class="file-calls">uses: useExpiries, useOptionChain, all components</div>
+          </div>
+          <div class="file-role">Root component. Manages state: selectedExpiry, selectedLeg, tab. Renders topbar (spot, expiry dropdown, refresh), main panel (chain/premium/iv tabs), charts aside, footer info bar.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--react)">src/hooks/useOptionChain.ts</div>
+            <div class="file-calls">calls: api.getExpiries(), api.getOptionChain()</div>
+          </div>
+          <div class="file-role">useExpiries(): fetches on mount, returns expiries + spot. useOptionChain(expiry, autoRefresh): fetches on expiry change, auto-refreshes every 15s with setInterval, exposes refetch().</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--react)">src/services/api.ts</div>
+            <div class="file-calls">calls: fetch() → /api/v1/*</div>
+          </div>
+          <div class="file-role">All HTTP calls. BASE='/api/v1'. fetcher() generic wrapper handles errors. Exports: getSpot, getExpiries, getOptionChain, getPremiumChart, getIVSmile, getIVRV.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--react)">src/components/chain/OptionChainTable.tsx</div>
+            <div class="file-calls">props: chain, spotPrice, atmStrike, onSelectLeg</div>
+          </div>
+          <div class="file-role">Renders call/strike/put table. Shows ±10 strikes around ATM (configurable). Filter by strike input. Highlights ATM row. Click LTP to select leg → triggers PremiumChart.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--react)">src/components/charts/PremiumChart.tsx</div>
+            <div class="file-calls">calls: api.getPremiumChart()</div>
+          </div>
+          <div class="file-role">OHLCV candlestick chart for selected option contract. Fetches /plot-data/premium when expiry or selectedLeg changes. Uses Recharts ComposedChart.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--react)">src/components/charts/IVChart.tsx</div>
+            <div class="file-calls">calls: api.getIVSmile(), api.getIVRV()</div>
+          </div>
+          <div class="file-role">Two charts: IV Smile (call IV + put IV vs strike) and IV vs Realised Vol time series. Both use Recharts LineChart. Fetches on expiry change.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--vite)">vite.config.ts</div>
+            <div class="file-calls">configures: Vite dev server</div>
+          </div>
+          <div class="file-role">port:3000. Proxy rule: /api → http://localhost:8000. changeOrigin:true. Only active during npm run dev. Not included in production build.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--nginx)">docker/nginx.conf</div>
+            <div class="file-calls">routes: / and /api/</div>
+          </div>
+          <div class="file-role">listen 80. Serves dist/ files. try_files fixes React Router refresh. location /api/ proxies to backend:8000. Sets Host and X-Real-IP headers.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--nginx)">docker/Dockerfile.frontend</div>
+            <div class="file-calls">stages: builder → nginx</div>
+          </div>
+          <div class="file-role">Multi-stage build. Stage 1: node:20-alpine runs npm ci + npm run build → produces dist/. Stage 2: nginx:alpine copies only dist/ + nginx.conf. Final image ~25MB.</div>
+        </div>
+
+        <div class="file-item">
+          <div>
+            <div class="file-name" style="color:var(--fastapi)">docker/Dockerfile.backend</div>
+            <div class="file-calls">base: python:3.12-slim</div>
+          </div>
+          <div class="file-role">COPY requirements.txt first (layer cache trick). RUN pip install. COPY app/. CMD uvicorn with 2 workers. EXPOSE 8000.</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ═══ DATA FLOW TAB ══════════════════════════════════════════════ -->
+  <div id="tab-dataflow" class="view">
+
+    <div class="data-flows">
+
+      <div class="data-flow-card">
+        <div class="data-flow-title">
+          <div class="node-dot" style="background:var(--redis)"></div>
+          Redis Cache Strategy
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(244,63,94,0.15);color:var(--redis)">1</div>
+          <div><div class="flow-text">Request arrives at FastAPI endpoint</div></div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(244,63,94,0.15);color:var(--redis)">2</div>
+          <div>
+            <div class="flow-text">Check Redis with key like <span class="highlight-red">chain:BTC:2025-03-28</span></div>
+            <div class="flow-code">cached = await redis_cache.get(cache_key)</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(52,211,153,0.15);color:var(--greeks)">✓</div>
+          <div><div class="flow-text"><strong>Cache HIT</strong> → return immediately, Delta API not called, &lt;1ms response</div></div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,191,36,0.15);color:var(--delta)">✗</div>
+          <div><div class="flow-text"><strong>Cache MISS</strong> → fetch from Delta Exchange, compute Greeks, store with TTL</div></div>
+        </div>
+        <div style="margin-top:14px;padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--border)">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);line-height:1.9">
+            <span style="color:var(--redis)">spot:BTC</span>         → TTL <span style="color:var(--text)">5s</span>   (changes every second)<br>
+            <span style="color:var(--redis)">chain:BTC:{date}</span>  → TTL <span style="color:var(--text)">15s</span>  (balance freshness/rate limits)<br>
+            <span style="color:var(--redis)">expiries:BTC</span>      → TTL <span style="color:var(--text)">300s</span> (rarely changes)<br>
+            <span style="color:var(--redis)">candles:{...}</span>     → TTL <span style="color:var(--text)">60s</span>  (historical OHLCV)
+          </div>
+        </div>
+      </div>
+
+      <div class="data-flow-card">
+        <div class="data-flow-title">
+          <div class="node-dot" style="background:var(--greeks)"></div>
+          Black-Scholes Greeks Computation
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(52,211,153,0.15);color:var(--greeks)">1</div>
+          <div>
+            <div class="flow-text">Get market price and spot from Delta ticker</div>
+            <div class="flow-code">last_price, bid, ask, mark_iv = ticker data</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(52,211,153,0.15);color:var(--greeks)">2</div>
+          <div>
+            <div class="flow-text">Get IV: use exchange <span class="highlight-teal">mark_iv</span> if available, else Newton-Raphson</div>
+            <div class="flow-code">iv = float(mark_iv)/100<br>   OR implied_vol(price, S, K, T, r, type)</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(52,211,153,0.15);color:var(--greeks)">3</div>
+          <div>
+            <div class="flow-text">Compute d1, d2 using Black-Scholes formula</div>
+            <div class="flow-code">d1 = (log(S/K) + (r + σ²/2)T) / (σ√T)<br>d2 = d1 - σ√T</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(52,211,153,0.15);color:var(--greeks)">4</div>
+          <div>
+            <div class="flow-text">Return Greeks dataclass</div>
+            <div class="flow-code">delta=N(d1)  gamma=n(d1)/(S·σ·√T)<br>theta=(per day)  vega=(per 1% IV)</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-flow-card">
+        <div class="data-flow-title">
+          <div class="node-dot" style="background:var(--delta)"></div>
+          Delta Exchange Auth — HMAC-SHA256
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,191,36,0.15);color:var(--delta)">1</div>
+          <div>
+            <div class="flow-text">Build message string from method + timestamp + path</div>
+            <div class="flow-code">msg = "GET" + "1705000000" + "/v2/tickers/BTCUSDT"</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,191,36,0.15);color:var(--delta)">2</div>
+          <div>
+            <div class="flow-text">Sign with API secret using HMAC-SHA256</div>
+            <div class="flow-code">sig = hmac.new(API_SECRET, msg, sha256).hexdigest()</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,191,36,0.15);color:var(--delta)">3</div>
+          <div>
+            <div class="flow-text">Attach to request headers</div>
+            <div class="flow-code">headers = {"api-key": KEY, "timestamp": ts, "signature": sig}</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,191,36,0.15);color:var(--delta)">4</div>
+          <div><div class="flow-text">No API key → empty headers → public endpoints work in demo mode</div></div>
+        </div>
+      </div>
+
+      <div class="data-flow-card">
+        <div class="data-flow-title">
+          <div class="node-dot" style="background:var(--vite)"></div>
+          CORS — Who Solves It and When
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(167,139,250,0.15);color:var(--vite)">DEV</div>
+          <div>
+            <div class="flow-text"><strong>npm run dev</strong> — Vite proxy intercepts /api calls</div>
+            <div class="flow-code">Browser→:3000/api → Vite → :8000/api<br>Browser sees only :3000 → no CORS</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(34,197,94,0.15);color:var(--nginx)">DOC</div>
+          <div>
+            <div class="flow-text"><strong>docker compose up</strong> — Nginx proxy_pass forwards /api/</div>
+            <div class="flow-code">Browser→:3000/api → Nginx → backend:8000<br>Browser sees only :3000 → no CORS</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,146,60,0.15);color:var(--fastapi)">MID</div>
+          <div>
+            <div class="flow-text"><strong>CORSMiddleware</strong> — for Postman/direct API access</div>
+            <div class="flow-code">CORS_ORIGINS=["http://localhost:3000","http://localhost:5173"]<br>Allows direct calls without proxy</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(52,211,153,0.15);color:var(--greeks)">KEY</div>
+          <div><div class="flow-text">All three solve same problem in different contexts. Never two active at once for the same request.</div></div>
+        </div>
+      </div>
+
+      <div class="data-flow-card">
+        <div class="data-flow-title">
+          <div class="node-dot" style="background:var(--nginx)"></div>
+          Docker Startup Order
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(244,63,94,0.15);color:var(--redis)">1</div>
+          <div><div class="flow-text"><strong>Redis starts</strong> — docker compose up launches redis:7-alpine</div></div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(244,63,94,0.15);color:var(--redis)">2</div>
+          <div>
+            <div class="flow-text"><strong>Redis healthcheck runs</strong> — redis-cli ping every 5s, timeout 3s, 5 retries</div>
+            <div class="flow-code">test: ["CMD", "redis-cli", "ping"] → PONG</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(251,146,60,0.15);color:var(--fastapi)">3</div>
+          <div>
+            <div class="flow-text"><strong>Backend starts</strong> — only after Redis is healthy (condition: service_healthy)</div>
+            <div class="flow-code">depends_on: redis: condition: service_healthy</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(34,197,94,0.15);color:var(--nginx)">4</div>
+          <div>
+            <div class="flow-text"><strong>Frontend starts</strong> — after backend container starts (no healthcheck)</div>
+            <div class="flow-code">depends_on: - backend</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-flow-card">
+        <div class="data-flow-title">
+          <div class="node-dot" style="background:var(--react)"></div>
+          React Auto-Refresh Flow
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(56,189,248,0.15);color:var(--react)">1</div>
+          <div>
+            <div class="flow-text">User selects expiry from dropdown in topbar</div>
+            <div class="flow-code">setSelectedExpiry(e.target.value)</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(56,189,248,0.15);color:var(--react)">2</div>
+          <div>
+            <div class="flow-text">useOptionChain(expiry, autoRefresh=true) triggers</div>
+            <div class="flow-code">useEffect runs → fetch() called immediately</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(56,189,248,0.15);color:var(--react)">3</div>
+          <div>
+            <div class="flow-text">setInterval set for every 15 seconds</div>
+            <div class="flow-code">timerRef.current = setInterval(fetch, 15_000)</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(56,189,248,0.15);color:var(--react)">4</div>
+          <div>
+            <div class="flow-text">On expiry change old interval cleared, new one set</div>
+            <div class="flow-code">return () => clearInterval(timerRef.current)</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num" style="background:rgba(244,63,94,0.15);color:var(--redis)">5</div>
+          <div>
+            <div class="flow-text">FastAPI returns cached data for 15s → aligns with Redis TTL</div>
+            <div class="flow-code">CACHE_TTL_CHAIN = 15  ← matches auto-refresh</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div><!-- /page -->
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip">
+  <div class="tooltip-title" id="tooltip-title"></div>
+  <div class="tooltip-body" id="tooltip-body"></div>
+</div>
+
+<script>
+  // Tab switching
+  function switchTab(name) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+  }
+
+  // Tooltip
+  const tooltip = document.getElementById('tooltip');
+  const ttTitle = document.getElementById('tooltip-title');
+  const ttBody  = document.getElementById('tooltip-body');
+
+  document.querySelectorAll('[data-tip]').forEach(el => {
+    el.addEventListener('mouseenter', e => {
+      ttTitle.textContent = el.dataset.tip;
+      ttBody.textContent  = el.dataset.desc || '';
+      tooltip.classList.add('show');
+    });
+    el.addEventListener('mousemove', e => {
+      let x = e.clientX + 16, y = e.clientY + 16;
+      if (x + 280 > window.innerWidth)  x = e.clientX - 280;
+      if (y + 120 > window.innerHeight) y = e.clientY - 120;
+      tooltip.style.left = x + 'px';
+      tooltip.style.top  = y + 'px';
+    });
+    el.addEventListener('mouseleave', () => {
+      tooltip.classList.remove('show');
+    });
+  });
+</script>
+</body>
+</html>

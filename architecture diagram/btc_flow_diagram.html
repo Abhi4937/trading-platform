@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BTC Options — Backend Flow Diagram</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Syne:wght@400;600;700;800&display=swap');
+
+  :root {
+    --bg:        #07090f;
+    --bg2:       #0d1018;
+    --bg3:       #111520;
+    --border:    #1c2235;
+    --border2:   #242b40;
+
+    --white:     #e8edf8;
+    --muted:     #4a5578;
+    --dim:       #2a3150;
+
+    /* Layer colours */
+    --c-entry:   #3b82f6;   /* browser/entry */
+    --c-main:    #8b5cf6;   /* main.py */
+    --c-api:     #06b6d4;   /* api layer */
+    --c-svc:     #10b981;   /* service layer */
+    --c-delta:   #f59e0b;   /* delta client */
+    --c-cache:   #f43f5e;   /* redis */
+    --c-core:    #a78bfa;   /* greeks/config */
+    --c-model:   #64748b;   /* models */
+    --c-ext:     #fb923c;   /* external Delta API */
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--white);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    padding: 32px 24px 60px;
+  }
+
+  /* ── HEADER ── */
+  .header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  .header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    color: var(--white);
+    margin-bottom: 6px;
+  }
+  .header h1 span { color: var(--c-entry); }
+  .header p {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+
+  /* ── TAB BAR ── */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    justify-content: center;
+    margin-bottom: 40px;
+    flex-wrap: wrap;
+  }
+  .tab {
+    padding: 8px 20px;
+    border: 1px solid var(--border2);
+    background: var(--bg2);
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.15s;
+    letter-spacing: 0.5px;
+  }
+  .tab:hover { border-color: var(--c-api); color: var(--white); }
+  .tab.active { background: var(--c-api); border-color: var(--c-api); color: #000; font-weight: 600; }
+
+  /* ── PANEL ── */
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── LEGEND ── */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    justify-content: center;
+    margin-bottom: 32px;
+  }
+  .leg-item {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10px; color: var(--muted);
+  }
+  .leg-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+
+  /* ── FLOW LAYOUT ── */
+  .flow {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* ── LAYER ROW ── */
+  .layer {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    position: relative;
+  }
+
+  .layer-label {
+    width: 110px;
+    min-width: 110px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 16px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+
+  .layer-content {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+    flex-wrap: wrap;
+  }
+
+  /* ── NODE ── */
+  .node {
+    position: relative;
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 10px 14px;
+    background: var(--bg2);
+    min-width: 140px;
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+  }
+  .node:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .node.selected {
+    box-shadow: 0 0 0 2px currentColor;
+  }
+  .node-file {
+    font-size: 9px;
+    color: var(--muted);
+    margin-bottom: 3px;
+    letter-spacing: 0.5px;
+  }
+  .node-name {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .node-sig {
+    font-size: 9px;
+    color: var(--muted);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .node-badge {
+    display: inline-block;
+    font-size: 8px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-top: 4px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+
+  /* colour variants */
+  .n-entry  { border-color: var(--c-entry);  color: var(--c-entry); }
+  .n-main   { border-color: var(--c-main);   color: var(--c-main); }
+  .n-api    { border-color: var(--c-api);    color: var(--c-api); }
+  .n-svc    { border-color: var(--c-svc);    color: var(--c-svc); }
+  .n-delta  { border-color: var(--c-delta);  color: var(--c-delta); }
+  .n-cache  { border-color: var(--c-cache);  color: var(--c-cache); }
+  .n-core   { border-color: var(--c-core);   color: var(--c-core); }
+  .n-model  { border-color: var(--c-model);  color: var(--c-model); }
+  .n-ext    { border-color: var(--c-ext);    color: var(--c-ext); }
+
+  /* ── CONNECTOR ── */
+  .arrow {
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    font-size: 16px;
+    flex-shrink: 0;
+    padding: 0 2px;
+  }
+  .arrow-label {
+    font-size: 9px;
+    color: var(--muted);
+    text-align: center;
+    white-space: nowrap;
+  }
+  .arrow-col {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+  }
+
+  /* vertical connector line between layers */
+  .vconn {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding-left: 126px; /* label width + padding */
+    height: 24px;
+    position: relative;
+  }
+  .vconn-line {
+    width: 2px;
+    height: 100%;
+    background: linear-gradient(to bottom, var(--dim), var(--border2));
+    position: relative;
+  }
+  .vconn-line::after {
+    content: '▼';
+    position: absolute;
+    bottom: -8px;
+    left: -5px;
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .vconn-text {
+    font-size: 9px;
+    color: var(--muted);
+    margin-left: 10px;
+    white-space: nowrap;
+  }
+
+  /* ── DETAIL PANEL ── */
+  .detail {
+    max-width: 1100px;
+    margin: 24px auto 0;
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    background: var(--bg3);
+    overflow: hidden;
+  }
+  .detail-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .detail-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .detail-file {
+    font-size: 10px;
+    color: var(--muted);
+    margin-left: auto;
+  }
+  .detail-body {
+    padding: 20px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 700px) { .detail-body { grid-template-columns: 1fr; } }
+
+  .detail-section h4 {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .detail-key {
+    color: var(--muted);
+    min-width: 80px;
+    flex-shrink: 0;
+    font-size: 10px;
+  }
+  .detail-val { color: var(--white); }
+  .detail-val code {
+    color: var(--c-svc);
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+  .detail-val .param { color: var(--c-api); }
+  .detail-val .ret   { color: var(--c-ext); }
+  .detail-val .note  { color: var(--muted); font-size: 10px; }
+
+  /* ── FULL CALL CHAIN ── */
+  .chain-box {
+    max-width: 1100px;
+    margin: 32px auto 0;
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .chain-header {
+    background: var(--bg3);
+    padding: 12px 20px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+  .chain-body { padding: 20px; }
+  .chain-step {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 10px;
+    align-items: flex-start;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .chain-num {
+    min-width: 22px; height: 22px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .chain-text { color: var(--white); }
+  .chain-text code {
+    background: var(--bg); color: var(--c-svc);
+    padding: 1px 5px; border-radius: 3px; font-size: 10px;
+  }
+  .chain-text .inp  { color: var(--c-api); }
+  .chain-text .out  { color: var(--c-ext); }
+  .chain-text .file { color: var(--muted); font-size: 10px; }
+
+  /* ── HELPER FNS TABLE ── */
+  .helper-grid {
+    max-width: 1100px;
+    margin: 32px auto 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+  }
+  .helper-card {
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 14px;
+    background: var(--bg2);
+  }
+  .helper-card h4 {
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .helper-card p {
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-bottom: 4px;
+  }
+  .helper-card .sig {
+    font-size: 9px;
+    color: var(--c-svc);
+    background: var(--bg);
+    padding: 4px 8px;
+    border-radius: 3px;
+    display: block;
+    margin-top: 6px;
+  }
+
+  /* ── DATA FLOW SECTION ── */
+  .data-flow {
+    max-width: 1100px;
+    margin: 32px auto 0;
+  }
+  .data-flow h3 {
+    font-family: 'Syne', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+  }
+  .data-table th {
+    text-align: left;
+    padding: 8px 12px;
+    background: var(--bg3);
+    color: var(--muted);
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border2);
+  }
+  .data-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--white);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+  .data-table tr:hover td { background: var(--bg3); }
+  .data-table code { color: var(--c-svc); background: var(--bg); padding: 1px 4px; border-radius: 2px; }
+  .data-table .td-file { color: var(--muted); font-size: 9px; }
+  .data-table .td-in  { color: var(--c-api); }
+  .data-table .td-out { color: var(--c-ext); }
+
+  /* section divider */
+  .section-title {
+    max-width: 1100px;
+    margin: 40px auto 16px;
+    font-family: 'Syne', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .placeholder {
+    max-width: 1100px;
+    margin: 20px auto;
+    padding: 20px;
+    border: 1px dashed var(--border2);
+    border-radius: 6px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>BTC Options <span>Backend</span> — Full Flow Map</h1>
+  <p>File · Function · Input · Output · Call Chain — Every Layer</p>
+</div>
+
+<!-- TAB BAR -->
+<div class="tabs">
+  <button class="tab active" onclick="showTab('overview')">Overview</button>
+  <button class="tab" onclick="showTab('spot')">GET /spot</button>
+  <button class="tab" onclick="showTab('expiries')">GET /expiries</button>
+  <button class="tab" onclick="showTab('options')">GET /options</button>
+  <button class="tab" onclick="showTab('premium')">GET /plot-data/premium</button>
+  <button class="tab" onclick="showTab('ivsmile')">GET /plot-data/iv-smile</button>
+  <button class="tab" onclick="showTab('ivrv')">GET /plot-data/iv-rv</button>
+  <button class="tab" onclick="showTab('helpers')">Helper Functions</button>
+  <button class="tab" onclick="showTab('models')">Models</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- OVERVIEW TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel active" id="tab-overview">
+
+  <div class="legend">
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-entry)"></div> Browser/Entry</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-main)"></div> main.py</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-api)"></div> api/ layer</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-svc)"></div> services/</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-delta)"></div> delta_client</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-cache)"></div> redis_cache</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-core)"></div> core/ (greeks)</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-model)"></div> models/</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--c-ext)"></div> Delta Exchange API</div>
+  </div>
+
+  <div class="flow">
+
+    <!-- LAYER 0: ENTRY -->
+    <div class="layer">
+      <div class="layer-label">Browser</div>
+      <div class="layer-content">
+        <div class="node n-entry">
+          <div class="node-file">HTTP Request</div>
+          <div class="node-name">GET /api/v1/*</div>
+          <div class="node-sig">from React frontend</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="vconn"><div class="vconn-line"></div><div class="vconn-text">HTTP routed by FastAPI</div></div>
+
+    <!-- LAYER 1: MAIN -->
+    <div class="layer">
+      <div class="layer-label">main.py</div>
+      <div class="layer-content">
+        <div class="node n-main">
+          <div class="node-file">app/main.py</div>
+          <div class="node-name">FastAPI app</div>
+          <div class="node-sig">Registers routers<br>Adds CORS + GZip middleware<br>Lifespan: init/close Redis</div>
+        </div>
+        <div class="arrow-col">
+          <div class="arrow">→</div>
+          <div class="arrow-label">includes<br>routers</div>
+        </div>
+        <div class="node n-main" style="min-width:200px">
+          <div class="node-file">app/main.py — include_router()</div>
+          <div class="node-name">Router Registration</div>
+          <div class="node-sig">
+            health.router → no prefix<br>
+            expiries.router → /api/v1<br>
+            options.router → /api/v1<br>
+            plot_data.router → /api/v1
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="vconn"><div class="vconn-line"></div><div class="vconn-text">dispatched to route handler</div></div>
+
+    <!-- LAYER 2: API -->
+    <div class="layer">
+      <div class="layer-label">api/ layer</div>
+      <div class="layer-content" style="flex-wrap:wrap">
+        <div class="node n-api">
+          <div class="node-file">api/health.py</div>
+          <div class="node-name">GET /health</div>
+          <div class="node-sig">No params<br>Returns: status + timestamp</div>
+          <span class="node-badge" style="background:var(--c-api);color:#000">NO SERVICE CALL</span>
+        </div>
+        <div class="node n-api">
+          <div class="node-file">api/expiries.py</div>
+          <div class="node-name">GET /expiries</div>
+          <div class="node-sig">No params<br>→ get_expiries()</div>
+          <div class="node-sig">GET /spot<br>→ get_spot()</div>
+        </div>
+        <div class="node n-api">
+          <div class="node-file">api/options.py</div>
+          <div class="node-name">GET /options</div>
+          <div class="node-sig">Query: expiry: date<br>→ get_option_chain(expiry)</div>
+        </div>
+        <div class="node n-api">
+          <div class="node-file">api/plot_data.py</div>
+          <div class="node-name">GET /plot-data/*</div>
+          <div class="node-sig">/premium → get_option_chain()<br>/iv-smile → get_option_chain()<br>/iv-rv → get_option_chain()</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="vconn"><div class="vconn-line"></div><div class="vconn-text">calls service functions</div></div>
+
+    <!-- LAYER 3: SERVICE -->
+    <div class="layer">
+      <div class="layer-label">services/</div>
+      <div class="layer-content" style="flex-wrap:wrap">
+        <div class="node n-svc">
+          <div class="node-file">option_chain_service.py</div>
+          <div class="node-name">get_spot()</div>
+          <div class="node-sig">→ redis_cache.get("spot:BTC")<br>→ client.get_spot_price()<br>← SpotResponse</div>
+        </div>
+        <div class="node n-svc">
+          <div class="node-file">option_chain_service.py</div>
+          <div class="node-name">get_expiries()</div>
+          <div class="node-sig">→ redis_cache.get("expiries:BTC")<br>→ client.get_spot_price()<br>→ client.get_btc_option_products()<br>← ExpiryListResponse</div>
+        </div>
+        <div class="node n-svc">
+          <div class="node-file">option_chain_service.py</div>
+          <div class="node-name">get_option_chain(expiry)</div>
+          <div class="node-sig">→ redis_cache.get("chain:BTC:{expiry}")<br>→ get_spot_price() + get_btc_option_products()<br>→ get_ticker(symbol) × N strikes<br>→ _extract_live_greeks(ticker)<br>→ compute_greeks() or implied_vol()<br>← OptionChainResponse</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="vconn"><div class="vconn-line"></div><div class="vconn-text">parallel calls via asyncio.gather()</div></div>
+
+    <!-- LAYER 4: DELTA CLIENT + CACHE + CORE (parallel) -->
+    <div class="layer">
+      <div class="layer-label">delta_client<br>+ cache<br>+ core</div>
+      <div class="layer-content" style="flex-wrap:wrap">
+        <div class="node n-delta">
+          <div class="node-file">delta_client.py — DeltaClient</div>
+          <div class="node-name">get_spot_price()</div>
+          <div class="node-sig">tries BTCUSDT → BTCUSD → BTC_USDT<br>← float (spot price)</div>
+        </div>
+        <div class="node n-delta">
+          <div class="node-file">delta_client.py — DeltaClient</div>
+          <div class="node-name">get_btc_option_products()</div>
+          <div class="node-sig">GET /v2/products (calls + puts)<br>← list[dict]</div>
+        </div>
+        <div class="node n-delta">
+          <div class="node-file">delta_client.py — DeltaClient</div>
+          <div class="node-name">get_ticker(symbol)</div>
+          <div class="node-sig">GET /v2/tickers/{symbol}<br>← dict (greeks, quotes, prices)</div>
+        </div>
+        <div class="node n-delta">
+          <div class="node-file">delta_client.py — DeltaClient</div>
+          <div class="node-name">get_candles(symbol, tf, s, e)</div>
+          <div class="node-sig">GET /v2/history/candles<br>← list[dict] OHLCV</div>
+        </div>
+        <div class="node n-cache">
+          <div class="node-file">cache/redis_cache.py</div>
+          <div class="node-name">get() / set()</div>
+          <div class="node-sig">key → JSON<br>TTL: 5s / 15s / 60s / 300s</div>
+        </div>
+        <div class="node n-core">
+          <div class="node-file">core/greeks.py</div>
+          <div class="node-name">compute_greeks()<br>implied_vol()</div>
+          <div class="node-sig">S,K,T,r,sigma,type → Greeks<br>price,S,K,T,r,type → float</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="vconn"><div class="vconn-line"></div><div class="vconn-text">HTTP via httpx.AsyncClient</div></div>
+
+    <!-- LAYER 5: EXTERNAL -->
+    <div class="layer">
+      <div class="layer-label">External</div>
+      <div class="layer-content" style="flex-wrap:wrap">
+        <div class="node n-ext">
+          <div class="node-file">https://api.delta.exchange</div>
+          <div class="node-name">GET /v2/tickers/{sym}</div>
+          <div class="node-sig">spot price lookup</div>
+        </div>
+        <div class="node n-ext">
+          <div class="node-file">https://api.delta.exchange</div>
+          <div class="node-name">GET /v2/products</div>
+          <div class="node-sig">all live BTC options list</div>
+        </div>
+        <div class="node n-ext">
+          <div class="node-file">https://api.delta.exchange</div>
+          <div class="node-name">GET /v2/tickers/{option_sym}</div>
+          <div class="node-sig">per-strike price + greeks</div>
+        </div>
+        <div class="node n-ext">
+          <div class="node-file">https://api.delta.exchange</div>
+          <div class="node-name">GET /v2/history/candles</div>
+          <div class="node-sig">OHLCV history</div>
+        </div>
+        <div class="node n-ext">
+          <div class="node-file">redis://redis:6379</div>
+          <div class="node-name">Redis Cache</div>
+          <div class="node-sig">GET key / SETEX key ttl val</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /flow -->
+
+  <!-- RETURN PATH NOTE -->
+  <div class="chain-box" style="margin-top:32px">
+    <div class="chain-header">↑ Return Path — Data Flows Back Up</div>
+    <div class="chain-body">
+      <div class="chain-step">
+        <div class="chain-num" style="background:var(--c-ext);color:#000">1</div>
+        <div class="chain-text">
+          <span class="file">delta_client.py</span> — raw JSON dict returned from Delta Exchange → extracted via <code>.get("result")</code>
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="chain-num" style="background:var(--c-delta);color:#000">2</div>
+        <div class="chain-text">
+          <span class="file">option_chain_service.py</span> — raw dict processed into typed fields, Greeks computed, <code>OptionLeg</code> built per strike
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="chain-num" style="background:var(--c-svc);color:#000">3</div>
+        <div class="chain-text">
+          <span class="file">option_chain_service.py</span> — <code>ChainRow[]</code> built from leg_map, wrapped in <code>OptionChainResponse</code>, serialized to Redis
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="chain-num" style="background:var(--c-api);color:#000">4</div>
+        <div class="chain-text">
+          <span class="file">api/options.py</span> — returns <code>OptionChainResponse</code> → FastAPI serializes to JSON via Pydantic
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="chain-num" style="background:var(--c-main);color:#000">5</div>
+        <div class="chain-text">
+          <span class="file">main.py</span> — GZipMiddleware compresses response if >1000 bytes → sent to browser
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="chain-num" style="background:var(--c-entry);color:#000">6</div>
+        <div class="chain-text">
+          <span class="file">Browser</span> — React receives JSON, <code>useOptionChain()</code> hook updates state, <code>OptionChainTable</code> renders
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /overview -->
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- GET /spot TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-spot">
+  <div class="section-title">GET /api/v1/spot — Full Call Chain</div>
+  <div class="chain-box">
+    <div class="chain-header">Entry → api/expiries.py → spot_price()</div>
+    <div class="chain-body">
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-entry);color:#000">1</div><div class="chain-text"><span class="inp">Browser</span> sends <code>GET /api/v1/spot</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-main);color:#000">2</div><div class="chain-text"><span class="file">main.py</span> — FastAPI routes to <code>expiries.router</code> (prefix /api/v1)</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">3</div><div class="chain-text"><span class="file">api/expiries.py → spot_price()</span> — no params, calls <code>await get_spot()</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">4</div><div class="chain-text"><span class="file">option_chain_service.py → get_spot()</span><br>— checks <code>redis_cache.get("spot:BTC")</code><br>— if hit: return <code>SpotResponse(**cached)</code><br>— if miss: continue</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">5</div><div class="chain-text"><span class="file">option_chain_service.py</span> — calls <code>get_delta_client()</code> → returns singleton <code>DeltaClient</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-delta);color:#000">6</div><div class="chain-text"><span class="file">delta_client.py → get_spot_price()</span><br>— tries <code>GET /v2/tickers/BTCUSDT</code> → reads <code>result.close</code> or <code>result.mark_price</code><br>— fallback: <code>BTCUSD</code> → <code>BTC_USDT</code> → hardcoded 95000<br>— returns <span class="out">float</span></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-delta);color:#000">7</div><div class="chain-text"><span class="file">delta_client.py → get(path)</span> — calls <code>_auth_headers("GET", path)</code> → attaches HMAC-SHA256 headers → <code>httpx.get()</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-ext);color:#000">8</div><div class="chain-text"><span class="out">Delta Exchange</span> — returns <code>{"result": {"close": "84000.5", ...}}</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">9</div><div class="chain-text"><span class="file">get_spot()</span> — builds <code>SpotResponse(symbol="BTCUSD", price=84000.5, fetched_at=now)</code><br>— <code>redis_cache.set("spot:BTC", resp.model_dump(), ttl=5)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">10</div><div class="chain-text"><span class="file">api/expiries.py</span> — returns <code>SpotResponse</code> → FastAPI serializes → <span class="out">JSON to browser</span></div></div>
+    </div>
+  </div>
+
+  <div class="data-flow" style="margin-top:24px">
+    <h3>Data at Each Step</h3>
+    <table class="data-table">
+      <tr><th>Step</th><th>File / Function</th><th>Input</th><th>Output / Type</th></tr>
+      <tr><td>1</td><td class="td-file">Browser</td><td>—</td><td class="td-out">HTTP GET /api/v1/spot</td></tr>
+      <tr><td>2</td><td class="td-file">main.py</td><td>HTTP request</td><td>Routes to expiries.router</td></tr>
+      <tr><td>3</td><td class="td-file">api/expiries.py<br>spot_price()</td><td>—</td><td class="td-out">calls get_spot()</td></tr>
+      <tr><td>4</td><td class="td-file">option_chain_service.py<br>get_spot()</td><td>—</td><td>checks Redis key <code>"spot:BTC"</code></td></tr>
+      <tr><td>5</td><td class="td-file">delta_client.py<br>get_spot_price()</td><td>—</td><td class="td-out">float: 84000.5</td></tr>
+      <tr><td>6</td><td class="td-file">delta_client.py<br>_auth_headers()</td><td class="td-in">"GET", "/v2/tickers/BTCUSDT"</td><td class="td-out">dict: {api-key, timestamp, signature}</td></tr>
+      <tr><td>7</td><td class="td-file">delta_client.py<br>get(path)</td><td class="td-in">path + auth headers</td><td class="td-out">dict: {"result": {"close": "84000.5"}}</td></tr>
+      <tr><td>8</td><td class="td-file">get_spot()</td><td class="td-in">float: 84000.5</td><td class="td-out">SpotResponse(symbol, price, fetched_at)</td></tr>
+      <tr><td>9</td><td class="td-file">redis_cache.set()</td><td class="td-in">key, SpotResponse.model_dump(), ttl=5</td><td>cached for 5 seconds</td></tr>
+      <tr><td>10</td><td class="td-file">FastAPI</td><td class="td-in">SpotResponse</td><td class="td-out">{"symbol":"BTCUSD","price":84000.5,"fetched_at":"..."}</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- GET /expiries TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-expiries">
+  <div class="section-title">GET /api/v1/expiries — Full Call Chain</div>
+  <div class="chain-box">
+    <div class="chain-header">api/expiries.py → list_expiries() → get_expiries()</div>
+    <div class="chain-body">
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-entry);color:#000">1</div><div class="chain-text"><span class="inp">Browser</span> sends <code>GET /api/v1/expiries</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">2</div><div class="chain-text"><span class="file">api/expiries.py → list_expiries()</span> — calls <code>await get_expiries()</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">3</div><div class="chain-text"><span class="file">get_expiries()</span> — checks <code>redis_cache.get("expiries:BTC")</code> — if hit returns immediately</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">4</div><div class="chain-text"><span class="file">get_expiries()</span> — <code>asyncio.gather(get_spot_price(), get_btc_option_products())</code> — runs both IN PARALLEL</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-delta);color:#000">5a</div><div class="chain-text"><span class="file">delta_client → get_spot_price()</span> → <code>GET /v2/tickers/BTCUSDT</code> → returns <span class="out">float spot</span></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-delta);color:#000">5b</div><div class="chain-text"><span class="file">delta_client → get_btc_option_products()</span><br>→ <code>GET /v2/products?contract_type=call_options&state=live&underlying_asset_symbol=BTC&page_size=500</code><br>→ <code>GET /v2/products?contract_type=put_options&state=live...&page_size=500</code><br>→ combines both lists → returns <span class="out">list[dict]</span></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">6</div><div class="chain-text"><span class="file">get_expiries()</span> — iterates products, calls <code>_parse_settlement(product)</code> on each<br>— collects unique expiry dates → filters out past dates<br>— builds <code>ExpiryInfo(date, label, days)</code> for each</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">7</div><div class="chain-text"><span class="file">get_expiries()</span> — builds <code>ExpiryListResponse(underlying, spot_price, expiries)</code><br>— <code>redis_cache.set("expiries:BTC", ..., ttl=300)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">8</div><div class="chain-text"><span class="file">api/expiries.py</span> — returns <code>ExpiryListResponse</code> → JSON to browser</div></div>
+    </div>
+  </div>
+
+  <div class="data-flow" style="margin-top:24px">
+    <h3>Data at Each Step</h3>
+    <table class="data-table">
+      <tr><th>Step</th><th>Function</th><th>Input</th><th>Output</th></tr>
+      <tr><td>4</td><td class="td-file">asyncio.gather()</td><td class="td-in">two coroutines</td><td class="td-out">runs concurrently</td></tr>
+      <tr><td>5a</td><td class="td-file">get_spot_price()</td><td>—</td><td class="td-out">float: 84000.5</td></tr>
+      <tr><td>5b</td><td class="td-file">get_btc_option_products()</td><td>—</td><td class="td-out">list[dict] — each dict has symbol, strike_price, contract_type, settlement_time</td></tr>
+      <tr><td>6</td><td class="td-file">_parse_settlement(product)</td><td class="td-in">dict with settlement_time</td><td class="td-out">datetime | None</td></tr>
+      <tr><td>6</td><td class="td-file">ExpiryInfo()</td><td class="td-in">date, label_str, days:int</td><td class="td-out">ExpiryInfo model</td></tr>
+      <tr><td>7</td><td class="td-file">ExpiryListResponse()</td><td class="td-in">underlying="BTC", spot_price, expiries:list</td><td class="td-out">Pydantic model → JSON</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- GET /options TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-options">
+  <div class="section-title">GET /api/v1/options?expiry=YYYY-MM-DD — Full Call Chain</div>
+  <div class="chain-box">
+    <div class="chain-header">api/options.py → option_chain() → get_option_chain(expiry) — most complex flow</div>
+    <div class="chain-body">
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-entry);color:#000">1</div><div class="chain-text"><span class="inp">Browser</span> sends <code>GET /api/v1/options?expiry=2025-03-28</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">2</div><div class="chain-text"><span class="file">api/options.py → option_chain(expiry: date)</span><br>— FastAPI parses query param <code>expiry</code> as <code>date</code> type<br>— validates: <code>if expiry &lt; date.today()</code> → 400 error<br>— calls <code>await get_option_chain(expiry)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">3</div><div class="chain-text"><span class="file">get_option_chain(expiry)</span><br>— cache_key = <code>"chain:BTC:2025-03-28"</code><br>— checks <code>redis_cache.get(cache_key)</code> → if hit returns immediately (TTL 15s)</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">4</div><div class="chain-text"><span class="file">get_option_chain()</span><br>— <code>asyncio.gather(get_spot_price(), get_btc_option_products())</code> parallel<br>— filters products to this expiry only</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">5</div><div class="chain-text"><span class="file">get_option_chain()</span><br>— if no products for expiry → <code>_build_demo_chain(expiry, spot)</code> returned<br>— else continue with real data</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">6</div><div class="chain-text"><span class="file">get_option_chain()</span><br>— <code>T = _years_to_expiry(datetime.combine(expiry, ...))</code><br>— <code>r = settings.RISK_FREE_RATE (0.0)</code><br>— extract unique strikes → find ATM = <code>min(strikes, key=lambda k: abs(k-spot))</code><br>— build <code>product_map: dict[(strike, "call"/"put")] = product_dict</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">7</div><div class="chain-text"><span class="file">fetch_leg(strike, opt_type)</span> — async inner function<br>— looks up <code>product_map[(strike, type)]</code> → gets symbol e.g. <code>BTC-28MAR25-84000-C</code><br>— calls <code>await client.get_ticker(symbol)</code><br>— logs sample ticker for ATM call<br>— returns <code>(strike, opt_type, prod_dict, ticker_dict)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">8</div><div class="chain-text"><span class="file">get_option_chain()</span> — creates all fetch_leg tasks<br>— batches into groups of 20 → <code>asyncio.gather(*tasks[i:i+20])</code><br>— result: list of <code>(strike, type, prod, ticker)</code> tuples</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-delta);color:#000">9</div><div class="chain-text"><span class="file">delta_client → get_ticker(symbol)</span><br>— <code>GET /v2/tickers/BTC-28MAR25-84000-C</code><br>— returns <code>dict.get("result")</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">10</div><div class="chain-text"><span class="file">_extract_live_greeks(ticker)</span><br>— reads <code>ticker["greeks"]</code> → delta/gamma/theta/vega/rho<br>— reads <code>ticker["quotes"]</code> → bid_iv, ask_iv, best_bid, best_ask<br>— reads <code>ticker["oi"]</code> for open interest<br>— <code>_to_iv_decimal()</code> normalises IV format (% or decimal)<br>— returns dict with iv, iv_pct, delta, gamma... has_greeks</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-core);color:#000">11</div><div class="chain-text"><span class="file">Priority 1 (has_greeks=True, iv>0)</span><br>— use Delta's greeks directly<br>— call <code>compute_greeks(spot, strike, T, r, iv, type)</code> only for price_bs + rho<br><span class="file">Priority 2 (iv>0 but no greeks)</span><br>— call <code>compute_greeks(spot, strike, T, r, iv, type)</code> for all greeks<br><span class="file">Priority 3 (no iv)</span><br>— call <code>implied_vol(mark_price, spot, strike, T, r, type)</code> → get iv<br>— then <code>compute_greeks(...)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">12</div><div class="chain-text"><span class="file">get_option_chain()</span><br>— builds <code>OptionLeg(strike, expiry, option_type, symbol, last_price, bid, ask, mid, volume, oi, iv, iv_pct, delta, gamma, theta, vega, rho, price_bs, underlying_price, days_to_expiry, is_atm)</code><br>— stored in <code>leg_map[(strike, type)]</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-svc);color:#000">13</div><div class="chain-text"><span class="file">get_option_chain()</span><br>— builds <code>ChainRow(strike, call=leg_map.get((s,"call")), put=leg_map.get((s,"put")), is_atm)</code> for each strike<br>— wraps in <code>OptionChainResponse(expiry, underlying, spot_price, atm_strike, days_to_expiry, atm_iv_call, atm_iv_put, chain, fetched_at)</code><br>— <code>redis_cache.set(cache_key, resp.model_dump(), ttl=15)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">14</div><div class="chain-text"><span class="file">api/options.py</span> → returns <code>OptionChainResponse</code> → <span class="out">JSON to browser</span></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- GET /plot-data/premium TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-premium">
+  <div class="section-title">GET /api/v1/plot-data/premium</div>
+  <div class="chain-box">
+    <div class="chain-header">Query params: expiry, strike, option_type, timeframe</div>
+    <div class="chain-body">
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-entry);color:#000">1</div><div class="chain-text"><span class="inp">Browser</span> sends <code>GET /api/v1/plot-data/premium?expiry=2025-03-28&strike=84000&option_type=call&timeframe=1h</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">2</div><div class="chain-text"><span class="file">api/plot_data.py → premium_chart(expiry, strike, option_type, timeframe)</span><br>— cache_key = <code>"candles:{expiry}:{strike}:{option_type}:{timeframe}"</code><br>— checks Redis → if hit returns <code>PremiumChartResponse(**cached)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">3</div><div class="chain-text"><span class="file">plot_data.py</span> — calls <code>await get_option_chain(expiry)</code><br>— finds <code>row</code> where <code>row.strike == strike</code><br>— gets <code>leg = row.call or row.put</code><br>— extracts <code>symbol = leg.symbol</code>  e.g. <code>"BTC-28MAR25-84000-C"</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">4a</div><div class="chain-text"><span class="file">If DELTA_API_KEY set:</span><br>— <code>now_ts = int(time.now())</code><br>— <code>start_ts = now_ts - _tf_seconds(timeframe) * 200</code><br>— calls <code>client.get_candles(symbol, resolution, start_ts, now_ts)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-delta);color:#000">5</div><div class="chain-text"><span class="file">delta_client → get_candles(symbol, resolution, start_ts, end_ts)</span><br>— <code>GET /v2/history/candles?symbol=BTC-28MAR25-84000-C&resolution=1h&start=...&end=...</code><br>— returns <span class="out">list[dict]</span> each with time, open, high, low, close, volume</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">6</div><div class="chain-text"><span class="file">plot_data.py</span> — maps raw dicts to <code>CandleBar(timestamp, open, high, low, close, volume)</code> list<br>— or calls <code>_demo_candles(leg.last_price, timeframe)</code> if no API key</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">7</div><div class="chain-text"><span class="file">plot_data.py</span> — builds <code>PremiumChartResponse(symbol, strike, option_type, expiry, timeframe, candles)</code><br>— <code>redis_cache.set(cache_key, ..., ttl=60)</code> → returns to browser</div></div>
+    </div>
+  </div>
+
+  <div class="helper-grid" style="margin-top:24px">
+    <div class="helper-card" style="border-color:var(--c-api)">
+      <h4 style="color:var(--c-api)">_tf_seconds(tf)</h4>
+      <p>Converts timeframe string to seconds</p>
+      <p>{"1m":60, "5m":300, "15m":900, "1h":3600, "4h":14400, "1d":86400}</p>
+      <code class="sig">_tf_seconds("1h") → 3600</code>
+    </div>
+    <div class="helper-card" style="border-color:var(--c-api)">
+      <h4 style="color:var(--c-api)">_demo_candles(base_price, timeframe)</h4>
+      <p>Generates 100 synthetic OHLCV bars using random walk when no API key</p>
+      <p>price += gauss(0, price*0.01) per bar</p>
+      <code class="sig">→ list[CandleBar]  (100 bars)</code>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- GET /plot-data/iv-smile TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-ivsmile">
+  <div class="section-title">GET /api/v1/plot-data/iv-smile</div>
+  <div class="chain-box">
+    <div class="chain-header">Query params: expiry — builds IV smile from cached chain data</div>
+    <div class="chain-body">
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-entry);color:#000">1</div><div class="chain-text"><span class="inp">Browser</span> sends <code>GET /api/v1/plot-data/iv-smile?expiry=2025-03-28</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">2</div><div class="chain-text"><span class="file">api/plot_data.py → iv_smile(expiry)</span><br>— NO separate cache — calls <code>await get_option_chain(expiry)</code><br>— chain is usually already cached in Redis (15s TTL) so free</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">3</div><div class="chain-text"><span class="file">iv_smile()</span> — iterates <code>chain.chain</code> (list of ChainRow)<br>— for each row with both call and put:<br>— computes <code>moneyness = log(strike / spot_price)</code><br>— creates <code>IVSmilePoint(strike, call_iv, put_iv, delta, moneyness)</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">4</div><div class="chain-text"><span class="file">iv_smile()</span> — finds <code>atm_iv</code> = first point where <code>abs(moneyness) &lt; 0.02</code><br>— returns <code>IVSmileResponse(expiry, spot_price, atm_strike, atm_iv, points)</code></div></div>
+    </div>
+  </div>
+
+  <div class="data-flow" style="margin-top:24px">
+    <h3>Note: Zero Additional Delta API Calls</h3>
+    <table class="data-table">
+      <tr><th>Source</th><th>Data Used</th><th>From Where</th></tr>
+      <tr><td>call_iv</td><td>row.call.iv_pct</td><td class="td-file">Already in OptionLeg from get_option_chain()</td></tr>
+      <tr><td>put_iv</td><td>row.put.iv_pct</td><td class="td-file">Already in OptionLeg from get_option_chain()</td></tr>
+      <tr><td>delta</td><td>row.call.delta</td><td class="td-file">Already computed in get_option_chain()</td></tr>
+      <tr><td>moneyness</td><td>log(K/S)</td><td class="td-file">Computed inline in iv_smile()</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- GET /plot-data/iv-rv TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-ivrv">
+  <div class="section-title">GET /api/v1/plot-data/iv-rv</div>
+  <div class="chain-box">
+    <div class="chain-header">Query params: expiry, window (7-90 days)</div>
+    <div class="chain-body">
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-entry);color:#000">1</div><div class="chain-text"><span class="inp">Browser</span> sends <code>GET /api/v1/plot-data/iv-rv?expiry=2025-03-28&window=30</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">2</div><div class="chain-text"><span class="file">api/plot_data.py → iv_vs_rv(expiry, window)</span><br>— calls <code>await get_option_chain(expiry)</code> (usually cached)<br>— <code>atm_iv = (chain.atm_iv_call + chain.atm_iv_put) / 2</code></div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">3</div><div class="chain-text"><span class="file">iv_vs_rv()</span> — SIMULATED historical series (Phase 2 will use real DB)<br>— <code>iv_level = atm_iv</code>, <code>rv_level = atm_iv * 0.88</code><br>— loops <code>window</code> days backwards:<br>— <code>iv_level += gauss(0, 2) + (atm_iv - iv_level) * 0.1</code>  (mean reversion)<br>— <code>rv_level += gauss(0, 1.5) + (atm_iv*0.85 - rv_level) * 0.08</code><br>— creates <code>IVRVPoint(label=date_str, implied_vol, realised_vol)</code> per day</div></div>
+      <div class="chain-step"><div class="chain-num" style="background:var(--c-api);color:#000">4</div><div class="chain-text"><span class="file">iv_vs_rv()</span> — returns <code>IVRVResponse(expiry, window_days, atm_strike, series)</code></div></div>
+    </div>
+  </div>
+
+  <div class="data-flow" style="margin-top:24px">
+    <h3>Important: RV is Simulated</h3>
+    <table class="data-table">
+      <tr><th>Field</th><th>Source</th><th>Real or Simulated?</th></tr>
+      <tr><td>implied_vol (current)</td><td>chain.atm_iv_call/put average</td><td style="color:var(--c-svc)">REAL — from Delta API</td></tr>
+      <tr><td>implied_vol (historical)</td><td>random.gauss with mean reversion</td><td style="color:var(--c-cache)">SIMULATED — no historical DB yet</td></tr>
+      <tr><td>realised_vol</td><td>random.gauss with mean reversion</td><td style="color:var(--c-cache)">SIMULATED — Phase 2 will use real OHLCV</td></tr>
+      <tr><td>window_days</td><td>query param</td><td style="color:var(--c-svc)">REAL — controls loop count</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- HELPERS TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-helpers">
+  <div class="section-title">Helper Functions — option_chain_service.py</div>
+
+  <div class="helper-grid">
+
+    <div class="helper-card" style="border-color:var(--c-svc)">
+      <h4 style="color:var(--c-svc)">_years_to_expiry(expiry_dt)</h4>
+      <p><b>File:</b> option_chain_service.py</p>
+      <p><b>Called by:</b> get_option_chain()</p>
+      <p>Converts expiry datetime to years remaining. Attaches UTC timezone if naive. Clamps to 0.0 for expired options.</p>
+      <p>Black-Scholes requires T in years to match annualised sigma and r.</p>
+      <code class="sig">expiry_dt: datetime → float (years)</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-svc)">
+      <h4 style="color:var(--c-svc)">_parse_settlement(product)</h4>
+      <p><b>File:</b> option_chain_service.py</p>
+      <p><b>Called by:</b> get_expiries(), get_option_chain()</p>
+      <p>Extracts settlement_time from a product dict. Handles both Unix timestamp (int/float) and ISO string formats. Returns None if missing or unparseable.</p>
+      <code class="sig">product: dict → datetime | None</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-svc)">
+      <h4 style="color:var(--c-svc)">_safe_float(val, default)</h4>
+      <p><b>File:</b> option_chain_service.py</p>
+      <p><b>Called by:</b> _extract_live_greeks(), get_option_chain()</p>
+      <p>Safely converts any value (string, int, None) to float. Delta API returns numbers as strings. Returns default (0.0) on failure.</p>
+      <code class="sig">val: Any, default: float → float</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-svc)">
+      <h4 style="color:var(--c-svc)">_extract_live_greeks(ticker)</h4>
+      <p><b>File:</b> option_chain_service.py</p>
+      <p><b>Called by:</b> get_option_chain() — once per strike</p>
+      <p>Extracts Greeks and IV from raw Delta ticker dict. Reads ticker["greeks"] for delta/gamma/theta/vega/rho. Reads ticker["quotes"] for bid_iv/ask_iv/best_bid/best_ask. Auto-detects IV format (percent ≥2.0 vs decimal &lt;2.0). Returns has_greeks=True if greeks object has delta.</p>
+      <code class="sig">ticker: dict → dict(iv, iv_pct, delta, gamma, theta, vega, rho, bid, ask, oi, has_greeks)</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-svc)">
+      <h4 style="color:var(--c-svc)">_to_iv_decimal(raw) [inner]</h4>
+      <p><b>File:</b> option_chain_service.py — inside _extract_live_greeks</p>
+      <p>Normalises IV to decimal regardless of format. v≥2.0 = percent format → divide by 100. v&lt;2.0 = already decimal. e.g. "49.9"→0.499  "0.499"→0.499  "118.5"→1.185</p>
+      <code class="sig">raw: str|float → float (decimal)</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-svc)">
+      <h4 style="color:var(--c-svc)">_build_demo_chain(expiry, spot)</h4>
+      <p><b>File:</b> option_chain_service.py</p>
+      <p><b>Called by:</b> get_option_chain() when no products found for expiry</p>
+      <p>Generates synthetic option chain using Black-Scholes. Creates 21 strikes (ATM ± 10 × $1000). IV smile modelled as quadratic in log-moneyness. Used when no API key or Delta returns nothing.</p>
+      <code class="sig">expiry: date, spot: float → OptionChainResponse</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-core)">
+      <h4 style="color:var(--c-core)">compute_greeks(S, K, T, r, sigma, option_type)</h4>
+      <p><b>File:</b> core/greeks.py</p>
+      <p><b>Called by:</b> get_option_chain(), _build_demo_chain(), plot_data.py</p>
+      <p>Full Black-Scholes Greeks. Uses Abramowitz & Stegun CDF approximation. theta = per calendar day. vega = per 1% IV move. r=0.0 for crypto convention.</p>
+      <code class="sig">S,K,T,r,sigma,type → Greeks(iv, delta, gamma, theta, vega, rho, price_bs)</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-core)">
+      <h4 style="color:var(--c-core)">implied_vol(market_price, S, K, T, r, option_type, sigma_seed)</h4>
+      <p><b>File:</b> core/greeks.py</p>
+      <p><b>Called by:</b> get_option_chain() — Priority 3 fallback only</p>
+      <p>Newton-Raphson IV solver. Initial guess = Brenner-Subrahmanyam ATM approx or sigma_seed. Converges in 2-3 iterations with good seed, up to 200 without. Uses mark_price not stale close.</p>
+      <code class="sig">price,S,K,T,r,type,seed → float (IV decimal)</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-delta)">
+      <h4 style="color:var(--c-delta)">_auth_headers(method, path)</h4>
+      <p><b>File:</b> delta_client.py — DeltaClient method</p>
+      <p><b>Called by:</b> DeltaClient.get() — every single API call</p>
+      <p>Builds HMAC-SHA256 auth headers. msg = method + timestamp + path. Returns {} if no API key (public endpoints still work).</p>
+      <code class="sig">method:str, path:str → dict(api-key, timestamp, signature)</code>
+    </div>
+
+    <div class="helper-card" style="border-color:var(--c-delta)">
+      <h4 style="color:var(--c-delta)">get_delta_client()</h4>
+      <p><b>File:</b> delta_client.py — module-level singleton</p>
+      <p><b>Called by:</b> get_spot(), get_expiries(), get_option_chain(), plot_data.py</p>
+      <p>Returns the singleton DeltaClient instance. Creates it on first call. Reuses httpx.AsyncClient with connection pooling (max 20 connections).</p>
+      <code class="sig">() → DeltaClient  (singleton)</code>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- MODELS TAB -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-models">
+  <div class="section-title">Pydantic Models — models/models.py</div>
+
+  <div class="data-flow">
+    <h3>Model Hierarchy</h3>
+    <table class="data-table">
+      <tr><th>Model</th><th>Fields</th><th>Created In</th><th>Used In</th></tr>
+      <tr>
+        <td><code>OptionLeg</code></td>
+        <td class="td-file">strike, expiry, option_type, symbol, last_price, bid, ask, mid, volume, open_interest, iv, iv_pct, delta, gamma, theta, vega, rho, price_bs, underlying_price, days_to_expiry, is_atm</td>
+        <td class="td-file">get_option_chain()<br>_build_demo_chain()</td>
+        <td class="td-file">ChainRow.call/put<br>OptionChainTable (frontend)</td>
+      </tr>
+      <tr>
+        <td><code>ChainRow</code></td>
+        <td class="td-file">strike, call: OptionLeg|None, put: OptionLeg|None, is_atm</td>
+        <td class="td-file">get_option_chain()</td>
+        <td class="td-file">OptionChainResponse.chain[]</td>
+      </tr>
+      <tr>
+        <td><code>OptionChainResponse</code></td>
+        <td class="td-file">expiry, underlying, spot_price, atm_strike, days_to_expiry, atm_iv_call, atm_iv_put, chain[], fetched_at</td>
+        <td class="td-file">get_option_chain()</td>
+        <td class="td-file">api/options.py response<br>plot_data.py (re-uses)<br>Redis cache</td>
+      </tr>
+      <tr>
+        <td><code>ExpiryInfo</code></td>
+        <td class="td-file">date, label, days</td>
+        <td class="td-file">get_expiries()</td>
+        <td class="td-file">ExpiryListResponse.expiries[]</td>
+      </tr>
+      <tr>
+        <td><code>ExpiryListResponse</code></td>
+        <td class="td-file">underlying, spot_price, expiries[]</td>
+        <td class="td-file">get_expiries()</td>
+        <td class="td-file">api/expiries.py response</td>
+      </tr>
+      <tr>
+        <td><code>SpotResponse</code></td>
+        <td class="td-file">symbol, price, fetched_at</td>
+        <td class="td-file">get_spot()</td>
+        <td class="td-file">api/expiries.py /spot response</td>
+      </tr>
+      <tr>
+        <td><code>CandleBar</code></td>
+        <td class="td-file">timestamp, open, high, low, close, volume</td>
+        <td class="td-file">plot_data.py premium_chart()</td>
+        <td class="td-file">PremiumChartResponse.candles[]</td>
+      </tr>
+      <tr>
+        <td><code>PremiumChartResponse</code></td>
+        <td class="td-file">symbol, strike, option_type, expiry, timeframe, candles[]</td>
+        <td class="td-file">plot_data.py premium_chart()</td>
+        <td class="td-file">PremiumChart (frontend)</td>
+      </tr>
+      <tr>
+        <td><code>IVSmilePoint</code></td>
+        <td class="td-file">strike, call_iv, put_iv, delta, moneyness</td>
+        <td class="td-file">plot_data.py iv_smile()</td>
+        <td class="td-file">IVSmileResponse.points[]</td>
+      </tr>
+      <tr>
+        <td><code>IVSmileResponse</code></td>
+        <td class="td-file">expiry, spot_price, atm_strike, atm_iv, points[]</td>
+        <td class="td-file">plot_data.py iv_smile()</td>
+        <td class="td-file">IVChart (frontend)</td>
+      </tr>
+      <tr>
+        <td><code>IVRVPoint</code></td>
+        <td class="td-file">label (date string), implied_vol, realised_vol</td>
+        <td class="td-file">plot_data.py iv_vs_rv()</td>
+        <td class="td-file">IVRVResponse.series[]</td>
+      </tr>
+      <tr>
+        <td><code>IVRVResponse</code></td>
+        <td class="td-file">expiry, window_days, atm_strike, series[]</td>
+        <td class="td-file">plot_data.py iv_vs_rv()</td>
+        <td class="td-file">IVChart iv-rv tab (frontend)</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="section-title" style="margin-top:32px">Redis Cache Keys</div>
+  <div class="data-flow">
+    <table class="data-table">
+      <tr><th>Key Pattern</th><th>Value Type</th><th>TTL</th><th>Set In</th><th>Read In</th></tr>
+      <tr><td><code>"spot:BTC"</code></td><td class="td-file">SpotResponse.model_dump()</td><td>5s</td><td class="td-file">get_spot()</td><td class="td-file">get_spot()</td></tr>
+      <tr><td><code>"expiries:BTC"</code></td><td class="td-file">ExpiryListResponse.model_dump()</td><td>300s</td><td class="td-file">get_expiries()</td><td class="td-file">get_expiries()</td></tr>
+      <tr><td><code>"chain:BTC:{expiry}"</code></td><td class="td-file">OptionChainResponse.model_dump()</td><td>15s</td><td class="td-file">get_option_chain()</td><td class="td-file">get_option_chain()</td></tr>
+      <tr><td><code>"candles:{expiry}:{strike}:{type}:{tf}"</code></td><td class="td-file">PremiumChartResponse.model_dump()</td><td>60s</td><td class="td-file">premium_chart()</td><td class="td-file">premium_chart()</td></tr>
+    </table>
+  </div>
+</div>
+
+<script>
+function showTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+
+</body>
+</html>
