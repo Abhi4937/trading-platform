@@ -102,7 +102,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
         return _build_demo_chain(expiry, spot)
 
     T = _years_to_expiry(
-        datetime.combine(expiry, datetime.min.time()).replace(tzinfo=timezone.utc)
+        datetime.combine(expiry, datetime.min.time()).replace(tzinfo=timezone.utc).replace(hour=8)
     )
     r = settings.RISK_FREE_RATE
 
@@ -195,7 +195,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
 def _build_demo_chain(expiry: date, spot: float) -> OptionChainResponse:
     import math, random
     from datetime import timezone
-    T = max(0.01, (datetime.combine(expiry, datetime.min.time(), timezone.utc) - datetime.now(timezone.utc)).total_seconds() / (365*24*3600))
+    T = max(0.01, (datetime.combine(expiry, datetime.min.time(), timezone.utc).replace(hour=8) - datetime.now(timezone.utc)).total_seconds() / (365*24*3600))
     r = settings.RISK_FREE_RATE
     atm = round(spot / 1000) * 1000
     strikes = [atm + i * 1000 for i in range(-10, 11)]

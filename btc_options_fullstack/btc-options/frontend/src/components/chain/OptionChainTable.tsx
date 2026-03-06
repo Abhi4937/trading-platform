@@ -12,12 +12,15 @@ const f = (n: number | undefined, d = 2) =>
   n == null || isNaN(n) ? '—' : n.toFixed(d);
 
 const COLUMNS = [
-  { key: 'delta',    label: 'Δ Delta',  decimals: 3 },
-  { key: 'iv_pct',  label: 'IV %',     decimals: 1 },
-  { key: 'vega',    label: 'Vega',     decimals: 2 },
-  { key: 'gamma',   label: 'Gamma',    decimals: 4 },
-  { key: 'theta',   label: 'Theta',    decimals: 2 },
-  { key: 'last_price', label: 'LTP',   decimals: 2 },
+  { key: 'delta',      label: 'Δ Delta',  decimals: 3 },
+  { key: 'iv_pct',    label: 'IV %',     decimals: 1 },
+  { key: 'vega',      label: 'Vega',     decimals: 2 },
+  { key: 'gamma',     label: 'Gamma',    decimals: 4 },
+  { key: 'theta',     label: 'Theta',    decimals: 2 },
+  { key: 'bid',       label: 'Bid',      decimals: 2 },
+  { key: 'ask',       label: 'Ask',      decimals: 2 },
+  { key: 'last_price', label: 'Mark',    decimals: 2 },
+  { key: 'price_bs',  label: 'BS Price', decimals: 2 },
 ];
 
 export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike, onSelectLeg }) => {

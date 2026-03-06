@@ -45,7 +45,7 @@ def compute_greeks(S, K, T, r, sigma, option_type: Literal["call","put"]) -> Gre
         price=K*disc*N2n-S*N1n; delta=N1-1.0; rho=-K*T*disc*N2n/100
     gamma=n1/(S*sigma*sq)
     vega=S*n1*sq/100
-    theta=(-(S*n1*sigma)/(2*sq)-r*K*disc*(N2 if option_type=="call" else N2n))/365
+    theta=(-(S*n1*sigma)/(2*sq)+(r*K*disc*(N2n-N2) if option_type=="put" else -r*K*disc*N2))/365
     return Greeks(iv=sigma,delta=round(delta,6),gamma=round(gamma,8),
                   theta=round(theta,4),vega=round(vega,4),rho=round(rho,4),
                   price_bs=round(max(0.0,price),4))
