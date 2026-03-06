@@ -50,15 +50,6 @@ export default function App() {
           </select>
         </div>
 
-        <div className="ctrl-group">
-          <label className="ctrl-label">Date</label>
-          <input
-            type="date"
-            className="date-input"
-            defaultValue={new Date().toISOString().split('T')[0]}
-          />
-        </div>
-
         <button
           className="btn-refresh"
           onClick={() => setShowLogs(v => !v)}
