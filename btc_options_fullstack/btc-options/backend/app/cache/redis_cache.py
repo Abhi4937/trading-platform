@@ -31,7 +31,11 @@ async def get(key: str) -> Optional[Any]:
         return None
     try:
         val = await _redis.get(key)
-        return json.loads(val) if val else None
+        if val:
+            logger.info("CACHE  HIT   %s", key)
+            return json.loads(val)
+        logger.info("CACHE  MISS  %s", key)
+        return None
     except Exception as e:
         logger.debug("Cache get error: %s", e)
         return None
