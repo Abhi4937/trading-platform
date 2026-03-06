@@ -6,6 +6,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.api import expiries, options, plot_data, health
 from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
+from app.core.logging_middleware import LoggingMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ Real-time BTC options with Black-Scholes Greeks computed server-side.
     lifespan=lifespan,
 )
 
+app.add_middleware(LoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
