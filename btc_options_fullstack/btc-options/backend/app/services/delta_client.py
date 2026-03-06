@@ -66,7 +66,12 @@ class DeltaClient:
             "contract_type": "put_options", "state": "live",
             "underlying_asset_symbol": "BTC", "page_size": 500,
         })
-        return (calls_data.get("result") or []) + (puts_data.get("result") or [])
+        all_products = (calls_data.get("result") or []) + (puts_data.get("result") or [])
+        return [
+            p for p in all_products
+            if (p.get("underlying_asset", {}) or {}).get("symbol", "").upper() == "BTC"
+            or str(p.get("symbol", "")).upper().startswith("BTC")
+        ]
 
     async def get_ticker(self, symbol: str) -> dict:
         d = await self.get(f"/v2/tickers/{symbol}")
