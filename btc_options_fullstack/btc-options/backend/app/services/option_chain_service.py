@@ -140,27 +140,28 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
     for strike, opt_type, prod, ticker in results:
         if not prod:
             continue
-        last_price = float(ticker.get("close") or ticker.get("mark_price") or 0)
-        bid  = float(ticker.get("best_bid") or 0)
-        ask  = float(ticker.get("best_ask") or 0)
-        mid  = (bid + ask) / 2 if bid and ask else last_price
+        quotes     = ticker.get("quotes") or {}
+        mark_price = float(ticker.get("mark_price") or 0)
+        bid  = float(quotes.get("best_bid") or ticker.get("best_bid") or 0)
+        ask  = float(quotes.get("best_ask") or ticker.get("best_ask") or 0)
+        mid  = (bid + ask) / 2 if bid and ask else mark_price
         oi   = int(ticker.get("oi_contracts") or 0)
         vol  = int(ticker.get("volume") or 0)
 
-        # IV: use exchange mark_iv if available, else Newton-Raphson
-        mark_iv = ticker.get("mark_iv")
-        if mark_iv:
-            iv = float(mark_iv) / 100
+        # IV: use mark_price (exchange fair value) for Newton-Raphson
+        # mark_iv from quotes is decimal (e.g. 0.65 = 65%), use as sanity check
+        raw_iv = quotes.get("mark_iv") or ticker.get("mark_vol")
+        if raw_iv:
+            iv = float(raw_iv)  # already decimal
         else:
-            price_for_iv = mid if mid > 0 else last_price
-            iv = implied_vol(price_for_iv, spot, strike, T, r, opt_type) if price_for_iv > 0 else 0.5
+            iv = implied_vol(mark_price, spot, strike, T, r, opt_type) if mark_price > 0 else 0.5
 
         g = compute_greeks(spot, strike, T, r, iv if iv > 0 else 0.5, opt_type)
 
         leg_map[(strike, opt_type)] = OptionLeg(
             strike=strike, expiry=expiry, option_type=opt_type,
             symbol=prod.get("symbol", ""),
-            last_price=round(last_price, 2), bid=round(bid, 2),
+            last_price=round(mark_price, 2), bid=round(bid, 2),
             ask=round(ask, 2), mid=round(mid, 2),
             volume=vol, open_interest=oi,
             iv=round(iv, 6), iv_pct=round(iv * 100, 2),
