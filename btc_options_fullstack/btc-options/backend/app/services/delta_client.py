@@ -36,9 +36,23 @@ class DeltaClient:
 
     async def get(self, path: str, params: dict | None = None) -> Any:
         headers = self._auth_headers("GET", path)
-        r = await self._http.get(path, params=params, headers=headers)
-        r.raise_for_status()
-        return r.json()
+        start = time.perf_counter()
+        try:
+            r = await self._http.get(path, params=params, headers=headers)
+            duration_ms = (time.perf_counter() - start) * 1000
+            r.raise_for_status()
+            logger.info(
+                "DELTA  GET  %s  params=%s  status=%s  %.1fms",
+                path, params or {}, r.status_code, duration_ms,
+            )
+            return r.json()
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start) * 1000
+            logger.error(
+                "DELTA  GET  %s  params=%s  ERROR=%s  %.1fms",
+                path, params or {}, e, duration_ms,
+            )
+            raise
 
     async def close(self):
         await self._http.aclose()
