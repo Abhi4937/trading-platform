@@ -13,9 +13,9 @@ class Settings(BaseSettings):
 
     # Redis caching
     REDIS_URL: str = "redis://localhost:6379/0"
-    CACHE_TTL_CHAIN: int = 15        # option chain (seconds)
-    CACHE_TTL_EXPIRIES: int = 300    # expiry list
-    CACHE_TTL_SPOT: int = 5          # spot price
+    CACHE_TTL_PRODUCTS: int = 300    # products list (rarely changes)
+    CACHE_TTL_EXPIRIES: int = 300    # expiry list (stable)
+    CACHE_TTL_SPOT: int = 3          # spot price (deduplicates concurrent calls only)
     CACHE_TTL_CANDLES: int = 60      # OHLCV candles
 
     RATE_LIMIT_PER_MINUTE: int = 60

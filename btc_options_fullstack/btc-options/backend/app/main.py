@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 import traceback
@@ -5,10 +6,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs
+from app.api import expiries, options, plot_data, health, logs, ws
 from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
 from app.core.logging_middleware import LoggingMiddleware
+from app.services.delta_ws_client import run_delta_ws
 
 import os
 from logging.handlers import RotatingFileHandler
@@ -47,7 +49,15 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Startup — initialising cache...")
     await init_cache()
+    ws_task = asyncio.create_task(run_delta_ws())
+    logger.info("Startup — Delta WebSocket client started")
     yield
+    logger.info("Shutdown — stopping Delta WebSocket...")
+    ws_task.cancel()
+    try:
+        await ws_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Shutdown — closing cache...")
     await close_cache()
 
@@ -98,3 +108,4 @@ app.include_router(expiries.router, prefix="/api/v1", tags=["Expiries"])
 app.include_router(options.router,  prefix="/api/v1", tags=["Options Chain"])
 app.include_router(plot_data.router, prefix="/api/v1", tags=["Plot Data"])
 app.include_router(logs.router,     prefix="/api/v1", tags=["Logs"])
+app.include_router(ws.router,       tags=["WebSocket"])

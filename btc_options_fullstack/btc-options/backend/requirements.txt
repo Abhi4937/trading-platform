@@ -5,3 +5,4 @@ redis==5.0.7
 pydantic==2.7.4
 pydantic-settings==2.3.3
 python-multipart==0.0.9
+websockets>=12.0

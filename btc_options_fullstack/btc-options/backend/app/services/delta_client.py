@@ -17,11 +17,14 @@ class DeltaClient:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
 
-    def _auth_headers(self, method: str, path: str) -> dict:
+    def _auth_headers(self, method: str, path: str, params: dict | None = None) -> dict:
         if not settings.DELTA_API_KEY:
             return {}
         ts = str(int(time.time()))
-        msg = method + ts + path
+        query_string = ""
+        if params:
+            query_string = "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        msg = method + ts + path + query_string
         sig = hmac.new(
             settings.DELTA_API_SECRET.encode(),
             msg.encode(),
@@ -35,7 +38,7 @@ class DeltaClient:
         }
 
     async def get(self, path: str, params: dict | None = None) -> Any:
-        headers = self._auth_headers("GET", path)
+        headers = self._auth_headers("GET", path, params)
         start = time.perf_counter()
         try:
             r = await self._http.get(path, params=params, headers=headers)
