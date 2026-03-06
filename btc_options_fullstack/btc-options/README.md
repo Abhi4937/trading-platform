@@ -1,6 +1,40 @@
-# BTC Options Chain — Full-Stack App
+# BTC Options Chain — Full-Stack Trading Platform
 
-Delta Exchange BTC options with real-time Greeks, IV smile, IV vs RV charts.
+A full-stack web application for viewing **real-time BTC options data** from Delta Exchange. It computes Black-Scholes Greeks server-side, visualises the IV smile, IV vs Realised Volatility, and premium OHLCV charts — all in a live, auto-refreshing dashboard.
+
+Built with **FastAPI** (Python) on the backend, **React + TypeScript** (Vite) on the frontend, **Redis** for caching, and fully containerised with **Docker**.
+
+---
+
+## Architecture
+
+### System Overview
+
+![Architecture Diagram](<../../architecture%20diagram/architecture%20diagram.png>)
+
+### Light Mode
+
+![Architecture Diagram Light](<../../architecture%20diagram/architecture%20diagram_light.png>)
+
+```
+Frontend (React + Recharts)  ←HTTP→  FastAPI Backend  ←HTTPS→  Delta Exchange API
+                                           ↕
+                                      Redis Cache (15s TTL)
+```
+
+---
+
+## Features
+
+- Real-time BTC option chain with live Greeks (Delta, Gamma, Theta, Vega, IV)
+- IV Smile chart across strikes for a selected expiry
+- IV vs Realised Volatility timeseries chart
+- Premium OHLCV candlestick chart per contract
+- Demo mode (no API key needed) — synthetic Black-Scholes data
+- 15-second Redis cache to avoid rate limits
+- Fully Dockerised for one-command deployment
+
+---
 
 ## Quick Start
 
@@ -15,7 +49,9 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
-API docs: http://localhost:8000/docs
+- App: http://localhost:8000
+- Interactive API docs (Swagger): http://localhost:8000/docs
+- Alternative API docs (ReDoc): http://localhost:8000/redoc
 
 ### 2. Frontend
 
@@ -38,36 +74,52 @@ cp ../backend/.env.example ../backend/.env
 docker compose up --build
 ```
 
+---
+
 ## API Keys
 
 Get Delta Exchange API keys at: https://www.delta.exchange/app/account/api-keys
 
-- **No API key**: app runs in demo mode with synthetic Black-Scholes generated data
-- **With API key**: live option chain data from Delta Exchange
-- **Testnet**: set `DELTA_BASE_URL=https://testnet-api.delta.exchange` in .env
+| Mode | Description |
+|------|-------------|
+| No API key | Demo mode — synthetic Black-Scholes generated data |
+| With API key | Live option chain data from Delta Exchange |
+| Testnet | Set `DELTA_BASE_URL=https://testnet-api.delta.exchange` in `.env` |
 
-## Architecture
+---
 
-```
-Frontend (React + Recharts)  ←HTTP→  FastAPI Backend  ←HTTPS→  Delta Exchange API
-                                           ↕
-                                      Redis Cache (15s TTL)
-```
-
-## Endpoints
+## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/v1/expiries | Available BTC option expiry dates |
-| GET | /api/v1/spot | Current BTC spot price |
-| GET | /api/v1/options?expiry=YYYY-MM-DD | Full option chain with Greeks |
-| GET | /api/v1/plot-data/premium | OHLCV candles for a contract |
-| GET | /api/v1/plot-data/iv-smile | IV smile across strikes |
-| GET | /api/v1/plot-data/iv-rv | Implied vs Realised vol timeseries |
-| GET | /docs | Interactive OpenAPI docs |
+| GET | `/api/v1/expiries` | Available BTC option expiry dates |
+| GET | `/api/v1/spot` | Current BTC spot price |
+| GET | `/api/v1/options?expiry=YYYY-MM-DD` | Full option chain with Greeks |
+| GET | `/api/v1/plot-data/premium` | OHLCV candles for a contract |
+| GET | `/api/v1/plot-data/iv-smile` | IV smile across strikes |
+| GET | `/api/v1/plot-data/iv-rv` | Implied vs Realised vol timeseries |
+| GET | `/docs` | Interactive OpenAPI docs (Swagger UI) |
+| GET | `/redoc` | Interactive OpenAPI docs (ReDoc) |
+| GET | `/health` | Liveness check |
 
-## Phase Plan
+Full interactive documentation available at: **http://localhost:8000/docs**
 
-**Phase 1 (MVP — done)**: Single provider, full chain + premium + IV charts  
-**Phase 2**: TimescaleDB historical storage, real IV history, Kite/Nifty support  
-**Phase 3**: Auth (JWT), multi-user, backtest integration, WebSocket streaming  
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Backend | FastAPI, Python, Black-Scholes (scipy) |
+| Frontend | React, TypeScript, Vite, Recharts |
+| Cache | Redis (15s TTL) |
+| Infrastructure | Docker, Nginx |
+| Data Source | Delta Exchange REST API |
+
+---
+
+## Roadmap
+
+**Phase 1 (MVP — done)**: Single provider, full chain + premium + IV charts
+**Phase 2**: TimescaleDB historical storage, real IV history, Kite/Nifty support
+**Phase 3**: Auth (JWT), multi-user, backtest integration, WebSocket streaming
