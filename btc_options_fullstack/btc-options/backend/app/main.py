@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 import logging
-from fastapi import FastAPI
+import traceback
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from app.api import expiries, options, plot_data, health
 from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
@@ -14,22 +16,28 @@ from logging.handlers import RotatingFileHandler
 LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-file_handler = RotatingFileHandler(
-    os.path.join(LOG_DIR, "api.log"),
-    maxBytes=5 * 1024 * 1024,  # 5 MB per file
-    backupCount=5,              # keep last 5 rotated files
-    encoding="utf-8",
-)
-file_handler.setFormatter(logging.Formatter(
+_fmt = logging.Formatter(
     "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-))
+)
+
+def _rotating(filename: str, level: int) -> RotatingFileHandler:
+    h = RotatingFileHandler(
+        os.path.join(LOG_DIR, filename),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    h.setFormatter(_fmt)
+    h.setLevel(level)
+    return h
 
 logging.basicConfig(
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(),  # terminal
-        file_handler,             # file
+        logging.StreamHandler(),                            # terminal (all levels)
+        _rotating("api.log", logging.INFO),                # all INFO+ logs
+        _rotating("errors.log", logging.ERROR),            # ERROR+ only
     ],
 )
 logger = logging.getLogger(__name__)
@@ -73,6 +81,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(
+        "Unhandled exception  %s %s\n%s",
+        request.method,
+        request.url,
+        traceback.format_exc(),
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 
 app.include_router(health.router, tags=["Health"])
 app.include_router(expiries.router, prefix="/api/v1", tags=["Expiries"])
