@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
+LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "logs")
 ALLOWED_FILES = {"api", "errors"}
 
 
