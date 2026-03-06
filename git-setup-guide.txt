@@ -1,0 +1,210 @@
+GIT SETUP GUIDE — FROM SCRATCH TO GITHUB
+=========================================
+
+This document covers everything we did to convert a local project folder into a
+Git repository and push it to GitHub with SSH authentication.
+
+
+STEP 1: INITIALIZE GIT REPOSITORY
+-----------------------------------
+Navigate to your project folder and run:
+
+    git init
+
+This creates a hidden .git folder inside your project directory, making it a Git
+repository. At this point everything is local — nothing is on GitHub yet.
+
+
+STEP 2: CREATE A .gitignore FILE
+----------------------------------
+A .gitignore file tells Git which files and folders to ignore (never track or
+commit). This is important for excluding:
+
+  - node_modules/     — thousands of dependency files that can be reinstalled anytime
+  - .env / .env.local — secret API keys and credentials
+  - __pycache__/      — Python compiled bytecode
+  - *.zip             — large archive files
+  - Build outputs, logs, OS files, etc.
+
+Example .gitignore for a Python + Node.js project:
+
+    # Python
+    __pycache__/
+    *.py[cod]
+    .venv/
+    venv/
+
+    # Environment variables
+    .env
+    .env.local
+    *.env
+
+    # Node
+    node_modules/
+    dist/
+
+    # Zip files
+    *.zip
+
+    # OS
+    .DS_Store
+    Thumbs.db
+
+    # IDEs
+    .vscode/
+    .idea/
+
+Without a .gitignore, you risk committing secrets or bloating the repo with
+thousands of unnecessary files.
+
+
+STEP 3: RENAME BRANCH TO main
+-------------------------------
+By default Git creates a branch called master. The modern standard (and GitHub's
+default) is main. Rename it:
+
+    git branch -m main
+
+This only renames the local branch. It has no effect on GitHub yet.
+
+
+STEP 4: CONFIGURE GIT IDENTITY
+--------------------------------
+Git requires a name and email to tag every commit with an author. Use the same
+email as your GitHub account so commits are linked to your profile:
+
+    git config --global user.name "YourGitHubUsername"
+    git config --global user.email "youremail@example.com"
+
+The --global flag means this identity applies to all Git repos on your machine,
+not just this one.
+
+
+STEP 5: STAGE AND COMMIT FILES
+--------------------------------
+Staging means selecting which files you want to include in the next commit.
+Committing saves a snapshot of those files into Git history.
+
+    git add .gitignore
+    git add <folder1>/ <folder2>/
+
+Then commit with a descriptive message:
+
+    git commit -m "Initial commit: project description"
+
+Always check "git status" before committing to see exactly what will be included.
+
+
+STEP 6: GENERATE AN SSH KEY
+-----------------------------
+SSH (Secure Shell) is a cryptographic protocol used to authenticate with GitHub
+without entering a username/password every time. It works using a key pair:
+
+  - Private key (~/.ssh/id_ed25519)     — stays on your machine, never shared
+  - Public key  (~/.ssh/id_ed25519.pub) — uploaded to GitHub
+
+Generate a key pair using the ed25519 algorithm (modern and secure):
+
+    ssh-keygen -t ed25519 -C "youremail@example.com" -f ~/.ssh/id_ed25519 -N ""
+
+Flag reference:
+  -t ed25519              Key algorithm (ed25519 is preferred over RSA)
+  -C "email"              Comment/label to identify the key
+  -f ~/.ssh/id_ed25519    File path to save the key
+  -N ""                   Empty passphrase (no password prompt on each use)
+
+To view your public key (the one you will add to GitHub):
+
+    cat ~/.ssh/id_ed25519.pub
+
+
+STEP 7: ADD SSH KEY TO GITHUB
+-------------------------------
+1. Go to github.com -> Settings -> SSH and GPG keys
+2. Click "New SSH key"
+3. Give it a descriptive title (e.g. WSL Laptop)
+4. Paste the full contents of your public key
+5. Click "Add SSH key"
+
+The SSH key is account-wide — once added, you can push/pull to any of your
+GitHub repos from this machine.
+
+
+STEP 8: TEST SSH CONNECTION
+-----------------------------
+Verify the key is working:
+
+    ssh -T git@github.com
+
+Expected output:
+
+    Hi YourUsername! You've successfully authenticated, but GitHub does not
+    provide shell access.
+
+The message "does not provide shell access" is normal — it confirms authentication
+worked. You do not get a shell into GitHub's servers; you only get Git access.
+
+
+STEP 9: CREATE A REPOSITORY ON GITHUB
+----------------------------------------
+1. Go to github.com/new
+2. Enter a repository name (e.g. trading-platform)
+3. Leave it empty — do NOT initialise with a README, .gitignore, or license
+   (If you initialise it, GitHub creates a commit that conflicts with your local history)
+4. Click "Create repository"
+
+
+STEP 10: ADD REMOTE AND PUSH
+------------------------------
+A remote is a pointer to a repository hosted on GitHub. "origin" is the
+conventional name for your primary remote.
+
+Add the remote using the SSH URL (not HTTPS):
+
+    git remote add origin git@github.com:YourUsername/your-repo-name.git
+
+Push your local main branch to GitHub. The -u flag sets origin/main as the
+default upstream, so future pushes only need "git push":
+
+    git push -u origin main
+
+Your code is now live on GitHub.
+
+
+DAY-TO-DAY WORKFLOW (AFTER SETUP)
+------------------------------------
+Once everything is set up, the regular workflow for pushing changes is:
+
+    git add <changed-files>
+    git commit -m "describe what changed and why"
+    git push
+
+
+SUMMARY OF COMMANDS
+---------------------
+    # 1. Initialise repo
+    git init
+
+    # 2. Rename branch
+    git branch -m main
+
+    # 3. Set identity
+    git config --global user.name "Username"
+    git config --global user.email "email@example.com"
+
+    # 4. Generate SSH key
+    ssh-keygen -t ed25519 -C "email@example.com" -f ~/.ssh/id_ed25519 -N ""
+
+    # 5. View public key (copy this to GitHub)
+    cat ~/.ssh/id_ed25519.pub
+
+    # 6. Test SSH
+    ssh -T git@github.com
+
+    # 7. Stage and commit
+    git add .
+    git commit -m "Initial commit"
+
+    # 8. Add remote and push
+    git remote add origin git@github.com:Username/repo-name.git
+    git push -u origin main
