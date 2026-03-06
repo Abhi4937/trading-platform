@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     RATE_LIMIT_PER_MINUTE: int = 60
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
-    RISK_FREE_RATE: float = 0.05     # annualised
+    RISK_FREE_RATE: float = 0.0      # annualised (crypto has no risk-free rate)
 
     ENV: str = "development"
     LOG_LEVEL: str = "INFO"
