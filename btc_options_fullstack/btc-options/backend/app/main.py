@@ -8,7 +8,30 @@ from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
 from app.core.logging_middleware import LoggingMiddleware
 
-logging.basicConfig(level=logging.INFO)
+import os
+from logging.handlers import RotatingFileHandler
+
+LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "api.log"),
+    maxBytes=5 * 1024 * 1024,  # 5 MB per file
+    backupCount=5,              # keep last 5 rotated files
+    encoding="utf-8",
+)
+file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),  # terminal
+        file_handler,             # file
+    ],
+)
 logger = logging.getLogger(__name__)
 
 
