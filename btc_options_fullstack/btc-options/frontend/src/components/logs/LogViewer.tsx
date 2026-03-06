@@ -19,10 +19,11 @@ function levelColor(line: string): string {
 }
 
 function matchesFilter(line: string, filter: Filter): boolean {
+  if (line.includes('  httpx  ')) return false; // suppress httpx noise in all filters
   switch (filter) {
-    case 'ALL':        return true;
-    case 'INBOUND':    return line.includes('  api  ');
-    case 'OUTBOUND':   return line.includes('DELTA  GET');
+    case 'ALL':        return !line.includes('  httpx  ');
+    case 'INBOUND':    return /INFO\s+api\s+/.test(line);
+    case 'OUTBOUND':   return line.includes('delta_client') && line.includes('DELTA');
     case 'CACHE HIT':  return line.includes('CACHE  HIT');
     case 'CACHE MISS': return line.includes('CACHE  MISS');
     case 'ERROR':      return line.includes('ERROR') || line.includes('WARNING');
@@ -50,15 +51,19 @@ export function LogViewer() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [search, setSearch]         = useState('');
-  const prevLengthRef               = useRef(0);
+  const lastLineRef                 = useRef('');
   const bottomRef                   = useRef<HTMLDivElement>(null);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.getLogs(logFile, lineCount);
-      setLines(res.lines);
-      setLastUpdated(new Date());
+      const lastLine = res.lines[res.lines.length - 1] ?? '';
+      if (lastLine !== lastLineRef.current) {
+        lastLineRef.current = lastLine;
+        setLines(res.lines);
+        setLastUpdated(new Date());
+      }
     } catch {
       setLines(['[Error] Could not fetch logs — is the backend running?']);
     } finally {
@@ -74,12 +79,11 @@ export function LogViewer() {
     return () => clearInterval(id);
   }, [autoRefresh, fetchLogs]);
 
-  // Only auto-scroll when new lines actually arrive
+  // Only scroll when last line changes (new content arrived)
   useEffect(() => {
-    if (lines.length > prevLengthRef.current) {
+    if (lines.length > 0) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-    prevLengthRef.current = lines.length;
   }, [lines]);
 
   const filtered = lines.filter(l =>
