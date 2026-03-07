@@ -4,6 +4,7 @@
 _tickers: dict[str, dict] = {}
 _spot: float = 0.0
 _connected: bool = False
+_products: list[dict] = []
 
 
 def update_ticker(symbol: str, data: dict) -> None:
@@ -34,3 +35,12 @@ def is_connected() -> bool:
 
 def has_data() -> bool:
     return bool(_tickers) and _spot > 0
+
+
+def set_products(products: list[dict]) -> None:
+    global _products
+    _products = products
+
+
+def get_products() -> list[dict]:
+    return _products

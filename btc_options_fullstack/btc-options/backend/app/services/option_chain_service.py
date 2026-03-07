@@ -82,12 +82,18 @@ async def get_expiries() -> ExpiryListResponse:
 
 
 async def _get_products_cached() -> list[dict]:
+    # Prefer in-memory store (set by WS client on startup and hourly refresh)
+    mem = ticker_store.get_products()
+    if mem:
+        return mem
+    # Fallback to Redis, then REST
     cached = await redis_cache.get("products:BTC")
     if cached:
         return cached
     client = get_delta_client()
     products = await client.get_btc_option_products()
     await redis_cache.set("products:BTC", products, settings.CACHE_TTL_PRODUCTS)
+    ticker_store.set_products(products)
     return products
 
 

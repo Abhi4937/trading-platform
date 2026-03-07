@@ -18,6 +18,7 @@ async def run_delta_ws() -> None:
         try:
             client = get_delta_client()
             products = await client.get_btc_option_products()
+            ticker_store.set_products(products)
             symbols = [p["symbol"] for p in products if p.get("symbol")]
             symbols_set = set(symbols)
             # Include spot ticker
@@ -66,6 +67,7 @@ async def run_delta_ws() -> None:
                     if asyncio.get_event_loop().time() - last_refresh > 3600:
                         last_refresh = asyncio.get_event_loop().time()
                         new_products = await client.get_btc_option_products()
+                        ticker_store.set_products(new_products)
                         new_syms = [
                             p["symbol"] for p in new_products
                             if p.get("symbol") and p["symbol"] not in symbols_set
