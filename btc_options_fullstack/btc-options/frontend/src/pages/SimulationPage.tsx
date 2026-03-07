@@ -77,32 +77,73 @@ export default function SimulationPage() {
   } | null>(null);
   const bfPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Load available dates ──────────────────────────────────────────────────
+  // ── Set default date to yesterday ────────────────────────────────────────
   useEffect(() => {
-    fetch('/api/v1/historical/dates')
-      .then(r => r.json())
-      .then(d => {
-        const list: string[] = d.dates || [];
-        setDates(list);
-        if (list.length) setSelectedDate(list[0]);
-      })
-      .catch(() => setError('TimescaleDB not connected — start recording first'));
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    setSelectedDate(yesterday.toISOString().slice(0, 10));
   }, []);
 
-  // ── Load expiries when date changes ───────────────────────────────────────
+  // ── Load expiries — auto-fetch from Delta if near-term data missing ────────
   useEffect(() => {
     if (!selectedDate) return;
     setExpiries([]);
     setSelectedExpiry('');
     setTimestamps([]);
     setChain(null);
-    fetch(`/api/v1/historical/expiries?date=${selectedDate}`)
-      .then(r => r.json())
-      .then(d => {
-        const list: string[] = d.expiries || [];
-        setExpiries(list);
-        if (list.length) setSelectedExpiry(list[0]);
-      });
+    setError('');
+
+    const load = async () => {
+      // Check what expiries are already in DB for this date
+      const res = await fetch(`/api/v1/historical/expiries?date=${selectedDate}`);
+      const d = await res.json();
+      const existing: string[] = d.expiries || [];
+
+      // Are near-term expiries (within 7 days) present?
+      const base = new Date(selectedDate + 'T00:00:00Z').getTime();
+      const hasNearTerm = existing.some(e =>
+        (new Date(e + 'T00:00:00Z').getTime() - base) / 86400000 <= 7
+      );
+
+      if (!hasNearTerm) {
+        // Auto-fetch from Delta candles API for this date
+        setBfStatus({ running: true, done: 0, total: 0,
+          status: `Fetching options data for ${selectedDate} from Delta...`, errors: 0 });
+        try {
+          await fetch('/api/v1/historical/backfill', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: selectedDate, resolution: '1h', strike_count: 20, strike_interval: 200 }),
+          });
+          // Poll until complete
+          await new Promise<void>(resolve => {
+            const poll = setInterval(async () => {
+              const s = await fetch('/api/v1/historical/backfill/status').then(r => r.json());
+              setBfStatus(s);
+              if (!s.running) { clearInterval(poll); resolve(); }
+            }, 1000);
+          });
+          // Refresh dates list
+          const datesRes = await fetch('/api/v1/historical/dates');
+          const datesData = await datesRes.json();
+          setDates(datesData.dates || []);
+          // Reload expiries
+          const res2 = await fetch(`/api/v1/historical/expiries?date=${selectedDate}`);
+          const d2 = await res2.json();
+          const list2: string[] = d2.expiries || [];
+          setExpiries(list2);
+          if (list2.length) setSelectedExpiry(list2[0]);
+          return;
+        } catch (e) {
+          setError('Auto-fetch failed: ' + String(e));
+        }
+      }
+
+      setExpiries(existing);
+      if (existing.length) setSelectedExpiry(existing[0]);
+    };
+
+    load().catch(e => setError(String(e)));
   }, [selectedDate]);
 
   // ── Load timestamps when date / expiry / interval changes ────────────────
@@ -190,23 +231,17 @@ export default function SimulationPage() {
         padding: '10px 16px', background: '#0d1117', borderBottom: '1px solid #1a2d42',
       }}>
 
-        {/* Date — dropdown of recorded dates only */}
+        {/* Date — free input, auto-fetches from Delta if not in DB */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={labelStyle}>DATE</span>
-          <select
+          <input
+            type="date"
             value={selectedDate}
+            max={new Date().toISOString().slice(0, 10)}
+            min="2024-01-01"
             onChange={e => setSelectedDate(e.target.value)}
             style={selStyle}
-          >
-            {dates.length === 0 && <option value="">— no data —</option>}
-            {dates.map(d => (
-              <option key={d} value={d}>
-                {new Date(d + 'T00:00:00Z').toLocaleDateString('en-IN', {
-                  day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC',
-                })}
-              </option>
-            ))}
-          </select>
+          />
         </div>
 
         {/* Expiry — with relative labels */}
