@@ -25,6 +25,16 @@ async def run_delta_ws() -> None:
 
             logger.info("Delta WS: connecting, %d option symbols", len(symbols))
 
+            # Seed spot price via REST immediately so has_data() returns True
+            # as soon as first option tickers arrive — don't wait for BTCUSDT WS push
+            try:
+                spot = await client.get_spot_price()
+                if spot > 0:
+                    ticker_store.update_spot(spot)
+                    logger.info("Delta WS: seeded spot=%.2f", spot)
+            except Exception as e:
+                logger.warning("Delta WS: spot seed failed: %s", e)
+
             async with websockets.connect(
                 WS_URL,
                 ping_interval=30,
