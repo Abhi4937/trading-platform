@@ -104,7 +104,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(health.router, tags=["Health"])
-app.include_router(health.router, prefix="/api", tags=["Debug"])
 app.include_router(expiries.router, prefix="/api/v1", tags=["Expiries"])
 app.include_router(options.router,  prefix="/api/v1", tags=["Options Chain"])
 app.include_router(plot_data.router, prefix="/api/v1", tags=["Plot Data"])
