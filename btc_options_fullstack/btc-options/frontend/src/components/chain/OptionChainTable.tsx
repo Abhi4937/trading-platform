@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import type { ChainRow, OptionLeg } from '../../types/api';
 
 interface Props {
@@ -26,6 +26,14 @@ const COLUMNS = [
 export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike, onSelectLeg }) => {
   const [filter, setFilter] = useState('');
   const [showStrikes, setShowStrikes] = useState(20);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      const el = scrollRef.current;
+      el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2;
+    }
+  }, [atmStrike]);
 
   const filtered = useMemo(() => {
     let rows = chain;
@@ -66,7 +74,7 @@ export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike,
         </select>
       </div>
 
-      <div className="table-scroll">
+      <div className="table-scroll" ref={scrollRef}>
         <table className="chain-table">
           <thead>
             <tr>
