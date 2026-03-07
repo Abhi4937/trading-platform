@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     # Delta Exchange — set in .env
     DELTA_API_KEY: str = ""
     DELTA_API_SECRET: str = ""
-    DELTA_BASE_URL: str = "https://api.delta.exchange"
+    DELTA_BASE_URL: str = "https://api.india.delta.exchange"
 
     # Redis caching
     REDIS_URL: str = "redis://localhost:6379/0"

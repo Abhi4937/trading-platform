@@ -9,7 +9,7 @@ from app.services.delta_client import get_delta_client
 
 logger = logging.getLogger(__name__)
 
-WS_URL = "wss://socket.delta.exchange"
+WS_URL = "wss://socket.india.delta.exchange"
 
 
 async def run_delta_ws() -> None:
