@@ -11,17 +11,16 @@ interface Props {
 const f = (n: number | undefined, d = 2) =>
   n == null || isNaN(n) ? '—' : n.toFixed(d);
 
-const fUsd = (contracts: number | undefined, spot: number) => {
-  if (contracts == null || isNaN(contracts) || contracts === 0) return '—';
-  const usd = contracts * 0.001 * spot;
+const fUsd = (usd: number | undefined) => {
+  if (usd == null || isNaN(usd) || usd === 0) return '—';
   if (usd >= 1_000_000) return `$${(usd / 1_000_000).toFixed(2)}M`;
   if (usd >= 1_000)     return `$${(usd / 1_000).toFixed(1)}K`;
   return `$${usd.toFixed(0)}`;
 };
 
 const COLUMNS = [
-  { key: 'open_interest', label: 'OI (USD)',  decimals: 0, usd: true },
-  { key: 'volume',        label: 'Vol (USD)', decimals: 0, usd: true },
+  { key: 'oi_usd',     label: 'OI (USD)',  decimals: 0, usd: true },
+  { key: 'volume_usd', label: 'Vol (USD)', decimals: 0, usd: true },
   { key: 'delta',         label: 'Δ Delta', decimals: 3 },
   { key: 'iv_pct',        label: 'IV %',    decimals: 1 },
   { key: 'vega',          label: 'Vega',    decimals: 2 },
@@ -107,7 +106,7 @@ export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike,
               >
                 {COLUMNS.map(c => {
                   const val = row.call ? (row.call as any)[c.key] : undefined;
-                  const display = (c as any).usd ? fUsd(val, spotPrice) : f(val, c.decimals);
+                  const display = (c as any).usd ? fUsd(val) : f(val, c.decimals);
                   return (
                     <td
                       key={c.key}
@@ -124,7 +123,7 @@ export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike,
                 </td>
                 {[...COLUMNS].reverse().map(c => {
                   const val = row.put ? (row.put as any)[c.key] : undefined;
-                  const display = (c as any).usd ? fUsd(val, spotPrice) : f(val, c.decimals);
+                  const display = (c as any).usd ? fUsd(val) : f(val, c.decimals);
                   return (
                     <td
                       key={c.key + '_p'}

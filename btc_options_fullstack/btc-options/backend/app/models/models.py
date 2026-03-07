@@ -13,7 +13,9 @@ class OptionLeg(BaseModel):
     ask: float = 0.0
     mid: float = 0.0
     volume: int = 0
+    volume_usd: float = 0.0
     open_interest: int = 0
+    oi_usd: float = 0.0
     iv: float = 0.0            # annualised decimal
     iv_pct: float = 0.0        # iv * 100 for display
     delta: float = 0.0

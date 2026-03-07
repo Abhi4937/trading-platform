@@ -159,6 +159,8 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
         mid  = (bid + ask) / 2 if bid and ask else mark_price
         oi   = int(ticker.get("oi_contracts") or 0)
         vol  = int(ticker.get("volume") or 0)
+        oi_usd  = float(ticker.get("oi_value_usd") or 0)
+        vol_usd = float(ticker.get("turnover_usd") or 0)
 
         # IV: use mark_price (exchange fair value) for Newton-Raphson
         # mark_iv from quotes is decimal (e.g. 0.65 = 65%), use as sanity check
@@ -175,7 +177,8 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
             symbol=prod.get("symbol", ""),
             last_price=round(mark_price, 2), bid=round(bid, 2),
             ask=round(ask, 2), mid=round(mid, 2),
-            volume=vol, open_interest=oi,
+            volume=vol, volume_usd=round(vol_usd, 2),
+            open_interest=oi, oi_usd=round(oi_usd, 2),
             iv=round(iv, 6), iv_pct=round(iv * 100, 2),
             delta=g.delta, gamma=g.gamma, theta=g.theta,
             vega=g.vega, rho=g.rho, price_bs=g.price_bs,
@@ -248,6 +251,8 @@ async def get_option_chain_from_store(expiry: date) -> OptionChainResponse:
             mid = (bid + ask) / 2 if bid and ask else mark_price
             oi = int(ticker.get("oi_contracts") or 0)
             vol = int(ticker.get("volume") or 0)
+            oi_usd  = float(ticker.get("oi_value_usd") or 0)
+            vol_usd = float(ticker.get("turnover_usd") or 0)
 
             raw_iv = quotes.get("mark_iv") or ticker.get("mark_vol")
             iv = float(raw_iv) if raw_iv else (
@@ -260,7 +265,8 @@ async def get_option_chain_from_store(expiry: date) -> OptionChainResponse:
                 symbol=prod.get("symbol", ""),
                 last_price=round(mark_price, 2), bid=round(bid, 2),
                 ask=round(ask, 2), mid=round(mid, 2),
-                volume=vol, open_interest=oi,
+                volume=vol, volume_usd=round(vol_usd, 2),
+                open_interest=oi, oi_usd=round(oi_usd, 2),
                 iv=round(iv, 6), iv_pct=round(iv * 100, 2),
                 delta=g.delta, gamma=g.gamma, theta=g.theta,
                 vega=g.vega, rho=g.rho, price_bs=g.price_bs,
