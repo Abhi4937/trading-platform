@@ -8,7 +8,9 @@ export interface OptionLeg {
   ask: number;
   mid: number;
   volume: number;
+  volume_usd: number;
   open_interest: number;
+  oi_usd: number;
   iv: number;
   iv_pct: number;
   delta: number;

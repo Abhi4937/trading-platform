@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
     RISK_FREE_RATE: float = 0.0      # annualised (crypto has no risk-free rate)
 
+    # TimescaleDB — historical data recording
+    TIMESCALE_URL: str = "postgresql://btcuser:btcpass@localhost:5432/btcoptions"
+    TIMESCALE_RECORD: bool = True   # set False to disable historical recording
+
     ENV: str = "development"
     LOG_LEVEL: str = "INFO"
 

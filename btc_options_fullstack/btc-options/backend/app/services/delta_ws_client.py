@@ -6,6 +6,7 @@ import websockets
 
 from app.services import ticker_store
 from app.services.delta_client import get_delta_client
+from app.db import recorder
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +103,10 @@ def _handle_message(msg: dict) -> None:
         price = float(msg.get("close") or msg.get("mark_price") or 0)
         if price > 0:
             ticker_store.update_spot(price)
+            recorder.record_spot(price)
     else:
         ticker_store.update_ticker(symbol, msg)
+        recorder.record_ticker(symbol, msg, ticker_store.get_spot())
         if not _first_ticker_logged:
             _first_ticker_logged = True
             logger.info("ticker_store: first ticker stored — symbol=%s tickers=%d", symbol, len(ticker_store._tickers))

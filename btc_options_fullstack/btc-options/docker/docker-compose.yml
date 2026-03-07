@@ -10,8 +10,11 @@ services:
       - ../backend/.env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - TIMESCALE_URL=postgresql://btcuser:btcpass@timescaledb:5432/btcoptions
     depends_on:
       redis:
+        condition: service_healthy
+      timescaledb:
         condition: service_healthy
     restart: unless-stopped
 
@@ -24,7 +27,7 @@ services:
   #    depends_on:
   #      - backend
   #    restart: unless-stopped
-    
+
   redis:
     image: redis:7-alpine
     ports:
@@ -37,5 +40,23 @@ services:
     volumes:
       - redis_data:/data
 
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: btcoptions
+      POSTGRES_USER: btcuser
+      POSTGRES_PASSWORD: btcpass
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btcuser -d btcoptions"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   redis_data:
+  timescale_data:
