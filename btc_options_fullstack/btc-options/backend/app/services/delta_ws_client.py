@@ -63,7 +63,7 @@ async def run_delta_ws() -> None:
                     _handle_message(msg)
 
                     # Refresh product list every 5 min to pick up new expiries
-                    if asyncio.get_event_loop().time() - last_refresh > 300:
+                    if asyncio.get_event_loop().time() - last_refresh > 3600:
                         last_refresh = asyncio.get_event_loop().time()
                         new_products = await client.get_btc_option_products()
                         new_syms = [
