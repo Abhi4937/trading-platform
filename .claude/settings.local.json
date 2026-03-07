@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(echo start=$START end=$END:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}

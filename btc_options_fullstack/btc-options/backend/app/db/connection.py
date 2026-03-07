@@ -65,7 +65,7 @@ async def _create_schema() -> None:
         except Exception:
             pass
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_opt_symbol_time ON option_ticks (symbol, time DESC)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_opt_symbol_time_unique ON option_ticks (symbol, time)
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_opt_expiry_time ON option_ticks (expiry, time DESC)

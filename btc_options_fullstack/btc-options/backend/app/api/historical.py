@@ -65,12 +65,13 @@ async def get_historical_times(
     rows = await pool.fetch("""
         SELECT DISTINCT
             date_trunc('minute', time) -
-            (EXTRACT(minute FROM time)::int % $3 * interval '1 minute') AS bucket
+            (EXTRACT(minute FROM time)::int % $3 * interval '1 minute')
+            + ($3 * interval '1 minute') AS bucket_end
         FROM option_ticks
         WHERE DATE(time AT TIME ZONE 'UTC') = $1 AND expiry = $2
-        ORDER BY bucket
+        ORDER BY bucket_end
     """, d, exp, interval)
-    return {"timestamps": [r["bucket"].isoformat() for r in rows]}
+    return {"timestamps": [r["bucket_end"].isoformat() for r in rows]}
 
 
 @router.get("/historical/chain")

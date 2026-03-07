@@ -41,6 +41,11 @@ export default function SimulationPage() {
   const [speed, setSpeed] = useState(1000);
   const [error, setError] = useState('');
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [showBackfill, setShowBackfill] = useState(false);
+  const [bfDate, setBfDate] = useState('');
+  const [bfRes, setBfRes] = useState('1h');
+  const [bfStatus, setBfStatus] = useState<{running:boolean,done:number,total:number,status:string,errors:number}|null>(null);
+  const bfPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
 
   // Load available dates
   useEffect(() => {
@@ -121,7 +126,28 @@ export default function SimulationPage() {
         return prev + 1;
       });
     }, speed);
-    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+    const startBackfill = async () => {
+    if (!bfDate) return;
+    const res = await fetch('/api/v1/historical/backfill', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ date: bfDate, resolution: bfRes, strike_count: 20, strike_interval: 200 }),
+    });
+    if (!res.ok) { alert(await res.text()); return; }
+    // Poll status
+    if (bfPollRef.current) clearInterval(bfPollRef.current);
+    bfPollRef.current = setInterval(async () => {
+      const s = await fetch('/api/v1/historical/backfill/status').then(r=>r.json());
+      setBfStatus(s);
+      if (!s.running) {
+        if (bfPollRef.current) clearInterval(bfPollRef.current);
+        // Refresh dates list
+        fetch('/api/v1/historical/dates').then(r=>r.json()).then(d=>setDates(d.dates||[]));
+      }
+    }, 1000);
+  };
+
+  return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [playing, tsIndex, timestamps.length, speed]);
 
   const fmtTs = (iso: string) => {
@@ -134,6 +160,27 @@ export default function SimulationPage() {
   const fmtDate = (iso: string) => {
     try { return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); }
     catch { return iso; }
+  };
+
+  const startBackfill = async () => {
+    if (!bfDate) return;
+    const res = await fetch('/api/v1/historical/backfill', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ date: bfDate, resolution: bfRes, strike_count: 20, strike_interval: 200 }),
+    });
+    if (!res.ok) { alert(await res.text()); return; }
+    // Poll status
+    if (bfPollRef.current) clearInterval(bfPollRef.current);
+    bfPollRef.current = setInterval(async () => {
+      const s = await fetch('/api/v1/historical/backfill/status').then(r=>r.json());
+      setBfStatus(s);
+      if (!s.running) {
+        if (bfPollRef.current) clearInterval(bfPollRef.current);
+        // Refresh dates list
+        fetch('/api/v1/historical/dates').then(r=>r.json()).then(d=>setDates(d.dates||[]));
+      }
+    }, 1000);
   };
 
   return (
@@ -319,6 +366,38 @@ export default function SimulationPage() {
               atmStrike={chain.atm_strike}
             />
           </div>
+        )}
+      </div>
+
+      {/* Backfill Panel */}
+      <div style={{
+        borderTop: '1px solid #1a2d42', padding: '8px 16px',
+        background: '#0d1117', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      }}>
+        <span style={{ fontSize: 11, color: '#8b949e', fontWeight: 600 }}>BACKFILL HISTORY</span>
+        <input
+          type="date"
+          value={bfDate}
+          onChange={e => setBfDate(e.target.value)}
+          style={{ background:'#161b22', border:'1px solid #30363d', color:'#c9d1d9', borderRadius:4, padding:'3px 8px', fontSize:12 }}
+        />
+        <select
+          value={bfRes}
+          onChange={e => setBfRes(e.target.value)}
+          style={{ background:'#161b22', border:'1px solid #30363d', color:'#c9d1d9', borderRadius:4, padding:'3px 6px', fontSize:12 }}
+        >
+          {['1m','5m','15m','30m','1h','4h','1d'].map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <button
+          onClick={startBackfill}
+          disabled={!bfDate || (bfStatus?.running ?? false)}
+          style={{ ...btnStyle, background:'#238636', border:'1px solid #238636', fontSize:12, padding:'3px 12px' }}
+        >{bfStatus?.running ? 'Running...' : 'Fetch & Store'}</button>
+        {bfStatus && (
+          <span style={{ fontSize: 12, color: bfStatus.running ? '#f0c000' : '#3fb950' }}>
+            {bfStatus.status}
+            {bfStatus.total > 0 && ` (${bfStatus.done}/${bfStatus.total})`}
+          </span>
         )}
       </div>
     </div>

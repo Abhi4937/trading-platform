@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backfill
 from app.db import connection as db_connection, recorder as db_recorder
 from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
@@ -117,3 +117,4 @@ app.include_router(plot_data.router, prefix="/api/v1", tags=["Plot Data"])
 app.include_router(logs.router,     prefix="/api/v1", tags=["Logs"])
 app.include_router(ws.router,       tags=["WebSocket"])
 app.include_router(historical.router, prefix="/api/v1", tags=["Historical"])
+app.include_router(backfill.router,   prefix="/api/v1", tags=["Backfill"])
