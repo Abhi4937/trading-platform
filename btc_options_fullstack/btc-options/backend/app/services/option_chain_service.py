@@ -12,6 +12,7 @@ from app.models.models import (
     OptionChainResponse, OptionLeg, SpotResponse,
 )
 from app.services.delta_client import get_delta_client
+from app.services import ticker_store
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
     for p in all_products:
         dt = _parse_settlement(p)
         if dt and dt.date() == expiry:
-            exp_products.append(p)
+            exp_producticker_store.append(p)
 
     if not exp_products:
         # Demo mode: generate synthetic chain
@@ -133,14 +134,13 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
         product_map[(k, ct)] = p
 
     async def fetch_leg(strike: float, opt_type: str) -> tuple[float, str, dict, dict]:
-        from app.services import ticker_store as ts
         prod = product_map.get((strike, opt_type))
         if not prod:
             return strike, opt_type, {}, {}
         try:
             ticker = await client.get_ticker(prod["symbol"])
             if ticker:
-                ts.update_ticker(prod["symbol"], ticker)  # cache in memory for next switch
+                ticker_store.update_ticker(prod["symbol"], ticker)  # cache in memory for next switch
             return strike, opt_type, prod, ticker
         except Exception as e:
             logger.warning("Ticker fetch failed %s: %s", prod.get("symbol"), e)
@@ -151,7 +151,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
     results = []
     for i in range(0, len(tasks), 20):
         batch = await asyncio.gather(*tasks[i:i+20])
-        results.extend(batch)
+        resulticker_store.extend(batch)
 
     # Build chain rows
     leg_map: dict[tuple[float, str], OptionLeg] = {}
@@ -214,9 +214,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
 
 async def get_option_chain_from_store(expiry: date) -> OptionChainResponse:
     """Build option chain using in-memory ticker_store instead of REST calls."""
-    from app.services import ticker_store as ts
-
-    spot = ts.get_spot()
+    spot = ticker_store.get_spot()
     if spot <= 0:
         spot = 95000.0
 
@@ -246,7 +244,7 @@ async def get_option_chain_from_store(expiry: date) -> OptionChainResponse:
             prod = product_map.get((strike, opt_type))
             if not prod:
                 continue
-            ticker = ts.get_ticker(prod["symbol"])
+            ticker = ticker_store.get_ticker(prod["symbol"])
             if not ticker:
                 continue
 
