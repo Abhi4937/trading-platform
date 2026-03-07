@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useExpiries, useOptionChain } from './hooks/useOptionChain';
 import { OptionChainTable } from './components/chain/OptionChainTable';
 import { LogViewer } from './components/logs/LogViewer';
@@ -9,6 +9,25 @@ export default function App() {
   const { expiries, spot, loading: expLoading } = useExpiries();
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   const [showLogs, setShowLogs] = useState(false);
+  const [logHeight, setLogHeight] = useState(window.innerHeight / 3);
+  const dragging = useRef(false);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    dragging.current = true;
+    e.preventDefault();
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const newHeight = window.innerHeight - e.clientY;
+      setLogHeight(Math.min(Math.max(newHeight, 100), window.innerHeight * 0.8));
+    };
+    const onUp = () => { dragging.current = false; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, []);
 
   const { data: chain, loading: chainLoading, error, refetch } = useOptionChain(selectedExpiry, true);
 
@@ -74,15 +93,28 @@ export default function App() {
       </header>
 
 
-      {/* Log Viewer — fixed bottom 1/3 */}
+      {/* Log Viewer — fixed bottom, resizable */}
       {showLogs && (
         <div style={{
           position: 'fixed', bottom: 0, left: 0, right: 0,
-          height: '33vh', background: '#010409',
+          height: logHeight, background: '#010409',
           borderTop: '1px solid #1a2d42', zIndex: 100,
-          padding: '8px 12px',
+          display: 'flex', flexDirection: 'column',
         }}>
-          <LogViewer />
+          {/* Drag handle */}
+          <div
+            onMouseDown={onMouseDown}
+            style={{
+              height: 6, cursor: 'ns-resize', flexShrink: 0,
+              background: 'linear-gradient(to bottom, #1a2d42, transparent)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <div style={{ width: 40, height: 3, borderRadius: 2, background: '#243a52' }} />
+          </div>
+          <div style={{ flex: 1, overflow: 'hidden', padding: '4px 12px 8px' }}>
+            <LogViewer />
+          </div>
         </div>
       )}
 
