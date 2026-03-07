@@ -48,6 +48,9 @@ async def get_spot() -> SpotResponse:
 
 
 async def get_expiries() -> ExpiryListResponse:
+    mem = ticker_store.get_expiries_cached(ttl=300)
+    if mem:
+        return ExpiryListResponse(**mem)
     cached = await redis_cache.get("expiries:BTC")
     if cached:
         return ExpiryListResponse(**cached)
@@ -78,6 +81,7 @@ async def get_expiries() -> ExpiryListResponse:
         expiry_list.append(ExpiryInfo(date=d, label=f"{label} ({days}d)", days=days))
 
     resp = ExpiryListResponse(underlying="BTC", spot_price=spot, expiries=expiry_list)
+    ticker_store.set_expiries(resp.model_dump())
     await redis_cache.set("expiries:BTC", resp.model_dump(), settings.CACHE_TTL_EXPIRIES)
     return resp
 
