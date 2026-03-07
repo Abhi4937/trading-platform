@@ -18,8 +18,8 @@ const COLUMNS = [
   { key: 'gamma',     label: 'Gamma',    decimals: 4 },
   { key: 'theta',     label: 'Theta',    decimals: 2 },
   { key: 'bid',       label: 'Bid',      decimals: 2 },
-  { key: 'ask',       label: 'Ask',      decimals: 2 },
   { key: 'last_price', label: 'Mark',    decimals: 2 },
+  { key: 'ask',       label: 'Ask',      decimals: 2 },
   { key: 'price_bs',  label: 'BS Price', decimals: 2 },
 ];
 
