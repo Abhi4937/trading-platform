@@ -69,7 +69,8 @@ export default function SimulationPage() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Backfill state
-  const [bfDate, setBfDate]   = useState('');
+  const [bfDate, setBfDate]       = useState('');
+  const [bfEndDate, setBfEndDate] = useState('');
   const [bfRes,  setBfRes]    = useState('1h');
   const [bfStatus, setBfStatus] = useState<{
     running: boolean; done: number; total: number; status: string; errors: number;
@@ -162,7 +163,7 @@ export default function SimulationPage() {
     const res = await fetch('/api/v1/historical/backfill', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: bfDate, resolution: bfRes, strike_count: 20, strike_interval: 200 }),
+      body: JSON.stringify({ date: bfDate, end_date: bfEndDate, resolution: bfRes, strike_count: 20, strike_interval: 200 }),
     });
     if (!res.ok) { alert(await res.text()); return; }
     if (bfPollRef.current) clearInterval(bfPollRef.current);
@@ -342,10 +343,15 @@ export default function SimulationPage() {
         background: '#0d1117', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
       }}>
         <span style={{ fontSize: 11, color: '#8b949e', fontWeight: 600, letterSpacing: 1 }}>BACKFILL</span>
-        <input
-          type="date" value={bfDate} onChange={e => setBfDate(e.target.value)}
-          style={{ ...selStyle, fontSize: 12 }}
-        />
+        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          <span style={{ fontSize:10, color:'#8b949e' }}>FROM</span>
+          <input type="date" value={bfDate} onChange={e => setBfDate(e.target.value)} style={{ ...selStyle, fontSize: 12 }} />
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          <span style={{ fontSize:10, color:'#8b949e' }}>TO</span>
+          <input type="date" value={bfEndDate} onChange={e => setBfEndDate(e.target.value)} style={{ ...selStyle, fontSize: 12 }} />
+          <span style={{ fontSize:10, color:'#8b949e' }}>(weekly steps)</span>
+        </div>
         <select value={bfRes} onChange={e => setBfRes(e.target.value)} style={{ ...selStyle, fontSize: 12 }}>
           {['1m','5m','15m','30m','1h','4h','1d'].map(r => <option key={r} value={r}>{r}</option>)}
         </select>

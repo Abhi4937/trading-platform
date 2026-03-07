@@ -26,10 +26,11 @@ _progress: dict = {"running": False, "done": 0, "total": 0, "status": "idle", "e
 
 
 class BackfillRequest(BaseModel):
-    date: str          # ISO date: "2025-12-01"
-    resolution: str = "1h"   # 1m 5m 15m 30m 1h 4h 1d
-    strike_count: int = 20   # ±N strikes around ATM
-    strike_interval: int = 200  # $200 between strikes
+    date: str               # ISO date: "2025-12-01" — start date (also used as single date)
+    end_date: str = ""      # Optional end date for range backfill (weekly steps)
+    resolution: str = "1h"
+    strike_count: int = 20
+    strike_interval: int = 200
 
 
 @router.get("/historical/backfill/status")
@@ -52,10 +53,38 @@ async def start_backfill(req: BackfillRequest, background_tasks: BackgroundTasks
     if not pool:
         raise HTTPException(503, "TimescaleDB not connected")
 
+    end_date = None
+    if req.end_date:
+        try:
+            end_date = date.fromisoformat(req.end_date)
+        except ValueError:
+            raise HTTPException(400, "Invalid end_date format")
+
     background_tasks.add_task(
-        _run_backfill, from_date, req.resolution, req.strike_count, req.strike_interval
+        _run_backfill_range, from_date, end_date, req.resolution, req.strike_count, req.strike_interval
     )
-    return {"status": "started", "date": req.date, "resolution": req.resolution}
+    return {"status": "started", "date": req.date, "end_date": req.end_date or req.date, "resolution": req.resolution}
+
+
+async def _run_backfill_range(from_date: date, end_date: Optional[date], resolution: str,
+                              strike_count: int, strike_interval: int):
+    """Run backfill for each week in a date range."""
+    if not end_date or end_date <= from_date:
+        await _run_backfill(from_date, resolution, strike_count, strike_interval)
+        return
+
+    # Step weekly from from_date to end_date
+    current = from_date
+    dates_to_run = []
+    while current <= end_date:
+        dates_to_run.append(current)
+        current += timedelta(weeks=1)
+    if dates_to_run[-1] != end_date:
+        dates_to_run.append(end_date)
+
+    logger.info("Backfill range: %d weekly steps from %s to %s", len(dates_to_run), from_date, end_date)
+    for d in dates_to_run:
+        await _run_backfill(d, resolution, strike_count, strike_interval)
 
 
 async def _run_backfill(from_date: date, resolution: str, strike_count: int, strike_interval: int):
@@ -192,8 +221,8 @@ def _generate_expiries(from_date: date) -> list[date]:
     """Generate expiry dates as Delta would list them from a given 'current' date."""
     expiries = set()
 
-    # Daily: next 3 days
-    for i in range(1, 4):
+    # Same day (0DTE) + next 3 days
+    for i in range(0, 4):
         expiries.add(from_date + timedelta(days=i))
 
     # Weekly: next 4 Fridays
