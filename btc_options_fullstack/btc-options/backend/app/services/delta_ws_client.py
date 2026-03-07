@@ -85,11 +85,13 @@ async def run_delta_ws() -> None:
             await asyncio.sleep(5)
 
 
+_first_ticker_logged = False
+
 def _handle_message(msg: dict) -> None:
+    global _first_ticker_logged
     if msg.get("type") != "v2/ticker":
         return
 
-    # Delta WS: ticker data is at the top level of the message (not nested under "data")
     symbol = msg.get("symbol", "")
     if not symbol:
         return
@@ -100,3 +102,6 @@ def _handle_message(msg: dict) -> None:
             ticker_store.update_spot(price)
     else:
         ticker_store.update_ticker(symbol, msg)
+        if not _first_ticker_logged:
+            _first_ticker_logged = True
+            logger.info("ticker_store: first ticker stored — symbol=%s tickers=%d", symbol, len(ticker_store._tickers))

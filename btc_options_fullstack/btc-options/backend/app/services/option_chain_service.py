@@ -127,11 +127,14 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
         product_map[(k, ct)] = p
 
     async def fetch_leg(strike: float, opt_type: str) -> tuple[float, str, dict, dict]:
+        from app.services import ticker_store as ts
         prod = product_map.get((strike, opt_type))
         if not prod:
             return strike, opt_type, {}, {}
         try:
             ticker = await client.get_ticker(prod["symbol"])
+            if ticker:
+                ts.update_ticker(prod["symbol"], ticker)  # cache in memory for next switch
             return strike, opt_type, prod, ticker
         except Exception as e:
             logger.warning("Ticker fetch failed %s: %s", prod.get("symbol"), e)
