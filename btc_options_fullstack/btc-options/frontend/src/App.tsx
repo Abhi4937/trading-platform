@@ -73,9 +73,15 @@ export default function App() {
         )}
       </header>
 
-      {/* Log Viewer Panel */}
+
+      {/* Log Viewer — fixed bottom 1/3 */}
       {showLogs && (
-        <div style={{ height: 380, padding: '0 12px 12px', background: '#010409' }}>
+        <div style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          height: '33vh', background: '#010409',
+          borderTop: '1px solid #1a2d42', zIndex: 100,
+          padding: '8px 12px',
+        }}>
           <LogViewer />
         </div>
       )}

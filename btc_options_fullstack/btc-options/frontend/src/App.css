@@ -78,8 +78,7 @@ body {
 .main { display: flex; flex: 1; overflow: hidden; }
 
 .chain-panel {
-  flex: 0 0 660px; display: flex; flex-direction: column;
-  border-right: 1px solid var(--border); overflow: hidden;
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
 }
 
 .charts-panel {
@@ -115,7 +114,7 @@ body {
 }
 .search-input:focus { border-color: var(--accent); }
 
-.table-scroll { overflow-y: auto; flex: 1; }
+.table-scroll { overflow-y: auto; overflow-x: auto; flex: 1; }
 
 .chain-table { width: 100%; border-collapse: collapse; }
 
