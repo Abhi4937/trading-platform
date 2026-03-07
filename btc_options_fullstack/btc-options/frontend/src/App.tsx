@@ -62,57 +62,59 @@ export default function App() {
           ))}
         </div>
 
-        <div className="spot-block">
-          <div className="spot-price">${spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
-          <div className="spot-label">BTC/USD</div>
-        </div>
-
-        <div className="sep" />
-
-        <div className="ctrl-group">
-          <label className="ctrl-label">Expiry</label>
-          <select
-            className="sel-input"
-            value={selectedExpiry}
-            onChange={e => setSelectedExpiry(e.target.value)}
-          >
-            {expLoading && <option>Loading...</option>}
-            {expiries.map(e => (
-              <option key={e.date} value={e.date}>{e.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <button
-          className="btn-refresh"
-          onClick={() => setShowLogs(v => !v)}
-          style={{ background: showLogs ? '#1f6feb' : undefined }}
-        >
-          {showLogs ? '✕ Logs' : '📋 Logs'}
-        </button>
-
-        <button className="btn-refresh" onClick={refetch} disabled={chainLoading}>
-          {chainLoading ? <Spinner size={14} /> : '↻ Refresh'}
-        </button>
-
-
-        <div className="status">
-          <div className={`status-dot ${chainLoading ? 'loading' : 'live'}`} />
-          <span>{chainLoading ? 'Loading...' : 'Live'}</span>
-        </div>
-
-        {chain && (
-          <div className="chain-meta">
-            ATM: ${chain.atm_strike.toLocaleString()} ·
-            IV: {chain.atm_iv_call.toFixed(1)}%C / {chain.atm_iv_put.toFixed(1)}%P ·
-            DTE: {chain.days_to_expiry.toFixed(0)}d
+        {/* Live-only controls */}
+        {page === 'live' && <>
+          <div className="spot-block">
+            <div className="spot-price">${spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+            <div className="spot-label">BTC/USD</div>
           </div>
-        )}
+
+          <div className="sep" />
+
+          <div className="ctrl-group">
+            <label className="ctrl-label">Expiry</label>
+            <select
+              className="sel-input"
+              value={selectedExpiry}
+              onChange={e => setSelectedExpiry(e.target.value)}
+            >
+              {expLoading && <option>Loading...</option>}
+              {expiries.map(e => (
+                <option key={e.date} value={e.date}>{e.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            className="btn-refresh"
+            onClick={() => setShowLogs(v => !v)}
+            style={{ background: showLogs ? '#1f6feb' : undefined }}
+          >
+            {showLogs ? '✕ Logs' : '📋 Logs'}
+          </button>
+
+          <button className="btn-refresh" onClick={refetch} disabled={chainLoading}>
+            {chainLoading ? <Spinner size={14} /> : '↻ Refresh'}
+          </button>
+
+          <div className="status">
+            <div className={`status-dot ${chainLoading ? 'loading' : 'live'}`} />
+            <span>{chainLoading ? 'Loading...' : 'Live'}</span>
+          </div>
+
+          {chain && (
+            <div className="chain-meta">
+              ATM: ${chain.atm_strike.toLocaleString()} ·
+              IV: {chain.atm_iv_call.toFixed(1)}%C / {chain.atm_iv_put.toFixed(1)}%P ·
+              DTE: {chain.days_to_expiry.toFixed(0)}d
+            </div>
+          )}
+        </>}
       </header>
 
 
-      {/* Log Viewer — fixed bottom, resizable */}
-      {showLogs && (
+      {/* Log Viewer — fixed bottom, resizable, live mode only */}
+      {showLogs && page === 'live' && (
         <div style={{
           position: 'fixed', bottom: 0, left: 0, right: 0,
           height: logHeight, background: '#010409',
