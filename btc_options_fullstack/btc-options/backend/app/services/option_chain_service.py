@@ -65,10 +65,12 @@ async def get_expiries() -> ExpiryListResponse:
         if d not in seen:
             seen[d] = dt
 
-    today = date.today()
+    now = datetime.now(timezone.utc)
+    today = now.date()
     expiry_list = []
     for d in sorted(seen.keys()):
-        if d <= today:
+        # Filter by actual settlement datetime so same-day expiries show until they settle
+        if seen[d] <= now:
             continue
         days = (d - today).days
         label = d.strftime("%d %b %Y").upper()
