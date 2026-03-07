@@ -18,7 +18,7 @@ export const TickerCompare: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/debug/compare/${symbol}`);
+      const res = await fetch(`/api/debug/compare/${symbol}`);
       const data = await res.json();
       setResult(data);
     } catch (e: any) {
