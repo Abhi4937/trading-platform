@@ -114,7 +114,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
     for p in all_products:
         dt = _parse_settlement(p)
         if dt and dt.date() == expiry:
-            exp_producticker_store.append(p)
+            exp_products.append(p)
 
     if not exp_products:
         # Demo mode: generate synthetic chain
@@ -155,7 +155,7 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
     results = []
     for i in range(0, len(tasks), 20):
         batch = await asyncio.gather(*tasks[i:i+20])
-        resulticker_store.extend(batch)
+        results.extend(batch)
 
     # Build chain rows
     leg_map: dict[tuple[float, str], OptionLeg] = {}
