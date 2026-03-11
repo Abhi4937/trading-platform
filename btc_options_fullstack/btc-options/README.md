@@ -65,7 +65,7 @@ npm run dev
 
 App: http://localhost:3000
 
-### 3. Docker (full stack)
+### 3. Docker
 
 ```bash
 cd docker
@@ -73,6 +73,8 @@ cp ../backend/.env.example ../backend/.env
 # Edit ../backend/.env with your Delta API keys
 docker compose up --build
 ```
+
+The Docker setup runs the backend with Redis only. Historical TimescaleDB recording is disabled in Compose.
 
 ---
 
@@ -121,5 +123,5 @@ Full interactive documentation available at: **http://localhost:8000/docs**
 ## Roadmap
 
 **Phase 1 (MVP — done)**: Single provider, full chain + premium + IV charts
-**Phase 2**: TimescaleDB historical storage, real IV history, Kite/Nifty support
+**Phase 2**: Historical storage, real IV history, Kite/Nifty support
 **Phase 3**: Auth (JWT), multi-user, backtest integration, WebSocket streaming

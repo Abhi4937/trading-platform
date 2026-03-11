@@ -200,3 +200,25 @@ Implement this when:
 - Moving to production deployment
 
 For single-user local dev, current architecture is acceptable.
+
+---
+
+## Practical Note For This Project
+
+### Current Bottlenecks
+- The backend websocket currently rebuilds and sends the full option chain every 200ms for each connected client.
+- If in-memory ticker data is not ready, the backend can fall back to REST calls for many option symbols, which is the heaviest path.
+- The frontend replaces the full chain state instead of applying very small updates to only the changed leg or row.
+- Greeks are recomputed for the full chain repeatedly, even when only a small subset of symbols changed.
+
+### Possible Solutions
+- Send one initial full snapshot, then send only per-symbol or per-row partial updates.
+- Replace timer-based websocket pushes with event-driven pushes from ticker updates.
+- Keep frontend state in a keyed structure and patch only the changed row.
+- Recompute Greeks only for symbols that changed instead of rebuilding the whole chain each cycle.
+
+### Is This A Real Issue Here?
+- For a single user running this locally, this is usually not a serious issue.
+- The current design is acceptable if the UI feels responsive and CPU usage stays normal.
+- This becomes a real issue when multiple users connect, when deployment bandwidth matters, or when the chain size or update frequency increases.
+- So for your current personal usage, this is more of a future optimization than an urgent problem.
