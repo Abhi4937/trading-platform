@@ -75,10 +75,21 @@ class DeltaClient:
         logger.warning("Could not fetch BTC spot — using demo price 95000")
         return 95000.0
 
-    async def _get_all_pages(self, contract_type: str) -> list[dict]:
+    async def get_btc_option_products(self, max_pages: int = 20) -> list[dict]:
+        calls_task = asyncio.create_task(self._get_all_pages("call_options", max_pages))
+        puts_task = asyncio.create_task(self._get_all_pages("put_options", max_pages))
+        
+        all_products = (await calls_task) + (await puts_task)
+        
+        return [
+            p for p in all_products
+            if (p.get("underlying_asset", {}) or {}).get("symbol", "").upper() == "BTC"
+            or str(p.get("symbol", "")).upper().startswith("BTC")
+        ]
+
+    async def _get_all_pages(self, contract_type: str, max_pages: int) -> list[dict]:
         all_results = []
         page = 1
-        max_pages = 20  # Safety limit: 20,000 products per type
         while page <= max_pages:
             data = await self.get("/v2/products", params={
                 "contract_type": contract_type, "state": "live",
@@ -89,28 +100,14 @@ class DeltaClient:
             if not result:
                 break
             
-            # If we get the same number of results as before, or no new results, break
-            # (Some APIs return the last page indefinitely)
             all_results.extend(result)
             
             if len(result) < 1000:
                 break
             page += 1
         
-        logger.info("Fetched %d products for %s across %d pages", len(all_results), contract_type, page if page <= max_pages else max_pages)
+        logger.info("Fetched %d products for %s across %d pages", len(all_results), contract_type, page - 1 if page > 1 else 0)
         return all_results
-
-    async def get_btc_option_products(self) -> list[dict]:
-        calls_task = asyncio.create_task(self._get_all_pages("call_options"))
-        puts_task = asyncio.create_task(self._get_all_pages("put_options"))
-        
-        all_products = (await calls_task) + (await puts_task)
-        
-        return [
-            p for p in all_products
-            if (p.get("underlying_asset", {}) or {}).get("symbol", "").upper() == "BTC"
-            or str(p.get("symbol", "")).upper().startswith("BTC")
-        ]
 
     async def get_ticker(self, symbol: str) -> dict:
         d = await self.get(f"/v2/tickers/{symbol}")

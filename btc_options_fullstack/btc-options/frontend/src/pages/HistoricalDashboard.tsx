@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { historicalApi } from '../services/historical_api';
 import { TimeSlider } from '../components/historical/TimeSlider';
 import { HistoricalOptionChain } from '../components/historical/HistoricalOptionChain';
@@ -6,9 +6,12 @@ import { HistoricalChart } from '../components/historical/HistoricalChart';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
 
 export const HistoricalDashboard: React.FC = () => {
-  const [expiries, setExpiries] = useState<string[]>([]);
-  const [selectedExpiry, setSelectedExpiry] = useState<string>('');
+  const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>('');
   const [currentTimestamp, setCurrentTimestamp] = useState<number>(0);
+  
+  const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
+  const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   
   const [chain, setChain] = useState<HistoricalChainRow[]>([]);
   const [spot, setSpot] = useState<number>(0);
@@ -17,16 +20,35 @@ export const HistoricalDashboard: React.FC = () => {
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
+  // Initial Data Range
   useEffect(() => {
-    historicalApi.getExpiries().then(res => {
-      if (res.expiries.length > 0) {
-        setExpiries(res.expiries);
-        setSelectedExpiry(res.expiries[0]);
+    historicalApi.getDataRange().then(range => {
+      setDataRange(range);
+      if (range.max_ts) {
+        // Default to the date and time of the latest data
+        const latest = new Date(range.max_ts * 1000);
+        const dateStr = latest.toISOString().split('T')[0];
+        setSelectedDate(dateStr);
+        setCurrentTimestamp(range.max_ts);
       }
     }).catch(console.error);
   }, []);
 
+  // Fetch Expiries when Date changes
   useEffect(() => {
+    if (selectedDate) {
+      historicalApi.getExpiries(selectedDate).then(res => {
+        const categorized = (res as any).expiries || [];
+        setExpiries(categorized);
+        if (categorized.length > 0) {
+          setSelectedExpiry(categorized[0].date);
+        }
+      }).catch(console.error);
+    }
+  }, [selectedDate]);
+
+  // Fetch Option Chain
+  const fetchChain = useCallback(() => {
     if (selectedExpiry && currentTimestamp > 0) {
       historicalApi.getOptionChain(selectedExpiry, currentTimestamp).then(res => {
         setChain(res.chain);
@@ -36,8 +58,13 @@ export const HistoricalDashboard: React.FC = () => {
   }, [selectedExpiry, currentTimestamp]);
 
   useEffect(() => {
+    fetchChain();
+  }, [fetchChain]);
+
+  // Fetch Chart Data
+  useEffect(() => {
     if (selectedExpiry && selectedOption && currentTimestamp > 0) {
-      const startOfDay = new Date(`${selectedExpiry}T00:00:00Z`).getTime() / 1000;
+      const startOfDay = new Date(`${selectedDate}T00:00:00Z`).getTime() / 1000;
       historicalApi.getChartData(
         selectedExpiry, 
         selectedOption.strike, 
@@ -48,33 +75,66 @@ export const HistoricalDashboard: React.FC = () => {
         setChartData(res.data);
       }).catch(console.error);
     }
-  }, [selectedExpiry, selectedOption, timeframe]);
+  }, [selectedExpiry, selectedOption, timeframe, selectedDate, currentTimestamp]);
+
+  const handleTimeChange = (ts: number) => {
+    setCurrentTimestamp(ts);
+  };
+
+  const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newDate = e.target.value;
+    setSelectedDate(newDate);
+    // Reset timestamp to start of that day in UTC/IST
+    const ts = Math.floor(new Date(`${newDate}T00:00:00Z`).getTime() / 1000);
+    setCurrentTimestamp(ts);
+  };
 
   return (
     <div className="historical-container">
-      <TimeSlider date={selectedExpiry || new Date().toISOString().split('T')[0]} onTimeChange={setCurrentTimestamp} />
-
-      <div className="historical-main">
-        <div className="historical-chain-panel">
-          <div className="chain-toolbar">
-            <div className="ctrl-group">
-              <label className="ctrl-label">Inferred Spot</label>
-              <div className="spot-price" style={{ fontSize: '16px', color: 'var(--green)' }}>
-                ${spot.toLocaleString()}
-              </div>
-            </div>
-            <div className="sep" />
-            <div className="ctrl-group">
-              <label className="ctrl-label">Expiry Date</label>
+      <div className="time-slider-card" style={{ marginBottom: '8px' }}>
+        <div className="chain-toolbar" style={{ borderBottom: 'none', padding: '0 0 12px 0' }}>
+           <div className="ctrl-group">
+              <label className="ctrl-label">Simulation Date</label>
+              <input 
+                type="date" 
+                className="date-input" 
+                value={selectedDate}
+                onChange={handleDateChange}
+                min={dataRange ? new Date(dataRange.min_ts * 1000).toISOString().split('T')[0] : ''}
+                max={dataRange ? new Date(dataRange.max_ts * 1000).toISOString().split('T')[0] : ''}
+              />
+           </div>
+           <div className="sep" />
+           <div className="ctrl-group">
+              <label className="ctrl-label">Option Expiry</label>
               <select 
                 className="sel-input"
                 value={selectedExpiry}
                 onChange={e => setSelectedExpiry(e.target.value)}
               >
-                {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
+                {expiries.map(exp => <option key={exp.date} value={exp.date}>{exp.label}</option>)}
               </select>
             </div>
-          </div>
+            <div className="sep" />
+            <div className="ctrl-group">
+              <label className="ctrl-label">Inferred Spot</label>
+              <div className="spot-price" style={{ fontSize: '18px', color: 'var(--green)' }}>
+                ${spot.toLocaleString()}
+              </div>
+            </div>
+        </div>
+        
+        {selectedDate && (
+          <TimeSlider 
+            date={selectedDate} 
+            initialTimestamp={currentTimestamp}
+            onTimeChange={handleTimeChange} 
+          />
+        )}
+      </div>
+
+      <div className="historical-main">
+        <div className="historical-chain-panel">
           <HistoricalOptionChain chain={chain} onSelectOption={(s, t) => setSelectedOption({strike: s, type: t})} />
         </div>
 

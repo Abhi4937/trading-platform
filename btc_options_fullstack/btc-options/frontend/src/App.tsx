@@ -45,26 +45,30 @@ export default function App() {
       <header className="topbar">
         <div className="logo">DELTA <span>BTC Options</span></div>
 
-        <div className="spot-block">
-          <div className="spot-price">${spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
-          <div className="spot-label">BTC/USD</div>
-        </div>
+        {mode === 'LIVE' && (
+          <>
+            <div className="spot-block">
+              <div className="spot-price">${spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+              <div className="spot-label">BTC/USD</div>
+            </div>
 
-        <div className="sep" />
+            <div className="sep" />
 
-        <div className="ctrl-group">
-          <label className="ctrl-label">Expiry</label>
-          <select
-            className="sel-input"
-            value={selectedExpiry}
-            onChange={e => setSelectedExpiry(e.target.value)}
-          >
-            {expLoading && <option>Loading...</option>}
-            {expiries.map(e => (
-              <option key={e.date} value={e.date}>{e.label}</option>
-            ))}
-          </select>
-        </div>
+            <div className="ctrl-group">
+              <label className="ctrl-label">Expiry</label>
+              <select
+                className="sel-input"
+                value={selectedExpiry}
+                onChange={e => setSelectedExpiry(e.target.value)}
+              >
+                {expLoading && <option>Loading...</option>}
+                {expiries.map(e => (
+                  <option key={e.date} value={e.date}>{e.label}</option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
 
         <div className="title-center">
           {mode === 'HISTORICAL' ? 'HISTORICAL DATA SIMULATION' : ''}
@@ -81,23 +85,27 @@ export default function App() {
         <button 
           className="btn-refresh" 
           onClick={() => setMode(mode === 'LIVE' ? 'HISTORICAL' : 'LIVE')}
-          style={{ background: '#f0b429', color: '#000', fontWeight: 'bold' }}
+          style={{ background: 'var(--gold)', color: '#000', fontWeight: 'bold' }}
         >
           {mode === 'LIVE' ? '↻ Historical Simulation' : '↻ Switch to Live'}
         </button>
 
 
-        <div className="status">
-          <div className={`status-dot ${chainLoading ? 'loading' : 'live'}`} />
-          <span>{chainLoading ? 'Loading...' : 'Live'}</span>
-        </div>
+        {mode === 'LIVE' && (
+          <>
+            <div className="status">
+              <div className={`status-dot ${chainLoading ? 'loading' : 'live'}`} />
+              <span>{chainLoading ? 'Loading...' : 'Live'}</span>
+            </div>
 
-        {chain && (
-          <div className="chain-meta">
-            ATM: ${chain.atm_strike.toLocaleString()} ·
-            IV: {chain.atm_iv_call.toFixed(1)}%C / {chain.atm_iv_put.toFixed(1)}%P ·
-            DTE: {chain.days_to_expiry.toFixed(0)}d
-          </div>
+            {chain && (
+              <div className="chain-meta">
+                ATM: ${chain.atm_strike.toLocaleString()} ·
+                IV: {chain.atm_iv_call.toFixed(1)}%C / {chain.atm_iv_put.toFixed(1)}%P ·
+                DTE: {chain.days_to_expiry.toFixed(0)}d
+              </div>
+            )}
+          </>
         )}
       </header>
 

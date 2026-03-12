@@ -19,22 +19,43 @@ _conn = duckdb.connect(database=':memory:', read_only=False)
 def get_conn():
     return _conn
 
-@router.get("/expiries")
-async def get_historical_expiries():
+@router.get("/data-range")
+async def get_data_range():
     try:
-        # Scan partitions to get unique expiries. 
-        # By doing a simple query on the hive partitions, DuckDB will efficiently extract them.
+        query = f"SELECT min(timestamp_unix) as min_ts, max(timestamp_unix) as max_ts FROM read_parquet('{DATA_PATH}')"
+        conn = get_conn()
+        res = conn.execute(query).fetchone()
+        return {"min_ts": res[0], "max_ts": res[1]}
+    except Exception as e:
+        logger.error(f"Error fetching data range: {e}")
+        return {"min_ts": 0, "max_ts": 0}
+
+@router.get("/expiries")
+async def get_historical_expiries(target_date: str = Query(..., alias="date")):
+    try:
+        # Get unique expiries for the selected historical date
         query = f"""
         SELECT DISTINCT expiry 
         FROM read_parquet('{DATA_PATH}', hive_partitioning=true)
-        ORDER BY expiry DESC
+        WHERE expiry >= '{target_date}'
+        ORDER BY expiry ASC
         """
         conn = get_conn()
         df = conn.execute(query).df()
         
-        # Categorise expiries (mocked simple list for now, you can group them in frontend)
         expiries = df['expiry'].astype(str).tolist()
-        return {"expiries": expiries}
+        
+        # Categorize expiries
+        categorized = []
+        for i, exp in enumerate(expiries):
+            label = exp
+            if i == 0: label = f"Current ({exp})"
+            elif i == 1: label = f"Next ({exp})"
+            elif i == 2: label = f"Next-to-Next ({exp})"
+            else: label = f"Weekly ({exp})"
+            categorized.append({"date": exp, "label": label})
+            
+        return {"expiries": categorized}
     except Exception as e:
         logger.error(f"Error fetching expiries: {e}")
         return {"expiries": []}

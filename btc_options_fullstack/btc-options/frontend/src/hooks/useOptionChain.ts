@@ -28,9 +28,13 @@ export function useOptionChain(expiry: string | null, _autoRefresh = false) {
   const refetch = useCallback(() => {}, []);
 
   useEffect(() => {
-    if (!expiry) return;
+    if (!expiry) {
+      setData(null);
+      return;
+    }
 
     setLoading(true);
+    setData(null); // Clear previous data
     setError(null);
 
     const wsBase = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
