@@ -3,9 +3,11 @@ import { useExpiries, useOptionChain } from './hooks/useOptionChain';
 import { OptionChainTable } from './components/chain/OptionChainTable';
 import { LogViewer } from './components/logs/LogViewer';
 import { Spinner } from './components/ui/Spinner';
+import { HistoricalDashboard } from './pages/HistoricalDashboard';
 import './App.css';
 
 export default function App() {
+  const [mode, setMode] = useState<'LIVE' | 'HISTORICAL'>('LIVE');
   const { expiries, spot, loading: expLoading } = useExpiries();
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   const [showLogs, setShowLogs] = useState(false);
@@ -37,12 +39,35 @@ export default function App() {
     }
   }, [expiries]);
 
+  if (mode === 'HISTORICAL') {
+    return (
+      <div className="flex flex-col h-screen w-full bg-[#050a0f]">
+        <div className="bg-[#080e16] p-2 border-b border-[#1a2d42] flex justify-end">
+          <button 
+            className="px-4 py-1 bg-[#00d4ff] text-black font-bold rounded text-xs hover:bg-[#00e5a0]"
+            onClick={() => setMode('LIVE')}
+          >
+            Switch to Live Trading
+          </button>
+        </div>
+        <HistoricalDashboard />
+      </div>
+    );
+  }
 
   return (
     <div className="app">
       {/* Top Bar */}
       <header className="topbar">
-        <div className="logo">DELTA <span>BTC Options</span></div>
+        <div className="logo flex items-center gap-4">
+          <span>DELTA BTC Options</span>
+          <button 
+            className="px-3 py-1 bg-[#f0b429] text-black font-bold rounded text-xs hover:opacity-80"
+            onClick={() => setMode('HISTORICAL')}
+          >
+            Historical DB
+          </button>
+        </div>
 
         <div className="spot-block">
           <div className="spot-price">${spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
