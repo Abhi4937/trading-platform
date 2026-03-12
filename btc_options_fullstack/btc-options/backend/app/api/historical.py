@@ -19,6 +19,56 @@ _conn = duckdb.connect(database=':memory:', read_only=False)
 def get_conn():
     return _conn
 
+from datetime import datetime, timezone, timedelta
+
+@router.get("/latest-available-data")
+async def get_latest_available_data():
+    try:
+        # Get the absolute latest timestamp from the parquet data
+        query_latest = f"SELECT max(timestamp_unix) FROM read_parquet('{DATA_PATH}')"
+        conn = get_conn()
+        res = conn.execute(query_latest).fetchone()
+        max_ts = res[0] if res else None
+        
+        if not max_ts:
+            # Fallback to current time if no data (though unlikely in prod)
+            dt = datetime.now(timezone.utc)
+        else:
+            dt = datetime.fromtimestamp(max_ts, tz=timezone.utc)
+            
+        date_str = dt.strftime("%Y-%m-%d")
+        time_str = dt.strftime("%H:%M")
+        
+        # Get categorized expiries starting from this date
+        query_expiries = f"""
+        SELECT DISTINCT expiry 
+        FROM read_parquet('{DATA_PATH}', hive_partitioning=true)
+        WHERE expiry >= '{date_str}'
+        ORDER BY expiry ASC
+        """
+        df = conn.execute(query_expiries).df()
+        expiries = df['expiry'].astype(str).tolist()
+        
+        categorized = []
+        for i, exp in enumerate(expiries):
+            label = exp
+            if i == 0: label = f"Current ({exp})"
+            elif i == 1: label = f"Next ({exp})"
+            elif i == 2: label = f"Next-to-Next ({exp})"
+            else: label = f"Weekly ({exp})"
+            categorized.append({"date": exp, "label": label})
+            
+        return {
+            "latestDate": date_str,
+            "latestTime": time_str,
+            "expiries": categorized
+        }
+    except Exception as e:
+        logger.error(f"Error fetching latest data: {e}")
+        # Robust fallback
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return {"latestDate": today, "latestTime": "00:00", "expiries": []}
+
 @router.get("/data-range")
 async def get_data_range():
     try:

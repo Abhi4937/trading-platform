@@ -47,10 +47,10 @@ export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike,
   const filtered = useMemo(() => {
     let rows = chain;
     if (filter) {
-      const f = parseFloat(filter);
-      if (!isNaN(f)) {
-        rows = rows.filter(r => Math.abs(r.strike - f) < 1000);
-      }
+      // String-based search: show all strikes that contain the typed characters
+      rows = rows.filter(r => r.strike.toString().includes(filter));
+      // When searching, we bypass the "±N strikes" limit to show all matches
+      return rows;
     }
     
     // If "All" is selected (999), return everything

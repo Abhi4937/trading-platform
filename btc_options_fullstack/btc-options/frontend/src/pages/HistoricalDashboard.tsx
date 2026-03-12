@@ -1,70 +1,67 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { historicalApi } from '../services/historical_api';
-import { TimeSlider } from '../components/historical/TimeSlider';
+import { ReplayController } from '../components/historical/ReplayController';
 import { HistoricalOptionChain } from '../components/historical/HistoricalOptionChain';
 import { HistoricalChart } from '../components/historical/HistoricalChart';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
 
 export const HistoricalDashboard: React.FC = () => {
-  const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
-  const [selectedDate, setSelectedDate] = useState<string>('');
-  const [currentTimestamp, setCurrentTimestamp] = useState<number>(0);
-  
+  const [simulationDate, setSimulationDate] = useState<string>('');
+  const [simulationTime, setSimulationTime] = useState<string>('');
   const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   
   const [chain, setChain] = useState<HistoricalChainRow[]>([]);
   const [spot, setSpot] = useState<number>(0);
+  const [strikeFilter, setStrikeFilter] = useState<string>('');
   
   const [selectedOption, setSelectedOption] = useState<{strike: number, type: 'CE' | 'PE'} | null>(null);
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
-  // Initial Data Range
+  // 1. Initial State Initialization
   useEffect(() => {
-    historicalApi.getDataRange().then(range => {
-      setDataRange(range);
-      if (range.max_ts) {
-        // Default to the date and time of the latest data
-        const latest = new Date(range.max_ts * 1000);
-        const dateStr = latest.toISOString().split('T')[0];
-        setSelectedDate(dateStr);
-        setCurrentTimestamp(range.max_ts);
+    historicalApi.getLatestAvailableData().then(data => {
+      setSimulationDate(data.latestDate);
+      setSimulationTime(data.latestTime);
+      setExpiries(data.expiries);
+      if (data.expiries.length > 0) {
+        setSelectedExpiry(data.expiries[0].date);
       }
     }).catch(console.error);
   }, []);
 
-  // Fetch Expiries when Date changes
-  useEffect(() => {
-    if (selectedDate) {
-      historicalApi.getExpiries(selectedDate).then(res => {
-        const categorized = (res as any).expiries || [];
-        setExpiries(categorized);
-        if (categorized.length > 0) {
-          setSelectedExpiry(categorized[0].date);
-        }
-      }).catch(console.error);
-    }
-  }, [selectedDate]);
+  // 2. Adjust Time Logic (The Stepper)
+  const adjustSimulationTime = useCallback((minutesToAdd: number) => {
+    if (!simulationDate || !simulationTime) return;
 
-  // Fetch Option Chain
-  const fetchChain = useCallback(() => {
-    if (selectedExpiry && currentTimestamp > 0) {
-      historicalApi.getOptionChain(selectedExpiry, currentTimestamp).then(res => {
+    // Create a date object from current simulation state
+    // We use UTC to avoid local timezone issues during math
+    const current = new Date(`${simulationDate}T${simulationTime}:00Z`);
+    current.setUTCMinutes(current.getUTCMinutes() + minutesToAdd);
+
+    const newDate = current.toISOString().split('T')[0];
+    const newTime = current.toISOString().split('T')[1].substring(0, 5);
+
+    setSimulationDate(newDate);
+    setSimulationTime(newTime);
+  }, [simulationDate, simulationTime]);
+
+  // 3. Side Effect: Fetch new chain when Date or Time changes
+  useEffect(() => {
+    if (selectedExpiry && simulationDate && simulationTime) {
+      const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00Z`).getTime() / 1000);
+      historicalApi.getOptionChain(selectedExpiry, timestamp).then(res => {
         setChain(res.chain);
         setSpot(res.spot_inferred);
       }).catch(console.error);
     }
-  }, [selectedExpiry, currentTimestamp]);
+  }, [selectedExpiry, simulationDate, simulationTime]);
 
+  // 4. Fetch Chart Data
   useEffect(() => {
-    fetchChain();
-  }, [fetchChain]);
-
-  // Fetch Chart Data
-  useEffect(() => {
-    if (selectedExpiry && selectedOption && currentTimestamp > 0) {
-      const startOfDay = new Date(`${selectedDate}T00:00:00Z`).getTime() / 1000;
+    if (selectedExpiry && selectedOption && simulationDate) {
+      const startOfDay = new Date(`${simulationDate}T00:00:00Z`).getTime() / 1000;
       historicalApi.getChartData(
         selectedExpiry, 
         selectedOption.strike, 
@@ -75,67 +72,49 @@ export const HistoricalDashboard: React.FC = () => {
         setChartData(res.data);
       }).catch(console.error);
     }
-  }, [selectedExpiry, selectedOption, timeframe, selectedDate, currentTimestamp]);
-
-  const handleTimeChange = (ts: number) => {
-    setCurrentTimestamp(ts);
-  };
-
-  const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newDate = e.target.value;
-    setSelectedDate(newDate);
-    // Reset timestamp to start of that day in UTC/IST
-    const ts = Math.floor(new Date(`${newDate}T00:00:00Z`).getTime() / 1000);
-    setCurrentTimestamp(ts);
-  };
+  }, [selectedExpiry, selectedOption, timeframe, simulationDate]);
 
   return (
     <div className="historical-container">
-      <div className="time-slider-card" style={{ marginBottom: '8px' }}>
-        <div className="chain-toolbar" style={{ borderBottom: 'none', padding: '0 0 12px 0' }}>
-           <div className="ctrl-group">
-              <label className="ctrl-label">Simulation Date</label>
-              <input 
-                type="date" 
-                className="date-input" 
-                value={selectedDate}
-                onChange={handleDateChange}
-                min={dataRange ? new Date(dataRange.min_ts * 1000).toISOString().split('T')[0] : ''}
-                max={dataRange ? new Date(dataRange.max_ts * 1000).toISOString().split('T')[0] : ''}
-              />
-           </div>
-           <div className="sep" />
-           <div className="ctrl-group">
-              <label className="ctrl-label">Option Expiry</label>
-              <select 
-                className="sel-input"
-                value={selectedExpiry}
-                onChange={e => setSelectedExpiry(e.target.value)}
-              >
-                {expiries.map(exp => <option key={exp.date} value={exp.date}>{exp.label}</option>)}
-              </select>
-            </div>
-            <div className="sep" />
-            <div className="ctrl-group">
-              <label className="ctrl-label">Inferred Spot</label>
-              <div className="spot-price" style={{ fontSize: '18px', color: 'var(--green)' }}>
-                ${spot.toLocaleString()}
-              </div>
-            </div>
+      <div className="replay-wrapper">
+        <ReplayController 
+          simulationDate={simulationDate}
+          simulationTime={simulationTime}
+          expiries={expiries}
+          selectedExpiry={selectedExpiry}
+          onDateChange={setSimulationDate}
+          onTimeChange={setSimulationTime}
+          onExpiryChange={setSelectedExpiry}
+          onStep={adjustSimulationTime}
+        />
+      </div>
+
+      <div className="historical-toolbar-secondary">
+        <div className="ctrl-group">
+          <label className="ctrl-label">Inferred Spot</label>
+          <div className="spot-price" style={{ fontSize: '18px', color: 'var(--green)' }}>
+            ${spot.toLocaleString()}
+          </div>
         </div>
-        
-        {selectedDate && (
-          <TimeSlider 
-            date={selectedDate} 
-            initialTimestamp={currentTimestamp}
-            onTimeChange={handleTimeChange} 
+        <div className="sep" />
+        <div className="ctrl-group" style={{ flex: 1 }}>
+          <label className="ctrl-label">Search Strike</label>
+          <input
+            className="search-input"
+            style={{ width: '100%' }}
+            placeholder="Type strike..."
+            value={strikeFilter}
+            onChange={e => setStrikeFilter(e.target.value)}
           />
-        )}
+        </div>
       </div>
 
       <div className="historical-main">
         <div className="historical-chain-panel">
-          <HistoricalOptionChain chain={chain} onSelectOption={(s, t) => setSelectedOption({strike: s, type: t})} />
+          <HistoricalOptionChain 
+            chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain} 
+            onSelectOption={(s, t) => setSelectedOption({strike: s, type: t})} 
+          />
         </div>
 
         <div className="historical-chart-panel">

@@ -7,6 +7,12 @@ import type {
 const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1';
 
 export const historicalApi = {
+  async getLatestAvailableData(): Promise<{ latestDate: string, latestTime: string, expiries: {date: string, label: string}[] }> {
+    const res = await fetch(`${API_BASE}/historical/latest-available-data`);
+    if (!res.ok) throw new Error('Failed to fetch latest data');
+    return res.json();
+  },
+
   async getExpiries(date: string): Promise<HistoricalExpiryListResponse> {
     const res = await fetch(`${API_BASE}/historical/expiries?date=${date}`);
     if (!res.ok) throw new Error('Failed to fetch expiries');
