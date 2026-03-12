@@ -83,9 +83,8 @@ export default function App() {
         </button>
 
         <button 
-          className="btn-refresh" 
+          className="btn-mode-toggle-dark" 
           onClick={() => setMode(mode === 'LIVE' ? 'HISTORICAL' : 'LIVE')}
-          style={{ background: 'var(--gold)', color: '#000', fontWeight: 'bold' }}
         >
           {mode === 'LIVE' ? '↻ Historical Simulation' : '↻ Switch to Live'}
         </button>

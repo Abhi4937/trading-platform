@@ -6,8 +6,8 @@ import { HistoricalChart } from '../components/historical/HistoricalChart';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
 
 export const HistoricalDashboard: React.FC = () => {
-  const [simulationDate, setSimulationDate] = useState<string>('');
-  const [simulationTime, setSimulationTime] = useState<string>('');
+  const [simulationDate, setSimulationDate] = useState<string>(''); // YYYY-MM-DD
+  const [simulationTime, setSimulationTime] = useState<string>(''); // HH:mm
   const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   
@@ -19,7 +19,7 @@ export const HistoricalDashboard: React.FC = () => {
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
-  // 1. Initial State Initialization
+  // 1. Initial State Initialization from Backend
   useEffect(() => {
     historicalApi.getLatestAvailableData().then(data => {
       setSimulationDate(data.latestDate);
@@ -31,12 +31,12 @@ export const HistoricalDashboard: React.FC = () => {
     }).catch(console.error);
   }, []);
 
-  // 2. Adjust Time Logic (The Stepper)
+  // 2. Adjust Time Logic (The Stepper) with Rollover
   const adjustSimulationTime = useCallback((minutesToAdd: number) => {
     if (!simulationDate || !simulationTime) return;
 
-    // Create a date object from current simulation state
-    // We use UTC to avoid local timezone issues during math
+    // Use a Date object to handle overflows correctly
+    // We treat state as UTC to avoid local timezone interference during calculations
     const current = new Date(`${simulationDate}T${simulationTime}:00Z`);
     current.setUTCMinutes(current.getUTCMinutes() + minutesToAdd);
 
@@ -47,14 +47,24 @@ export const HistoricalDashboard: React.FC = () => {
     setSimulationTime(newTime);
   }, [simulationDate, simulationTime]);
 
-  // 3. Side Effect: Fetch new chain when Date or Time changes
+  // 3. Side Effect: Fetch new chain when strict parameters change
+  // simulationDate is always YYYY-MM-DD
+  // simulationTime is always HH:mm
   useEffect(() => {
     if (selectedExpiry && simulationDate && simulationTime) {
       const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00Z`).getTime() / 1000);
+      
+      // LOG for verification
+      console.log(`Fetching Chain for: Date=${simulationDate}, Time=${simulationTime}, TS=${timestamp}`);
+      
       historicalApi.getOptionChain(selectedExpiry, timestamp).then(res => {
         setChain(res.chain);
         setSpot(res.spot_inferred);
-      }).catch(console.error);
+      }).catch(err => {
+        console.error("Option chain fetch failed", err);
+        setChain([]);
+        setSpot(0);
+      });
     }
   }, [selectedExpiry, simulationDate, simulationTime]);
 
