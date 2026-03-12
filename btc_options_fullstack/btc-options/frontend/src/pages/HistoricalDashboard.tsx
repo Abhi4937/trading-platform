@@ -28,7 +28,7 @@ export const HistoricalDashboard: React.FC = () => {
     ]).then(([latest, range]) => {
       setDataRange(range);
       setSimulationDate(latest.latestDate);
-      setSimulationTime(latest.latestTime);
+      setSimulationTime('00:00'); // Force default to 12 AM
     }).catch(console.error);
   }, []);
 
