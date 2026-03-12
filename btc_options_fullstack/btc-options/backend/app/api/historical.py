@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Query, HTTPException
 
@@ -22,80 +22,102 @@ def get_conn():
 import os
 from pathlib import Path
 
+# Simple in-memory cache to avoid repeated slow disk scans
+_cached_data_range = None
+_cached_latest_data = None
+
 @router.get("/latest-available-data")
 async def get_latest_available_data():
-    """
-    High-performance initialization endpoint.
-    1. Scans filesystem for the latest expiry folder.
-    2. Runs a targeted query on that folder to find the max timestamp.
-    """
+    global _cached_latest_data
+    if _cached_latest_data:
+        return _cached_latest_data
+
+    logger.info("Starting fast latest-data scan...")
     try:
         base_dir = "/home/abhis/btc-data/data/options"
         if not os.path.exists(base_dir):
-            # Fallback for dev environment if path doesn't exist
             return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
-        # 1. Get the latest expiry folder (YYYY-MM-DD)
         expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
         if not expiries:
             return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
         
         latest_expiry = expiries[-1]
-        
-        # 2. Find the latest timestamp within this specific expiry to get the latest simulation time
-        # We query just the latest expiry folder for maximum performance
         target_path = f"{base_dir}/expiry={latest_expiry}/*/*.parquet"
-        query = f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')"
         
+        query = f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')"
         conn = get_conn()
-        res = conn.execute(query).fetchone()
-        max_ts = res[0] if res and res[0] else None
+        max_ts = conn.execute(query).fetchone()[0]
         
         if not max_ts:
-            return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
-            
-        # Convert the epoch timestamp to IST (UTC+5:30) string for the frontend picker
-        ist_tz = timezone(timedelta(hours=5, minutes=30))
-        dt = datetime.fromtimestamp(max_ts, tz=ist_tz)
+            res = {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
+        else:
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            dt = datetime.fromtimestamp(max_ts, tz=ist_tz)
+            res = {
+                "latestDate": dt.strftime("%Y-%m-%d"),
+                "latestTime": dt.strftime("%H:%M"),
+                "latestExpiry": latest_expiry
+            }
         
-        return {
-            "latestDate": dt.strftime("%Y-%m-%d"),
-            "latestTime": dt.strftime("%H:%M"),
-            "latestExpiry": latest_expiry
-        }
+        _cached_latest_data = res
+        logger.info(f"Latest data found: {res}")
+        return res
     except Exception as e:
-        logger.error(f"Error in fast latest-data scan: {e}")
+        logger.error(f"Error in latest-data scan: {e}")
         return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
 @router.get("/data-range")
 async def get_data_range():
+    global _cached_data_range
+    if _cached_data_range:
+        return _cached_data_range
+
+    logger.info("Scanning full data range (this may take time)...")
     try:
-        query = f"SELECT min(timestamp_unix) as min_ts, max(timestamp_unix) as max_ts FROM read_parquet('{DATA_PATH}')"
+        query = f"SELECT min(timestamp_unix), max(timestamp_unix) FROM read_parquet('{DATA_PATH}')"
         conn = get_conn()
         res = conn.execute(query).fetchone()
-        return {"min_ts": res[0], "max_ts": res[1]}
+        
+        data = {"min_ts": res[0], "max_ts": res[1]}
+        _cached_data_range = data
+        logger.info(f"Data range cached: {data}")
+        return data
     except Exception as e:
         logger.error(f"Error fetching data range: {e}")
         return {"min_ts": 0, "max_ts": 0}
 
 @router.get("/expiries")
-async def get_historical_expiries(target_date: str = Query(..., alias="date")):
+async def get_historical_expiries(
+    target_date: str = Query(..., alias="date"),
+    timestamp: int = Query(None) # Optional UNIX timestamp for more precise filtering
+):
     try:
-        # Get unique expiries for the selected historical date
+        # If timestamp is provided, we only show expiries that have data AT or AFTER that timestamp
+        # This ensures that if it's March 10th 6:00 PM, the March 10th expiry (which ended at 5:30 PM) is hidden.
+        where_clause = f"WHERE expiry >= '{target_date}'"
+        if timestamp:
+            # We check for expiries that have data points >= this timestamp
+            where_clause = f"WHERE timestamp_unix >= {timestamp}"
+
         query = f"""
         SELECT DISTINCT expiry 
         FROM read_parquet('{DATA_PATH}', hive_partitioning=true)
-        WHERE expiry >= '{target_date}'
+        {where_clause}
         ORDER BY expiry ASC
         """
         conn = get_conn()
         df = conn.execute(query).df()
         
+        # Ensure expiry column is string date
         expiries = df['expiry'].astype(str).tolist()
+        
+        # Deduplicate and sort (DISTINCT might return Timestamp objects that need cleaning)
+        unique_expiries = sorted(list(set([e.split(' ')[0] for e in expiries])))
         
         # Categorize expiries
         categorized = []
-        for i, exp in enumerate(expiries):
+        for i, exp in enumerate(unique_expiries):
             label = exp
             if i == 0: label = f"Current ({exp})"
             elif i == 1: label = f"Next ({exp})"

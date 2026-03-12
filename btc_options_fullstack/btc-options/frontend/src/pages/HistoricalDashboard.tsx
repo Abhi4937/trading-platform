@@ -6,6 +6,7 @@ import { HistoricalChart } from '../components/historical/HistoricalChart';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
 
 export const HistoricalDashboard: React.FC = () => {
+  const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
   const [simulationDate, setSimulationDate] = useState<string>(''); // YYYY-MM-DD
   const [simulationTime, setSimulationTime] = useState<string>(''); // HH:mm
   const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
@@ -21,49 +22,86 @@ export const HistoricalDashboard: React.FC = () => {
 
   // 1. Initial State Initialization from Backend
   useEffect(() => {
-    historicalApi.getLatestAvailableData().then(data => {
-      setSimulationDate(data.latestDate);
-      setSimulationTime(data.latestTime);
-      
-      // After getting latest date, fetch expiries for that date
-      historicalApi.getExpiries(data.latestDate).then(res => {
-        const categorized = (res as any).expiries || [];
-        setExpiries(categorized);
-        // Default to the latest expiry or the one suggested by backend
-        const initialExpiry = categorized.find((e: any) => e.date === data.latestExpiry)?.date || 
-                            (categorized.length > 0 ? categorized[0].date : '');
-        setSelectedExpiry(initialExpiry);
-      });
+    Promise.all([
+      historicalApi.getLatestAvailableData(),
+      historicalApi.getDataRange()
+    ]).then(([latest, range]) => {
+      setDataRange(range);
+      setSimulationDate(latest.latestDate);
+      setSimulationTime(latest.latestTime);
     }).catch(console.error);
   }, []);
+
+  // Helper to generate expiries locally based on simulation date
+  const generateExpiries = useCallback((simDate: string) => {
+    if (!simDate) return [];
+    
+    const base = new Date(simDate);
+    const expList: {date: string, label: string}[] = [];
+
+    // 1. Current
+    const current = new Date(base);
+    const currentStr = current.toISOString().split('T')[0];
+    expList.push({ date: currentStr, label: `Current (${currentStr})` });
+
+    // 2. Next
+    const next = new Date(base);
+    next.setDate(base.getDate() + 1);
+    const nextStr = next.toISOString().split('T')[0];
+    expList.push({ date: nextStr, label: `Next (${nextStr})` });
+
+    // 3. Next-to-Next
+    const ntn = new Date(base);
+    ntn.setDate(base.getDate() + 2);
+    const ntnStr = ntn.toISOString().split('T')[0];
+    expList.push({ date: ntnStr, label: `Next-to-Next (${ntnStr})` });
+
+    // 4. Weekly (Find next Friday that is at least 3 days away)
+    let weekly = new Date(base);
+    weekly.setDate(base.getDate() + 3); // Start looking from 3 days ahead
+    while (weekly.getDay() !== 5) { // 5 is Friday
+      weekly.setDate(weekly.getDate() + 1);
+    }
+    const weeklyStr = weekly.toISOString().split('T')[0];
+    expList.push({ date: weeklyStr, label: `Weekly (${weeklyStr})` });
+
+    return expList;
+  }, []);
+
+  // Update Expiries when Date changes
+  useEffect(() => {
+    if (simulationDate) {
+      const newList = generateExpiries(simulationDate);
+      setExpiries(newList);
+      
+      // If current selected isn't in the new list, default to Current
+      if (newList.length > 0 && !newList.find(e => e.date === selectedExpiry)) {
+        setSelectedExpiry(newList[0].date);
+      }
+    } else {
+      setExpiries([]);
+    }
+  }, [simulationDate, generateExpiries]);
 
   // 2. Adjust Time Logic (The Stepper) with Rollover
   const adjustSimulationTime = useCallback((minutesToAdd: number) => {
     if (!simulationDate || !simulationTime) return;
 
-    // Use a Date object to handle overflows correctly
-    // We treat state as UTC to avoid local timezone interference during calculations
-    const current = new Date(`${simulationDate}T${simulationTime}:00Z`);
+    const current = new Date(`${simulationDate}T${simulationTime}:00+05:30`);
     current.setUTCMinutes(current.getUTCMinutes() + minutesToAdd);
 
     const newDate = current.toISOString().split('T')[0];
-    const newTime = current.toISOString().split('T')[1].substring(0, 5);
+    const newTime = current.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
 
     setSimulationDate(newDate);
     setSimulationTime(newTime);
   }, [simulationDate, simulationTime]);
 
   // 3. Side Effect: Fetch new chain when strict parameters change
-  // simulationDate is always YYYY-MM-DD
-  // simulationTime is always HH:mm
   useEffect(() => {
     if (selectedExpiry && simulationDate && simulationTime) {
-      // Directly construct the IST ISO string and parse it to get the Unix Epoch
-      // Example: "2026-03-11T11:59:00+05:30"
       const istString = `${simulationDate}T${simulationTime}:00+05:30`;
       const timestamp = Math.floor(new Date(istString).getTime() / 1000);
-      
-      console.log(`Querying Chain (Direct IST): ${istString} -> TS: ${timestamp}`);
       
       historicalApi.getOptionChain(selectedExpiry, timestamp).then(res => {
         setChain(res.chain);
@@ -78,8 +116,10 @@ export const HistoricalDashboard: React.FC = () => {
 
   // 4. Fetch Chart Data
   useEffect(() => {
-    if (selectedExpiry && selectedOption && simulationDate) {
-      const startOfDay = new Date(`${simulationDate}T00:00:00Z`).getTime() / 1000;
+    if (selectedExpiry && selectedOption && simulationDate && simulationTime) {
+      const istString = `${simulationDate}T${simulationTime}:00+05:30`;
+      const startOfDay = Math.floor(new Date(`${simulationDate}T00:00:00+05:30`).getTime() / 1000);
+      
       historicalApi.getChartData(
         selectedExpiry, 
         selectedOption.strike, 
@@ -90,7 +130,7 @@ export const HistoricalDashboard: React.FC = () => {
         setChartData(res.data);
       }).catch(console.error);
     }
-  }, [selectedExpiry, selectedOption, timeframe, simulationDate]);
+  }, [selectedExpiry, selectedOption, timeframe, simulationDate, simulationTime]);
 
   return (
     <div className="historical-container">
@@ -100,6 +140,8 @@ export const HistoricalDashboard: React.FC = () => {
           simulationTime={simulationTime}
           expiries={expiries}
           selectedExpiry={selectedExpiry}
+          minDate={dataRange ? new Date(dataRange.min_ts * 1000).toISOString().split('T')[0] : ''}
+          maxDate={dataRange ? new Date(dataRange.max_ts * 1000).toISOString().split('T')[0] : ''}
           onDateChange={setSimulationDate}
           onTimeChange={setSimulationTime}
           onExpiryChange={setSelectedExpiry}
@@ -109,7 +151,7 @@ export const HistoricalDashboard: React.FC = () => {
 
       <div className="historical-toolbar-secondary">
         <div className="ctrl-group">
-          <label className="ctrl-label">Inferred Spot</label>
+          <label className="ctrl-label">Actual Spot</label>
           <div className="spot-price" style={{ fontSize: '18px', color: 'var(--green)' }}>
             ${spot.toLocaleString()}
           </div>

@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useRef } from 'react';
 
 interface Props {
   simulationDate: string; // YYYY-MM-DD
   simulationTime: string; // HH:mm
   expiries: { date: string, label: string }[];
   selectedExpiry: string;
+  minDate?: string;
+  maxDate?: string;
   onDateChange: (date: string) => void;
   onTimeChange: (time: string) => void;
   onExpiryChange: (expiry: string) => void;
@@ -16,11 +18,16 @@ export const ReplayController: React.FC<Props> = ({
   simulationTime,
   expiries,
   selectedExpiry,
+  minDate,
+  maxDate,
   onDateChange,
   onTimeChange,
   onExpiryChange,
   onStep
 }) => {
+  const dateInputRef = useRef<HTMLInputElement>(null);
+  const timeInputRef = useRef<HTMLInputElement>(null);
+
   // Format: Thu 12 Mar 26
   const formatDateDisplay = (dateStr: string) => {
     try {
@@ -37,17 +44,26 @@ export const ReplayController: React.FC<Props> = ({
     }
   };
 
-  // Convert HH:mm to total minutes for the slider
   const timeToMinutes = (timeStr: string) => {
     const [h, m] = timeStr.split(':').map(Number);
     return (h || 0) * 60 + (m || 0);
   };
 
-  // Convert total minutes back to HH:mm
   const minutesToTime = (totalMinutes: number) => {
     const h = Math.floor(totalMinutes / 60);
     const m = totalMinutes % 60;
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+  };
+
+  // Helper to trigger native picker
+  const handleWrapperClick = (ref: React.RefObject<HTMLInputElement>) => {
+    if (ref.current) {
+      if ('showPicker' in ref.current) {
+        (ref.current as any).showPicker();
+      } else {
+        ref.current.click();
+      }
+    }
   };
 
   return (
@@ -67,12 +83,15 @@ export const ReplayController: React.FC<Props> = ({
         <div className="ctrl-pickers">
           <div className="picker-group">
             <label className="ctrl-label">Simulation Date</label>
-            <div className="picker-input-wrap">
+            <div className="picker-input-wrap" onClick={() => handleWrapperClick(dateInputRef)}>
               <span className="picker-display">{formatDateDisplay(simulationDate)}</span>
               <input 
+                ref={dateInputRef}
                 type="date" 
                 className="ghost-input" 
                 value={simulationDate}
+                min={minDate}
+                max={maxDate}
                 onChange={(e) => onDateChange(e.target.value)}
               />
             </div>
@@ -82,9 +101,10 @@ export const ReplayController: React.FC<Props> = ({
 
           <div className="picker-group">
             <label className="ctrl-label">Time (IST)</label>
-            <div className="picker-input-wrap">
+            <div className="picker-input-wrap" onClick={() => handleWrapperClick(timeInputRef)}>
               <span className="picker-display">{simulationTime}</span>
               <input 
+                ref={timeInputRef}
                 type="time" 
                 className="ghost-input" 
                 value={simulationTime}

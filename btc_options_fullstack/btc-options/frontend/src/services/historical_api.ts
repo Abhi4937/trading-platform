@@ -13,8 +13,11 @@ export const historicalApi = {
     return res.json();
   },
 
-  async getExpiries(date: string): Promise<HistoricalExpiryListResponse> {
-    const res = await fetch(`${API_BASE}/historical/expiries?date=${date}`);
+  async getExpiries(date: string, timestamp?: number): Promise<HistoricalExpiryListResponse> {
+    const url = timestamp 
+      ? `${API_BASE}/historical/expiries?date=${date}&timestamp=${timestamp}`
+      : `${API_BASE}/historical/expiries?date=${date}`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error('Failed to fetch expiries');
     return res.json();
   },
