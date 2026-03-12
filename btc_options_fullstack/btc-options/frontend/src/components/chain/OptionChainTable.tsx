@@ -52,14 +52,25 @@ export const OptionChainTable: React.FC<Props> = ({ chain, spotPrice, atmStrike,
         rows = rows.filter(r => Math.abs(r.strike - f) < 1000);
       }
     }
+    
+    // If "All" is selected (999), return everything
+    if (showStrikes >= 999) return rows;
+
     const atmIdx = rows.findIndex(r => r.strike === atmStrike);
     if (atmIdx >= 0) {
       const half = Math.floor(showStrikes / 2);
-      const start = Math.max(0, atmIdx - half);
-      const end = Math.min(rows.length, start + showStrikes);
+      // Try to center around ATM, but ensure we always show 'showStrikes' number of rows if available
+      let start = Math.max(0, atmIdx - half);
+      let end = start + showStrikes;
+      
+      if (end > rows.length) {
+        end = rows.length;
+        start = Math.max(0, end - showStrikes);
+      }
+      
       return rows.slice(start, end);
     }
-    return rows.slice(0, showStrikes);
+    return rows.slice(0, Math.min(rows.length, showStrikes));
   }, [chain, filter, atmStrike, showStrikes]);
 
   return (

@@ -119,13 +119,15 @@ body {
 .chain-table { width: 100%; border-collapse: collapse; }
 
 .chain-table thead th {
-  position: sticky; top: 0; z-index: 5;
+  position: sticky; top: 0; z-index: 10;
+  background: var(--bg1);
   padding: 6px 7px; font-size: 10px; text-transform: uppercase;
   letter-spacing: 0.5px; font-weight: 500; white-space: nowrap; text-align: right;
+  border-bottom: 1px solid var(--border);
 }
-.call-header { background: rgba(96,165,250,0.1); color: #60a5fa; }
-.put-header  { background: rgba(248,113,113,0.1); color: #f87171; }
-.strike-header { background: var(--bg3); color: var(--text2); text-align: center; }
+.call-header { color: #60a5fa; border-bottom: 2px solid rgba(96,165,250,0.4) !important; }
+.put-header  { color: #f87171; border-bottom: 2px solid rgba(248,113,113,0.4) !important; }
+.strike-header { background: var(--bg3) !important; color: var(--text2); text-align: center; }
 
 .chain-table tbody td {
   padding: 4px 7px; text-align: right; white-space: nowrap;
