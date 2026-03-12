@@ -24,10 +24,16 @@ export const HistoricalDashboard: React.FC = () => {
     historicalApi.getLatestAvailableData().then(data => {
       setSimulationDate(data.latestDate);
       setSimulationTime(data.latestTime);
-      setExpiries(data.expiries);
-      if (data.expiries.length > 0) {
-        setSelectedExpiry(data.expiries[0].date);
-      }
+      
+      // After getting latest date, fetch expiries for that date
+      historicalApi.getExpiries(data.latestDate).then(res => {
+        const categorized = (res as any).expiries || [];
+        setExpiries(categorized);
+        // Default to the latest expiry or the one suggested by backend
+        const initialExpiry = categorized.find((e: any) => e.date === data.latestExpiry)?.date || 
+                            (categorized.length > 0 ? categorized[0].date : '');
+        setSelectedExpiry(initialExpiry);
+      });
     }).catch(console.error);
   }, []);
 
@@ -52,14 +58,16 @@ export const HistoricalDashboard: React.FC = () => {
   // simulationTime is always HH:mm
   useEffect(() => {
     if (selectedExpiry && simulationDate && simulationTime) {
-      const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00Z`).getTime() / 1000);
+      // Directly construct the IST ISO string and parse it to get the Unix Epoch
+      // Example: "2026-03-11T11:59:00+05:30"
+      const istString = `${simulationDate}T${simulationTime}:00+05:30`;
+      const timestamp = Math.floor(new Date(istString).getTime() / 1000);
       
-      // LOG for verification
-      console.log(`Fetching Chain for: Date=${simulationDate}, Time=${simulationTime}, TS=${timestamp}`);
+      console.log(`Querying Chain (Direct IST): ${istString} -> TS: ${timestamp}`);
       
       historicalApi.getOptionChain(selectedExpiry, timestamp).then(res => {
         setChain(res.chain);
-        setSpot(res.spot_inferred);
+        setSpot((res as any).spot_actual || 0);
       }).catch(err => {
         console.error("Option chain fetch failed", err);
         setChain([]);

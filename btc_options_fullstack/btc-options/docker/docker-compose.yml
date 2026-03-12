@@ -14,6 +14,8 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    volumes:
+      - /home/abhis/btc-data:/home/abhis/btc-data:ro
 
   #  frontend:
   #    build:

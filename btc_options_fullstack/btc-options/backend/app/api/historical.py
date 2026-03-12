@@ -1,5 +1,5 @@
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Query, HTTPException
 
@@ -19,55 +19,53 @@ _conn = duckdb.connect(database=':memory:', read_only=False)
 def get_conn():
     return _conn
 
-from datetime import datetime, timezone, timedelta
+import os
+from pathlib import Path
 
 @router.get("/latest-available-data")
 async def get_latest_available_data():
+    """
+    High-performance initialization endpoint.
+    1. Scans filesystem for the latest expiry folder.
+    2. Runs a targeted query on that folder to find the max timestamp.
+    """
     try:
-        # Get the absolute latest timestamp from the parquet data
-        query_latest = f"SELECT max(timestamp_unix) FROM read_parquet('{DATA_PATH}')"
+        base_dir = "/home/abhis/btc-data/data/options"
+        if not os.path.exists(base_dir):
+            # Fallback for dev environment if path doesn't exist
+            return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
+
+        # 1. Get the latest expiry folder (YYYY-MM-DD)
+        expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
+        if not expiries:
+            return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
+        
+        latest_expiry = expiries[-1]
+        
+        # 2. Find the latest timestamp within this specific expiry to get the latest simulation time
+        # We query just the latest expiry folder for maximum performance
+        target_path = f"{base_dir}/expiry={latest_expiry}/*/*.parquet"
+        query = f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')"
+        
         conn = get_conn()
-        res = conn.execute(query_latest).fetchone()
-        max_ts = res[0] if res else None
+        res = conn.execute(query).fetchone()
+        max_ts = res[0] if res and res[0] else None
         
         if not max_ts:
-            # Fallback to current time if no data (though unlikely in prod)
-            dt = datetime.now(timezone.utc)
-        else:
-            dt = datetime.fromtimestamp(max_ts, tz=timezone.utc)
+            return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
             
-        date_str = dt.strftime("%Y-%m-%d")
-        time_str = dt.strftime("%H:%M")
+        # Convert the epoch timestamp to IST (UTC+5:30) string for the frontend picker
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        dt = datetime.fromtimestamp(max_ts, tz=ist_tz)
         
-        # Get categorized expiries starting from this date
-        query_expiries = f"""
-        SELECT DISTINCT expiry 
-        FROM read_parquet('{DATA_PATH}', hive_partitioning=true)
-        WHERE expiry >= '{date_str}'
-        ORDER BY expiry ASC
-        """
-        df = conn.execute(query_expiries).df()
-        expiries = df['expiry'].astype(str).tolist()
-        
-        categorized = []
-        for i, exp in enumerate(expiries):
-            label = exp
-            if i == 0: label = f"Current ({exp})"
-            elif i == 1: label = f"Next ({exp})"
-            elif i == 2: label = f"Next-to-Next ({exp})"
-            else: label = f"Weekly ({exp})"
-            categorized.append({"date": exp, "label": label})
-            
         return {
-            "latestDate": date_str,
-            "latestTime": time_str,
-            "expiries": categorized
+            "latestDate": dt.strftime("%Y-%m-%d"),
+            "latestTime": dt.strftime("%H:%M"),
+            "latestExpiry": latest_expiry
         }
     except Exception as e:
-        logger.error(f"Error fetching latest data: {e}")
-        # Robust fallback
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return {"latestDate": today, "latestTime": "00:00", "expiries": []}
+        logger.error(f"Error in fast latest-data scan: {e}")
+        return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
 @router.get("/data-range")
 async def get_data_range():
@@ -110,6 +108,8 @@ async def get_historical_expiries(target_date: str = Query(..., alias="date")):
         logger.error(f"Error fetching expiries: {e}")
         return {"expiries": []}
 
+SPOT_DATA_PATH = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
+
 @router.get("/option-chain")
 async def get_historical_chain(
     target_date: str = Query(..., alias="date"),
@@ -117,8 +117,16 @@ async def get_historical_chain(
 ):
     conn = get_conn()
     
-    # Query all strikes for the given expiry and timestamp
-    # We use LIKE '%CE.parquet' to determine option type
+    # 1. Fetch Actual Spot Price for this minute
+    try:
+        spot_query = f"SELECT mark_close FROM read_parquet('{SPOT_DATA_PATH}') WHERE timestamp_unix = {timestamp}"
+        spot_res = conn.execute(spot_query).fetchone()
+        spot = spot_res[0] if spot_res else None
+    except Exception as e:
+        logger.error(f"Error fetching spot price: {e}")
+        spot = None
+
+    # 2. Query all strikes for the given expiry and timestamp
     query = f"""
     SELECT 
         strike,
@@ -134,51 +142,54 @@ async def get_historical_chain(
         raise HTTPException(status_code=500, detail=str(e))
     
     if df.empty:
-        return {"chain": [], "atm_strike": 0, "spot_inferred": 0}
+        return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
         
-    # We need to compute Greeks. First, we need to infer the spot price.
-    # Spot price can be inferred by finding the strike where call premium approx equals put premium.
     calls = df[df['opt_type'] == 'call'].set_index('strike')['mark_price']
     puts = df[df['opt_type'] == 'put'].set_index('strike')['mark_price']
     
-    strikes = sorted(list(set(calls.index).intersection(puts.index)))
+    strikes = sorted(list(set(calls.index).union(puts.index)))
     
     if not strikes:
-        return {"chain": [], "atm_strike": 0, "spot_inferred": 0}
+        return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
         
-    # Infer ATM
-    min_diff = float('inf')
-    atm_strike = strikes[0]
-    for s in strikes:
-        c_p = calls.get(s, 0)
-        p_p = puts.get(s, 0)
-        diff = abs(c_p - p_p)
-        if diff < min_diff:
-            min_diff = diff
-            atm_strike = s
+    # 3. Calculate ATM Strike based on actual spot
+    # If spot is missing, fallback to parity inference
+    if spot:
+        atm_strike = min(strikes, key=lambda x: abs(x - spot))
+    else:
+        # Fallback to premium parity if spot data is missing for this specific minute
+        min_diff = float('inf')
+        atm_strike = strikes[0]
+        for s in strikes:
+            c_p = calls.get(s, 0)
+            p_p = puts.get(s, 0)
+            diff = abs(c_p - p_p)
+            if diff < min_diff:
+                min_diff = diff
+                atm_strike = s
+        spot = atm_strike # Use ATM as spot if data missing
             
     # Time to expiry in years
-    # target_date is YYYY-MM-DD
-    # timestamp is the current time. We need to calculate T
     from datetime import datetime, timezone
-    expiry_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12) # Assuming 12 UTC settlement
+    expiry_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
     current_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
     T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
     
     r = 0.0 # Risk-free rate
-    spot = atm_strike # Approximate spot for Greeks if we don't have underlying data. We could do better with put-call parity.
     
     # Filter ±20 strikes
-    atm_idx = strikes.index(atm_strike)
-    start_idx = max(0, atm_idx - 20)
-    end_idx = min(len(strikes), atm_idx + 21)
-    filtered_strikes = strikes[start_idx:end_idx]
+    try:
+        atm_idx = strikes.index(atm_strike)
+        start_idx = max(0, atm_idx - 20)
+        end_idx = min(len(strikes), atm_idx + 21)
+        filtered_strikes = strikes[start_idx:end_idx]
+    except ValueError:
+        filtered_strikes = strikes[:40]
     
     chain = []
     for s in filtered_strikes:
         # Call leg
         c_price = float(calls.get(s, 0))
-        # Determine implied vol using Newton-Raphson from greeks.py (imported)
         from app.core.greeks import implied_vol
         c_iv = implied_vol(c_price, spot, s, T, r, "call")
         cg = compute_greeks(spot, s, T, r, c_iv if c_iv > 0 else 0.5, "call")
@@ -209,7 +220,7 @@ async def get_historical_chain(
         "expiry": target_date,
         "timestamp": timestamp,
         "atm_strike": atm_strike,
-        "spot_inferred": spot,
+        "spot_actual": spot,
         "chain": chain
     }
 
