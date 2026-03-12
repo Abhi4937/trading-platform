@@ -37,7 +37,6 @@ export const HistoricalDashboard: React.FC = () => {
 
   useEffect(() => {
     if (selectedExpiry && selectedOption && currentTimestamp > 0) {
-      // Start of day for chart
       const startOfDay = new Date(`${selectedExpiry}T00:00:00Z`).getTime() / 1000;
       historicalApi.getChartData(
         selectedExpiry, 
@@ -52,58 +51,62 @@ export const HistoricalDashboard: React.FC = () => {
   }, [selectedExpiry, selectedOption, timeframe]);
 
   return (
-    <div className="flex flex-col h-screen w-full bg-[#050a0f] text-[#e2eaf4] p-4 font-mono">
-      {/* Header */}
-      <div className="flex justify-between items-center mb-4 bg-[#080e16] p-4 rounded-lg border border-[#1a2d42]">
-        <h1 className="text-xl font-bold text-[#00d4ff]">Historical Options Dashboard</h1>
-        
-        <div className="flex gap-4 items-center">
-          <div className="flex flex-col">
-            <label className="text-xs text-[#7a9bb5] uppercase tracking-wider">Expiry</label>
-            <select 
-              className="bg-[#0c1420] border border-[#1a2d42] rounded p-1 outline-none focus:border-[#00d4ff]"
-              value={selectedExpiry}
-              onChange={e => setSelectedExpiry(e.target.value)}
-            >
-              {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
-            </select>
-          </div>
-          
-          <div className="flex flex-col">
-            <span className="text-xs text-[#7a9bb5] uppercase tracking-wider">Inferred Spot</span>
-            <span className="text-lg font-bold text-[#00e5a0]">{spot.toLocaleString()}</span>
-          </div>
-        </div>
-      </div>
-
+    <div className="historical-container">
       <TimeSlider date={selectedExpiry || new Date().toISOString().split('T')[0]} onTimeChange={setCurrentTimestamp} />
 
-      <div className="flex flex-1 gap-4 min-h-0">
-        {/* Chain Panel */}
-        <div className="flex-1 flex flex-col min-w-0">
+      <div className="historical-main">
+        <div className="historical-chain-panel">
+          <div className="chain-toolbar">
+            <div className="ctrl-group">
+              <label className="ctrl-label">Inferred Spot</label>
+              <div className="spot-price" style={{ fontSize: '16px', color: 'var(--green)' }}>
+                ${spot.toLocaleString()}
+              </div>
+            </div>
+            <div className="sep" />
+            <div className="ctrl-group">
+              <label className="ctrl-label">Expiry Date</label>
+              <select 
+                className="sel-input"
+                value={selectedExpiry}
+                onChange={e => setSelectedExpiry(e.target.value)}
+              >
+                {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
+              </select>
+            </div>
+          </div>
           <HistoricalOptionChain chain={chain} onSelectOption={(s, t) => setSelectedOption({strike: s, type: t})} />
         </div>
 
-        {/* Chart Panel */}
-        <div className="w-[500px] flex flex-col gap-4">
+        <div className="historical-chart-panel">
           {selectedOption ? (
-            <div className="bg-[#080e16] p-4 rounded-lg border border-[#1a2d42] flex flex-col flex-1">
-              <div className="flex justify-between mb-2">
-                <select 
-                  className="bg-[#0c1420] border border-[#1a2d42] text-xs rounded p-1 outline-none"
-                  value={timeframe}
-                  onChange={e => setTimeframe(e.target.value)}
-                >
-                  {['1m', '5m', '15m', '30m', '1h'].map(tf => <option key={tf} value={tf}>{tf}</option>)}
-                </select>
+            <div className="chart-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+              <div className="chart-header">
+                <div className="chart-title">
+                  {selectedOption.strike} {selectedOption.type}
+                  <div className="chart-sub">{timeframe} OHLC</div>
+                </div>
+                <div className="tf-group">
+                  {['1m', '5m', '15m', '30m', '1h'].map(tf => (
+                    <button 
+                      key={tf} 
+                      className={`tf-btn ${timeframe === tf ? 'active' : ''}`}
+                      onClick={() => setTimeframe(tf)}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <HistoricalChart 
-                data={chartData} 
-                title={`${selectedOption.strike} ${selectedOption.type} (${timeframe})`} 
-              />
+              <div className="chart-body" style={{ flex: 1, padding: '12px' }}>
+                <HistoricalChart 
+                  data={chartData} 
+                  title="" 
+                />
+              </div>
             </div>
           ) : (
-            <div className="bg-[#080e16] p-4 rounded-lg border border-[#1a2d42] flex-1 flex items-center justify-center text-[#7a9bb5]">
+            <div className="chart-card" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)' }}>
               Select an option from the chain to view chart
             </div>
           )}

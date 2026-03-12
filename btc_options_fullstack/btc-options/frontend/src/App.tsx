@@ -39,35 +39,11 @@ export default function App() {
     }
   }, [expiries]);
 
-  if (mode === 'HISTORICAL') {
-    return (
-      <div className="flex flex-col h-screen w-full bg-[#050a0f]">
-        <div className="bg-[#080e16] p-2 border-b border-[#1a2d42] flex justify-end">
-          <button 
-            className="px-4 py-1 bg-[#00d4ff] text-black font-bold rounded text-xs hover:bg-[#00e5a0]"
-            onClick={() => setMode('LIVE')}
-          >
-            Switch to Live Trading
-          </button>
-        </div>
-        <HistoricalDashboard />
-      </div>
-    );
-  }
-
   return (
     <div className="app">
       {/* Top Bar */}
       <header className="topbar">
-        <div className="logo flex items-center gap-4">
-          <span>DELTA BTC Options</span>
-          <button 
-            className="px-3 py-1 bg-[#f0b429] text-black font-bold rounded text-xs hover:opacity-80"
-            onClick={() => setMode('HISTORICAL')}
-          >
-            Historical DB
-          </button>
-        </div>
+        <div className="logo">DELTA <span>BTC Options</span></div>
 
         <div className="spot-block">
           <div className="spot-price">${spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
@@ -90,6 +66,10 @@ export default function App() {
           </select>
         </div>
 
+        <div className="title-center">
+          {mode === 'HISTORICAL' ? 'HISTORICAL DATA SIMULATION' : ''}
+        </div>
+
         <button
           className="btn-refresh"
           onClick={() => setShowLogs(v => !v)}
@@ -98,8 +78,12 @@ export default function App() {
           {showLogs ? '✕ Logs' : '📋 Logs'}
         </button>
 
-        <button className="btn-refresh" onClick={refetch} disabled={chainLoading}>
-          {chainLoading ? <Spinner size={14} /> : '↻ Refresh'}
+        <button 
+          className="btn-refresh" 
+          onClick={() => setMode(mode === 'LIVE' ? 'HISTORICAL' : 'LIVE')}
+          style={{ background: '#f0b429', color: '#000', fontWeight: 'bold' }}
+        >
+          {mode === 'LIVE' ? '↻ Historical Simulation' : '↻ Switch to Live'}
         </button>
 
 
@@ -145,20 +129,24 @@ export default function App() {
 
       {/* Main */}
       <main className="main">
-        <section className="chain-panel" style={{ width: '100%' }}>
-          {error && <div className="error-bar">{error} — showing demo data</div>}
+        {mode === 'HISTORICAL' ? (
+          <HistoricalDashboard />
+        ) : (
+          <section className="chain-panel" style={{ width: '100%' }}>
+            {error && <div className="error-bar">{error} — showing demo data</div>}
 
-          {chainLoading && !chain
-            ? <div className="loading-center"><Spinner /><span>Loading chain...</span></div>
-            : chain
-              ? <OptionChainTable
-                  chain={chain.chain}
-                  spotPrice={chain.spot_price}
-                  atmStrike={chain.atm_strike}
-                />
-              : <div className="loading-center">Select an expiry</div>
-          }
-        </section>
+            {chainLoading && !chain
+              ? <div className="loading-center"><Spinner /><span>Loading chain...</span></div>
+              : chain
+                ? <OptionChainTable
+                    chain={chain.chain}
+                    spotPrice={chain.spot_price}
+                    atmStrike={chain.atm_strike}
+                  />
+                : <div className="loading-center">Select an expiry</div>
+            }
+          </section>
+        )}
       </main>
     </div>
   );

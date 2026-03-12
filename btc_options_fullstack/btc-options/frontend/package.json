@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
     "autoprefixer": "^10.4.27",
     "lightweight-charts": "^5.1.0",
     "postcss": "^8.5.8",
