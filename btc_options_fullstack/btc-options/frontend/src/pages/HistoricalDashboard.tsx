@@ -142,21 +142,18 @@ export const HistoricalDashboard: React.FC = () => {
 
   // 4. Fetch Chart Data
   useEffect(() => {
-    if (selectedExpiry && selectedOption && simulationDate && simulationTime) {
-      const istString = `${simulationDate}T${simulationTime}:00+05:30`;
-      const currentTS = Math.floor(new Date(istString).getTime() / 1000);
-      
+    if (selectedExpiry && selectedOption && simulationDate) {
       historicalApi.getChartData(
         selectedExpiry, 
         selectedOption.strike, 
         selectedOption.type, 
-        currentTS, // Start from the minute on the slider
+        0, // Passing 0 or omitting start_time to get full history
         timeframe
       ).then(res => {
         setChartData(res.data);
       }).catch(console.error);
     }
-  }, [selectedExpiry, selectedOption, timeframe, simulationDate, simulationTime]);
+  }, [selectedExpiry, selectedOption, timeframe]);
 
   return (
     <div className="historical-container">

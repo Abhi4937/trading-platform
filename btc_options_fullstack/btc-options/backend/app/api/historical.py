@@ -304,7 +304,6 @@ async def get_chart_data(
         min(mark_low) AS low,
         last(mark_close ORDER BY timestamp_unix) AS close
     FROM read_parquet('{exact_path}')
-    WHERE timestamp_unix >= {start_time}
     GROUP BY bucket
     ORDER BY bucket ASC
     """

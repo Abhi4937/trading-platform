@@ -134,9 +134,16 @@ export const HistoricalChart: React.FC<Props> = ({ data, title }) => {
 
   useEffect(() => {
     if (seriesRef.current && data && data.length > 0) {
-      seriesRef.current.setData(data);
+      // Shift data to IST for display
+      const istData = data.map(d => ({
+        ...d,
+        time: d.time + (5.5 * 3600)
+      }));
+      
+      seriesRef.current.setData(istData);
       chartRef.current?.timeScale().fitContent();
-      const last = data[data.length - 1];
+      
+      const last = istData[istData.length - 1];
       const pc = ((last.close - last.open) / last.open) * 100;
       setLegendData({ ...last, pc });
     }
