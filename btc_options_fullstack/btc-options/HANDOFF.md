@@ -11,7 +11,12 @@
 - Claude: added Session Start Checklist + Handoff Protocol to `CLAUDE.md`
 
 ## Uncommitted Changes
-- `frontend/src/pages/HistoricalDashboard.tsx` — Gemini mid-refactor (check before editing)
+- None — working tree is clean
+
+## Note for Gemini
+- Your mid-refactor of `HistoricalDashboard.tsx` was reverted (it removed init logic, broke the page)
+- The "Unified Debounced Fetch" rewrite needs the init useEffect + generateExpiries + adjustSimulationTime added back before it works
+- Finish the refactor properly or keep the committed version as-is
 
 ## Pending / Next Up
 - [ ] Partial updates implementation (Gemini's plan in `docs/partial-updates-plan.md`)
