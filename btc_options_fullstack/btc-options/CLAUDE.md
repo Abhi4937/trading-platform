@@ -1,5 +1,24 @@
 # Claude Instructions — BTC Options Platform
 
+## Session Start Checklist (do this first, every session)
+1. Read `HANDOFF.md` — who worked last, what changed, what's pending
+2. Read `docs/memories/current_state.md` — active tasks and open issues
+3. Read `docs/memories/work_log_gemini.md` — what Gemini did (avoid conflicts)
+4. Then ask the user what they want to work on
+
+## Handoff Protocol (do this at end of every session)
+1. Update `HANDOFF.md` — fill in: who worked, what files changed, what's pending
+2. Update `docs/memories/work_log_claude.md` — append what was done
+3. Update `docs/memories/current_state.md` — if anything changed
+4. Tell the user: "Ready to hand off to Gemini — HANDOFF.md is updated"
+
+## AI Collaboration
+- Claude and Gemini take turns on this codebase
+- Gemini reads the same `HANDOFF.md` and `docs/memories/` files
+- Never overwrite a file Gemini touched without reading it first
+- Check `git status` before starting work to see Gemini's uncommitted changes
+
+
 ## Endpoints
 - Delta REST: `https://api.india.delta.exchange`
 - Delta WebSocket: `wss://socket.india.delta.exchange`
