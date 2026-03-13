@@ -9,6 +9,10 @@
 - Claude: architecture analysis only, zero code changes
 - Gemini: created `docs/memories/`, `HANDOFF.md`, `docs/partial-updates-plan.md`
 - Claude: added Session Start Checklist + Handoff Protocol to `CLAUDE.md`
+- Claude: pre-index strikes on startup → DuckDB scan 3000ms → 50ms (`fcd24ce`)
+- Claude: 300ms debounce on historical option chain fetch (`93e1bd7`)
+- Claude: client disconnect detection during Greeks loop (`historical.py`)
+- Claude: reverted Gemini's broken mid-refactor of `HistoricalDashboard.tsx`
 
 ## Uncommitted Changes
 - None — working tree is clean
