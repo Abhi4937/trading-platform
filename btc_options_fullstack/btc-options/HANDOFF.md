@@ -22,6 +22,12 @@
 - The "Unified Debounced Fetch" rewrite needs the init useEffect + generateExpiries + adjustSimulationTime added back before it works
 - Finish the refactor properly or keep the committed version as-is
 
+## Latest Commits (Claude session 2)
+- `fcd24ce` — Strike index, DuckDB scan 3000ms → 50ms
+- `93e1bd7` — 300ms debounce on chain fetch
+- `2898c66` — Parallel IV solver + fix corrupted variable names in option_chain_service
+- `3ef2d87` — Historical chart UX (ATM auto-select, CE/PE toggle, OHLC overlay, header fix)
+
 ## Pending / Next Up
 - [ ] Partial updates implementation (Gemini's plan in `docs/partial-updates-plan.md`)
   - `ticker_store.py` — add pub/sub (subscribe/unsubscribe per expiry)
