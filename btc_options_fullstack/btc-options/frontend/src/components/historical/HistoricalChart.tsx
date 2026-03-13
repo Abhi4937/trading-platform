@@ -151,23 +151,23 @@ export const HistoricalChart: React.FC<Props> = ({ data, title }) => {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, position: 'relative' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-        {title && <h3 style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--accent)' }}>{title}</h3>}
-        
+      <div ref={chartContainerRef} style={{ flex: 1, minHeight: '300px', position: 'relative' }}>
         {legendData && (
-          <div style={{ display: 'flex', gap: '8px', fontSize: '11px', fontFamily: 'var(--mono)' }}>
-            <span>O <span style={{ color: '#fff' }}>{legendData.open.toFixed(2)}</span></span>
-            <span>H <span style={{ color: '#fff' }}>{legendData.high.toFixed(2)}</span></span>
-            <span>L <span style={{ color: '#fff' }}>{legendData.low.toFixed(2)}</span></span>
-            <span>C <span style={{ color: '#fff' }}>{legendData.close.toFixed(2)}</span></span>
-            <span style={{ color: legendData.pc >= 0 ? 'var(--green)' : 'var(--red)' }}>
+          <div style={{
+            position: 'absolute', top: '8px', left: '8px', zIndex: 10,
+            display: 'flex', gap: '10px', fontSize: '11px', fontFamily: 'var(--mono)',
+            background: 'rgba(8,14,22,0.75)', padding: '4px 8px', borderRadius: '4px',
+            pointerEvents: 'none',
+          }}>
+            <span style={{ color: 'var(--text3)' }}>O <span style={{ color: '#fff' }}>{legendData.open.toFixed(2)}</span></span>
+            <span style={{ color: 'var(--text3)' }}>H <span style={{ color: '#00e5a0' }}>{legendData.high.toFixed(2)}</span></span>
+            <span style={{ color: 'var(--text3)' }}>L <span style={{ color: '#ff4d6a' }}>{legendData.low.toFixed(2)}</span></span>
+            <span style={{ color: 'var(--text3)' }}>C <span style={{ color: '#fff' }}>{legendData.close.toFixed(2)}</span></span>
+            <span style={{ color: legendData.pc >= 0 ? '#00e5a0' : '#ff4d6a' }}>
               {legendData.pc >= 0 ? '+' : ''}{legendData.pc.toFixed(2)}%
             </span>
           </div>
         )}
-      </div>
-
-      <div ref={chartContainerRef} style={{ flex: 1, minHeight: '300px', position: 'relative' }}>
         {rulerData && (
           <div style={{
             position: 'absolute',

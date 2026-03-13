@@ -189,9 +189,10 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
 }
 .chart-header {
   display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: nowrap; gap: 8px;
   padding: 10px 14px; border-bottom: 1px solid var(--border);
 }
-.chart-title { font-family: var(--sans); font-weight: 700; font-size: 13px; }
+.chart-title { font-family: var(--sans); font-weight: 700; font-size: 13px; flex-shrink: 0; }
 .chart-sub { font-size: 10px; color: var(--text3); margin-top: 1px; }
 .chart-body { padding: 12px; min-height: 244px; display: flex; align-items: center; justify-content: center; }
 .chart-body > .recharts-responsive-container { align-self: stretch; width: 100% !important; }
@@ -200,7 +201,7 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
 .chart-empty { color: var(--text3); font-size: 12px; }
 
 /* ── Timeframe buttons ── */
-.tf-group { display: flex; gap: 4px; }
+.tf-group { display: flex; gap: 4px; flex-wrap: nowrap; flex-shrink: 0; }
 .tf-btn {
   padding: 3px 9px; font-size: 11px; font-weight: 600;
   background: var(--bg3); color: var(--text2);

@@ -108,15 +108,25 @@ export const HistoricalDashboard: React.FC = () => {
     setSimulationTime(`${hour}:${minute}`);
   }, [simulationDate, simulationTime]);
 
-  // Auto-scroll to ATM
+  // Auto-select ATM call on chain load + expiry change, auto-scroll to ATM
   useEffect(() => {
     if (chain.length > 0) {
+      const atmRow = chain.find(r => r.is_atm);
+      if (atmRow) {
+        setSelectedOption({ strike: atmRow.strike, type: 'CE' });
+      }
       setTimeout(() => {
-        const atmRow = document.querySelector('.atm-row');
-        if (atmRow) atmRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const atmEl = document.querySelector('.atm-row');
+        if (atmEl) atmEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 100);
     }
   }, [chain]);
+
+  // Reset selected option when expiry changes
+  useEffect(() => {
+    setSelectedOption(null);
+    setChain([]);
+  }, [selectedExpiry]);
 
   // 3. Fetch Option Chain with AbortController + debounce
   useEffect(() => {
@@ -216,14 +226,24 @@ export const HistoricalDashboard: React.FC = () => {
           {selectedOption ? (
             <div className="chart-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
               <div className="chart-header">
-                <div className="chart-title">
-                  {selectedOption.strike} {selectedOption.type}
-                  <div className="chart-sub">{timeframe} OHLC</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div className="chart-title">{selectedOption.strike} — {selectedExpiry}</div>
+                  <div className="tf-group">
+                    {(['CE', 'PE'] as const).map(t => (
+                      <button
+                        key={t}
+                        className={`tf-btn ${selectedOption.type === t ? 'active' : ''}`}
+                        onClick={() => setSelectedOption({ strike: selectedOption.strike, type: t })}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="tf-group">
                   {['1m', '5m', '15m', '30m', '1h'].map(tf => (
-                    <button 
-                      key={tf} 
+                    <button
+                      key={tf}
                       className={`tf-btn ${timeframe === tf ? 'active' : ''}`}
                       onClick={() => setTimeframe(tf)}
                     >
