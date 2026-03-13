@@ -1,7 +1,7 @@
 import logging
 from datetime import date, datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 
 import duckdb
 from app.core.greeks import compute_greeks
@@ -25,6 +25,41 @@ from pathlib import Path
 # Simple in-memory cache to avoid repeated slow disk scans
 _cached_data_range = None
 _cached_latest_data = None
+
+# Strike index: {expiry_str: sorted list of available strikes}
+# Built once on first use by scanning folder names only (no parquet reads)
+_strike_index: dict[str, list[int]] = {}
+_strike_index_built = False
+
+def _build_strike_index():
+    """Scan folder names under each expiry to build strike index. No parquet reads."""
+    global _strike_index, _strike_index_built
+    base_dir = "/home/abhis/btc-data/data/options"
+    if not os.path.exists(base_dir):
+        _strike_index_built = True
+        return
+    try:
+        for expiry_dir in Path(base_dir).iterdir():
+            if not expiry_dir.is_dir() or '=' not in expiry_dir.name:
+                continue
+            expiry = expiry_dir.name.split('=')[1]
+            strikes = []
+            for strike_dir in expiry_dir.iterdir():
+                if strike_dir.is_dir() and '=' in strike_dir.name:
+                    try:
+                        strikes.append(int(strike_dir.name.split('=')[1]))
+                    except ValueError:
+                        pass
+            _strike_index[expiry] = sorted(strikes)
+        logger.info(f"Strike index built: {len(_strike_index)} expiries")
+    except Exception as e:
+        logger.error(f"Error building strike index: {e}")
+    _strike_index_built = True
+
+def get_strikes_for_expiry(expiry: str) -> list[int]:
+    if not _strike_index_built:
+        _build_strike_index()
+    return _strike_index.get(expiry, [])
 
 @router.get("/latest-available-data")
 async def get_latest_available_data():
@@ -154,6 +189,7 @@ SPOT_DATA_PATH = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
 
 @router.get("/option-chain")
 async def get_historical_chain(
+    request: Request,
     target_date: str = Query(..., alias="date"),
     timestamp: int = Query(...) # UNIX timestamp
 ):
@@ -168,89 +204,101 @@ async def get_historical_chain(
         logger.error(f"Error fetching spot price: {e}")
         spot = None
 
-    # 2. Query all strikes for the given expiry and timestamp
-    query = f"""
-    SELECT 
-        strike,
-        CASE WHEN filename LIKE '%CE.parquet' THEN 'call' ELSE 'put' END as opt_type,
-        mark_close as mark_price
-    FROM read_parquet('{DATA_PATH}', hive_partitioning=true, filename=true)
-    WHERE expiry = '{target_date}' AND timestamp_unix = {timestamp}
-    """
-    try:
-        df = conn.execute(query).df()
-    except Exception as e:
-        logger.error(f"Error fetching option chain: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    if df.empty:
+    # 2. Get all available strikes for this expiry from index (folder names, no parquet reads)
+    all_strikes = get_strikes_for_expiry(target_date)
+    if not all_strikes:
         return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
-        
-    calls = df[df['opt_type'] == 'call'].set_index('strike')['mark_price']
-    puts = df[df['opt_type'] == 'put'].set_index('strike')['mark_price']
-    
-    strikes = sorted(list(set(calls.index).union(puts.index)))
-    
-    if not strikes:
-        return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
-        
-    # 3. Calculate ATM Strike based on actual spot
-    # If spot is missing, fallback to parity inference
+
+    # 3. Find ATM strike from spot, then filter to ±20 strikes
     if spot:
-        atm_strike = min(strikes, key=lambda x: abs(x - spot))
+        atm_strike = min(all_strikes, key=lambda x: abs(x - spot))
     else:
-        # Fallback to premium parity if spot data is missing for this specific minute
+        atm_strike = all_strikes[len(all_strikes) // 2]  # fallback: middle strike
+        spot = atm_strike
+
+    atm_idx = all_strikes.index(atm_strike)
+    start_idx = max(0, atm_idx - 20)
+    end_idx = min(len(all_strikes), atm_idx + 21)
+    filtered_strikes = all_strikes[start_idx:end_idx]
+
+    # 4. Build exact file paths for only the ±20 strikes — no wildcard scan
+    base_dir = "/home/abhis/btc-data/data/options"
+    ce_paths = [f"{base_dir}/expiry={target_date}/strike={s}/CE.parquet" for s in filtered_strikes]
+    pe_paths = [f"{base_dir}/expiry={target_date}/strike={s}/PE.parquet" for s in filtered_strikes]
+    ce_paths = [p for p in ce_paths if os.path.exists(p)]
+    pe_paths = [p for p in pe_paths if os.path.exists(p)]
+
+    if not ce_paths and not pe_paths:
+        return {"chain": [], "atm_strike": atm_strike, "spot_actual": spot or 0}
+
+    def query_legs(paths: list[str], opt_type: str) -> dict:
+        if not paths:
+            return {}
+        path_list = "['" + "','".join(paths) + "']"
+        q = f"""
+        SELECT strike, mark_close as mark_price
+        FROM read_parquet({path_list}, hive_partitioning=true)
+        WHERE timestamp_unix = {timestamp}
+        """
+        try:
+            df = conn.execute(q).df()
+            return dict(zip(df['strike'].astype(int), df['mark_price']))
+        except Exception as e:
+            logger.error(f"Error querying {opt_type} legs: {e}")
+            return {}
+
+    calls = query_legs(ce_paths, "call")
+    puts = query_legs(pe_paths, "put")
+
+    if not calls and not puts:
+        return {"chain": [], "atm_strike": atm_strike, "spot_actual": spot or 0}
+
+    # Fallback ATM via parity if spot was missing
+    if not spot or spot == atm_strike:
         min_diff = float('inf')
-        atm_strike = strikes[0]
-        for s in strikes:
-            c_p = calls.get(s, 0)
-            p_p = puts.get(s, 0)
-            diff = abs(c_p - p_p)
+        for s in filtered_strikes:
+            diff = abs(calls.get(s, 0) - puts.get(s, 0))
             if diff < min_diff:
                 min_diff = diff
                 atm_strike = s
-        spot = atm_strike # Use ATM as spot if data missing
-            
+        spot = spot or atm_strike
+
     # Time to expiry in years
     from datetime import datetime, timezone
     expiry_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
     current_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
     T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
-    
+
     r = 0.0 # Risk-free rate
     
-    # Filter ±20 strikes
-    try:
-        atm_idx = strikes.index(atm_strike)
-        start_idx = max(0, atm_idx - 20)
-        end_idx = min(len(strikes), atm_idx + 21)
-        filtered_strikes = strikes[start_idx:end_idx]
-    except ValueError:
-        filtered_strikes = strikes[:40]
-    
     chain = []
+    from app.core.greeks import implied_vol
     for s in filtered_strikes:
+        # Stop computing if client already disconnected
+        if await request.is_disconnected():
+            logger.info(f"Client disconnected during Greeks computation at strike {s}, aborting.")
+            return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
+
         # Call leg
         c_price = float(calls.get(s, 0))
-        from app.core.greeks import implied_vol
         c_iv = implied_vol(c_price, spot, s, T, r, "call")
         cg = compute_greeks(spot, s, T, r, c_iv if c_iv > 0 else 0.5, "call")
-        
+
         call_leg = {
             "strike": s, "last_price": c_price, "iv_pct": round(c_iv * 100, 2),
             "delta": cg.delta, "gamma": cg.gamma, "theta": cg.theta, "vega": cg.vega
         }
-        
+
         # Put leg
         p_price = float(puts.get(s, 0))
         p_iv = implied_vol(p_price, spot, s, T, r, "put")
         pg = compute_greeks(spot, s, T, r, p_iv if p_iv > 0 else 0.5, "put")
-        
+
         put_leg = {
             "strike": s, "last_price": p_price, "iv_pct": round(p_iv * 100, 2),
             "delta": pg.delta, "gamma": pg.gamma, "theta": pg.theta, "vega": pg.vega
         }
-        
+
         chain.append({
             "strike": s,
             "call": call_leg,

@@ -11,6 +11,7 @@ from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
 from app.core.logging_middleware import LoggingMiddleware
 from app.services.delta_ws_client import run_delta_ws
+from app.api.historical import _build_strike_index
 
 import os
 from logging.handlers import RotatingFileHandler
@@ -49,6 +50,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Startup — initialising cache...")
     await init_cache()
+    await asyncio.get_event_loop().run_in_executor(None, _build_strike_index)
+    logger.info("Startup — Strike index built")
     ws_task = asyncio.create_task(run_delta_ws())
     logger.info("Startup — Delta WebSocket client started")
     yield
