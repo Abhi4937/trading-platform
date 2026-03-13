@@ -40,21 +40,38 @@ export const HistoricalChart: React.FC<Props> = ({ data, title }) => {
       layout: {
         background: { type: ColorType.Solid, color: '#080e16' },
         textColor: '#7a9bb5',
+        padding: { left: 0, right: 0, top: 2, bottom: 0 },
       },
       grid: {
-        vertLines: { color: '#1a2d42' },
-        horzLines: { color: '#1a2d42' },
+        vertLines: { color: '#131f2e' },
+        horzLines: { color: '#131f2e' },
+      },
+      rightPriceScale: {
+        borderVisible: false,
+        scaleMargins: { top: 0.06, bottom: 0.04 },
       },
       width: chartContainerRef.current.clientWidth,
       height: chartContainerRef.current.clientHeight || 400,
       timeScale: {
-        borderColor: '#1a2d42',
+        borderVisible: false,
         timeVisible: true,
         secondsVisible: false,
       },
       crosshair: {
         mode: 0,
-      }
+        horzLine: {
+          width: 1,
+          color: '#4a6a85',
+          style: 3,
+          labelBackgroundColor: '#0c1420',
+        },
+        vertLine: {
+          width: 1,
+          color: '#4a6a85',
+          style: 3,
+          labelBackgroundColor: '#0c1420',
+        },
+      },
     });
 
     const series = chart.addSeries(CandlestickSeries, {
@@ -151,7 +168,7 @@ export const HistoricalChart: React.FC<Props> = ({ data, title }) => {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, position: 'relative' }}>
-      <div ref={chartContainerRef} style={{ flex: 1, minHeight: '300px', position: 'relative' }}>
+      <div ref={chartContainerRef} style={{ flex: 1, minHeight: 0, height: 0, position: 'relative' }}>
         {legendData && (
           <div style={{
             position: 'absolute', top: '8px', left: '8px', zIndex: 10,

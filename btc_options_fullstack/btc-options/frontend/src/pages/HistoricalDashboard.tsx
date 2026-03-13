@@ -235,7 +235,7 @@ export const HistoricalDashboard: React.FC = () => {
                   ))}
                 </div>
               </div>
-              <div className="chart-body" style={{ flex: 1, padding: '12px' }}>
+              <div className="chart-body" style={{ flex: 1, padding: 0, minHeight: 0 }}>
                 <HistoricalChart 
                   data={chartData} 
                   title="" 
