@@ -7,7 +7,14 @@
 - **d280dde:** Hybrid Bisection-Newton IV solver for OTM Greeks.
 - **19eaae3:** Dynamic expiry filtering from actual parquet data.
 
-## Recent Session Analysis (2026-03-13)
+## Session 2 (2026-03-13)
+- **Status:** Bug fix + handoff system setup.
+- **Fixed:** Reverted Gemini's broken mid-refactor of `HistoricalDashboard.tsx` — removed init logic had broken historical simulation
+- **Setup:** Created full AI handoff system (CLAUDE.md checklist, HANDOFF.md, docs/memories/)
+- **Committed:** `9e6020e`, `c7bf66d`
+- **Files Touched:** CLAUDE.md, HANDOFF.md, docs/memories/* (all new)
+
+## Session 1 (2026-03-13)
 - **Status:** Analysis only, zero code changes.
 - **Explored:** Full architecture (live data, historical simulation).
 - **Discussed:** Options for historical auto-play (SSE / setInterval / WebSocket).
