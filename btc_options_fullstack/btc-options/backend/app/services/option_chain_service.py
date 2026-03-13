@@ -181,6 +181,13 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
             iv = implied_vol(mark_price, spot, strike, T, r, opt_type) if mark_price > 0 else 0.5
 
         g = compute_greeks(spot, strike, T, r, iv if iv > 0 else 0.5, opt_type)
+        
+        # EXTRACT LIVE GREEKS FROM EXCHANGE IF AVAILABLE
+        exch_g = ticker.get("greeks") or {}
+        live_delta = float(exch_g.get("delta")) if exch_g.get("delta") else g.delta
+        live_gamma = float(exch_g.get("gamma")) if exch_g.get("gamma") else g.gamma
+        live_theta = float(exch_g.get("theta")) if exch_g.get("theta") else g.theta
+        live_vega  = float(exch_g.get("vega"))  if exch_g.get("vega")  else g.vega
 
         leg_map[(strike, opt_type)] = OptionLeg(
             strike=strike, expiry=expiry, option_type=opt_type,
@@ -190,8 +197,9 @@ async def get_option_chain(expiry: date) -> OptionChainResponse:
             volume=vol, volume_usd=round(vol_usd, 2),
             open_interest=oi, oi_usd=round(oi_usd, 2),
             iv=round(iv, 6), iv_pct=round(iv * 100, 2),
-            delta=g.delta, gamma=g.gamma, theta=g.theta,
-            vega=g.vega, rho=g.rho, price_bs=g.price_bs,
+            delta=round(live_delta, 6), gamma=round(live_gamma, 8), 
+            theta=round(live_theta, 4), vega=round(live_vega, 4), 
+            rho=g.rho, price_bs=g.price_bs,
             underlying_price=round(spot, 2),
             days_to_expiry=round(T * 365, 1),
             is_atm=(strike == atm),
