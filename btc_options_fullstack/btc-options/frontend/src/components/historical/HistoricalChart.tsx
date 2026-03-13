@@ -7,6 +7,11 @@ interface Props {
   title: string;
 }
 
+export const HistoricalChart: React.FC<Props> = ({ data, title }) => {
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<any>(null);
+  const seriesRef = useRef<any>(null);
+  const [legendData, setLegendData] = useState<any>(null);
   const [rulerData, setRulerData] = useState<any>(null);
   const isShiftPressed = useRef(false);
   const rulerStartPoint = useRef<any>(null);
@@ -96,7 +101,7 @@ interface Props {
             } else {
               const deltaPrice = price! - rulerStartPoint.current.price;
               const deltaPct = (deltaPrice / rulerStartPoint.current.price) * 100;
-              const bars = Math.abs(Number(param.time) - Number(rulerStartPoint.current.time)) / 60; // Assuming 1m bars for simplicity
+              const bars = Math.abs(Number(param.time) - Number(rulerStartPoint.current.time)) / 60; 
               
               setRulerData({
                 startX: rulerStartPoint.current.x,
