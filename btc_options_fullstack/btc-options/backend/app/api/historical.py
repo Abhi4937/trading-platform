@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import date, datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
@@ -21,6 +22,7 @@ def get_conn():
 
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 # Simple in-memory cache to avoid repeated slow disk scans
 _cached_data_range = None
@@ -271,40 +273,40 @@ async def get_historical_chain(
 
     r = 0.0 # Risk-free rate
     
-    chain = []
-    from app.core.greeks import implied_vol
-    for s in filtered_strikes:
-        # Stop computing if client already disconnected
-        if await request.is_disconnected():
-            logger.info(f"Client disconnected during Greeks computation at strike {s}, aborting.")
-            return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
+    # Check disconnect before starting expensive computation
+    if await request.is_disconnected():
+        return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
 
-        # Call leg
+    from app.core.greeks import implied_vol
+
+    def compute_strike(s: int) -> dict:
         c_price = float(calls.get(s, 0))
         c_iv = implied_vol(c_price, spot, s, T, r, "call")
         cg = compute_greeks(spot, s, T, r, c_iv if c_iv > 0 else 0.5, "call")
 
-        call_leg = {
-            "strike": s, "last_price": c_price, "iv_pct": round(c_iv * 100, 2),
-            "delta": cg.delta, "gamma": cg.gamma, "theta": cg.theta, "vega": cg.vega
-        }
-
-        # Put leg
         p_price = float(puts.get(s, 0))
         p_iv = implied_vol(p_price, spot, s, T, r, "put")
         pg = compute_greeks(spot, s, T, r, p_iv if p_iv > 0 else 0.5, "put")
 
-        put_leg = {
-            "strike": s, "last_price": p_price, "iv_pct": round(p_iv * 100, 2),
-            "delta": pg.delta, "gamma": pg.gamma, "theta": pg.theta, "vega": pg.vega
+        return {
+            "strike": s,
+            "is_atm": (s == atm_strike),
+            "call": {
+                "strike": s, "last_price": c_price, "iv_pct": round(c_iv * 100, 2),
+                "delta": cg.delta, "gamma": cg.gamma, "theta": cg.theta, "vega": cg.vega
+            },
+            "put": {
+                "strike": s, "last_price": p_price, "iv_pct": round(p_iv * 100, 2),
+                "delta": pg.delta, "gamma": pg.gamma, "theta": pg.theta, "vega": pg.vega
+            }
         }
 
-        chain.append({
-            "strike": s,
-            "call": call_leg,
-            "put": put_leg,
-            "is_atm": (s == atm_strike)
-        })
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        chain = await loop.run_in_executor(
+            executor,
+            lambda: list(executor.map(compute_strike, filtered_strikes))
+        )
         
     return {
         "expiry": target_date,
