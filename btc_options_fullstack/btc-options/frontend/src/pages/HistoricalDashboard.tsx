@@ -39,23 +39,42 @@ export const HistoricalDashboard: React.FC = () => {
 
   // Helper to generate expiries locally
   const generateExpiries = useCallback((simDate: string) => {
-    if (!simDate) return [];
+    if (!simDate || !dataRange) return [];
+    
     const base = new Date(simDate);
+    const maxDateStr = new Date(dataRange.max_ts * 1000).toISOString().split('T')[0];
+    const maxDate = new Date(maxDateStr);
+    
     const expList: {date: string, label: string}[] = [];
-    const currentStr = new Date(base).toISOString().split('T')[0];
-    expList.push({ date: currentStr, label: `Current (${currentStr})` });
+
+    const addIfValid = (dateObj: Date, labelPrefix: string) => {
+      const dateStr = dateObj.toISOString().split('T')[0];
+      if (dateObj <= maxDate) {
+        expList.push({ date: dateStr, label: `${labelPrefix} (${dateStr})` });
+      }
+    };
+
+    // 1. Current
+    addIfValid(new Date(base), 'Current');
+
+    // 2. Next
     const next = new Date(base); next.setDate(base.getDate() + 1);
-    const nextStr = next.toISOString().split('T')[0];
-    expList.push({ date: nextStr, label: `Next (${nextStr})` });
+    addIfValid(next, 'Next');
+
+    // 3. Next-to-Next
     const ntn = new Date(base); ntn.setDate(base.getDate() + 2);
-    const ntnStr = ntn.toISOString().split('T')[0];
-    expList.push({ date: ntnStr, label: `Next-to-Next (${ntnStr})` });
-    let weekly = new Date(base); weekly.setDate(base.getDate() + 3);
-    while (weekly.getDay() !== 5) { weekly.setDate(weekly.getDate() + 1); }
-    const weeklyStr = weekly.toISOString().split('T')[0];
-    expList.push({ date: weeklyStr, label: `Weekly (${weeklyStr})` });
+    addIfValid(ntn, 'Next-to-Next');
+
+    // 4. Weekly (Find next Friday that is at least 3 days away)
+    let weekly = new Date(base);
+    weekly.setDate(base.getDate() + 3); 
+    while (weekly.getDay() !== 5) { 
+      weekly.setDate(weekly.getDate() + 1);
+    }
+    addIfValid(weekly, 'Weekly');
+
     return expList;
-  }, []);
+  }, [dataRange]);
 
   useEffect(() => {
     if (simulationDate) {
@@ -101,7 +120,10 @@ export const HistoricalDashboard: React.FC = () => {
 
   // 3. Fetch Option Chain with AbortController
   useEffect(() => {
-    if (selectedExpiry && simulationDate && simulationTime) {
+    // Guard: Only fetch if all state is present AND the selected expiry is valid for this date
+    const isValidExpiry = expiries.some(e => e.date === selectedExpiry);
+    
+    if (selectedExpiry && simulationDate && simulationTime && isValidExpiry) {
       // Cancel previous request
       if (chainAbortController.current) chainAbortController.current.abort();
       chainAbortController.current = new AbortController();
@@ -120,7 +142,7 @@ export const HistoricalDashboard: React.FC = () => {
       });
     }
     return () => { if (chainAbortController.current) chainAbortController.current.abort(); };
-  }, [selectedExpiry, simulationDate, simulationTime]);
+  }, [selectedExpiry, simulationDate, simulationTime, expiries]);
 
   // 4. Fetch Chart Data with AbortController
   useEffect(() => {
