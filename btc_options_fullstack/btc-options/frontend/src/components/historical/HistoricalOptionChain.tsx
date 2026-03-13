@@ -39,7 +39,7 @@ export const HistoricalOptionChain: React.FC<Props> = ({ chain, onSelectOption }
             >
               <td className="call-cell" style={{ color: 'var(--gold)' }}>{f(row.call.iv_pct, 1)}</td>
               <td className="call-cell call-delta">{f(row.call.delta, 3)}</td>
-              <td className="call-cell">{f(row.call.gamma, 4)}</td>
+              <td className="call-cell">{f(row.call.gamma, 5)}</td>
               <td className="call-cell">{f(row.call.theta, 2)}</td>
               <td className="call-cell">{f(row.call.vega, 2)}</td>
               <td 
@@ -62,7 +62,7 @@ export const HistoricalOptionChain: React.FC<Props> = ({ chain, onSelectOption }
               </td>
               <td className="put-cell">{f(row.put.vega, 2)}</td>
               <td className="put-cell">{f(row.put.theta, 2)}</td>
-              <td className="put-cell">{f(row.put.gamma, 4)}</td>
+              <td className="put-cell">{f(row.put.gamma, 5)}</td>
               <td className="put-cell put-delta">{f(row.put.delta, 3)}</td>
               <td className="put-cell" style={{ color: 'var(--gold)' }}>{f(row.put.iv_pct, 1)}</td>
             </tr>
