@@ -118,19 +118,17 @@ export const HistoricalDashboard: React.FC = () => {
     }
   }, [chain]);
 
-  // 3. Fetch Option Chain with AbortController
+  // 3. Fetch Option Chain with AbortController + debounce
   useEffect(() => {
-    // Guard: Only fetch if all state is present AND the selected expiry is valid for this date
     const isValidExpiry = expiries.some(e => e.date === selectedExpiry);
-    
-    if (selectedExpiry && simulationDate && simulationTime && isValidExpiry) {
-      // Cancel previous request
+    if (!selectedExpiry || !simulationDate || !simulationTime || !isValidExpiry) return;
+
+    const timer = setTimeout(() => {
       if (chainAbortController.current) chainAbortController.current.abort();
       chainAbortController.current = new AbortController();
 
-      const istString = `${simulationDate}T${simulationTime}:00+05:30`;
-      const timestamp = Math.floor(new Date(istString).getTime() / 1000);
-      
+      const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
+
       historicalApi.getOptionChain(selectedExpiry, timestamp, chainAbortController.current.signal).then(res => {
         setChain(res.chain);
         setSpot((res as any).spot_actual || 0);
@@ -140,8 +138,9 @@ export const HistoricalDashboard: React.FC = () => {
         setChain([]);
         setSpot(0);
       });
-    }
-    return () => { if (chainAbortController.current) chainAbortController.current.abort(); };
+    }, 300);
+
+    return () => { clearTimeout(timer); if (chainAbortController.current) chainAbortController.current.abort(); };
   }, [selectedExpiry, simulationDate, simulationTime, expiries]);
 
   // 4. Fetch Chart Data with AbortController
