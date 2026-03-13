@@ -24,7 +24,7 @@ const COLUMNS = [
   { key: 'delta',         label: 'Δ Delta', decimals: 3 },
   { key: 'iv_pct',        label: 'IV %',    decimals: 1 },
   { key: 'vega',          label: 'Vega',    decimals: 2 },
-  { key: 'gamma',         label: 'Gamma',   decimals: 4 },
+  { key: 'gamma',         label: 'Gamma',   decimals: 8 },
   { key: 'theta',         label: 'Theta',   decimals: 2 },
   { key: 'bid',           label: 'Bid',     decimals: 2 },
   { key: 'last_price',    label: 'Mark',    decimals: 2 },
