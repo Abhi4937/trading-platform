@@ -346,14 +346,16 @@ async def get_chart_data(
     if not os.path.exists(exact_path):
         return {"data": []}
 
+    where_clause = f"WHERE timestamp_unix >= {start_time}" if start_time > 0 else ""
     query = f"""
-    SELECT 
+    SELECT
         time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
         first(mark_open ORDER BY timestamp_unix) AS open,
         max(mark_high) AS high,
         min(mark_low) AS low,
         last(mark_close ORDER BY timestamp_unix) AS close
     FROM read_parquet('{exact_path}')
+    {where_clause}
     GROUP BY bucket
     ORDER BY bucket ASC
     """

@@ -3,7 +3,9 @@ import { historicalApi } from '../services/historical_api';
 import { ReplayController } from '../components/historical/ReplayController';
 import { HistoricalOptionChain } from '../components/historical/HistoricalOptionChain';
 import { HistoricalChart } from '../components/historical/HistoricalChart';
+import { StrategyPanel } from '../components/historical/StrategyPanel';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
+import type { StrategyLeg } from '../types/strategy';
 
 export const HistoricalDashboard: React.FC = () => {
   const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
@@ -11,19 +13,28 @@ export const HistoricalDashboard: React.FC = () => {
   const [simulationTime, setSimulationTime] = useState<string>(''); // HH:mm
   const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
-  
+
   const [chain, setChain] = useState<HistoricalChainRow[]>([]);
   const [spot, setSpot] = useState<number>(0);
   const [strikeFilter, setStrikeFilter] = useState<string>('');
-  
+
   const [selectedOption, setSelectedOption] = useState<{strike: number, type: 'CE' | 'PE'} | null>(null);
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
+  // Strategy Builder
+  const [strategyMode, setStrategyMode] = useState(false);
+  const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
+
   // AbortControllers to prevent race conditions
   const chainAbortController = useRef<AbortController | null>(null);
   const chartAbortController = useRef<AbortController | null>(null);
-  const expiryAbortController = useRef<AbortController | null>(null);
+
+  // Computed simulation timestamp (IST)
+  const simTimestamp = useCallback(() => {
+    if (!simulationDate || !simulationTime) return 0;
+    return Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
+  }, [simulationDate, simulationTime]);
 
   // 1. Initial State Initialization
   useEffect(() => {
@@ -33,18 +44,18 @@ export const HistoricalDashboard: React.FC = () => {
     ]).then(([latest, range]) => {
       setDataRange(range);
       setSimulationDate(latest.latestDate);
-      setSimulationTime('00:00'); 
+      setSimulationTime('00:00');
     }).catch(console.error);
   }, []);
 
   // Helper to generate expiries locally
   const generateExpiries = useCallback((simDate: string) => {
     if (!simDate || !dataRange) return [];
-    
+
     const base = new Date(simDate);
     const maxDateStr = new Date(dataRange.max_ts * 1000).toISOString().split('T')[0];
     const maxDate = new Date(maxDateStr);
-    
+
     const expList: {date: string, label: string}[] = [];
 
     const addIfValid = (dateObj: Date, labelPrefix: string) => {
@@ -54,23 +65,14 @@ export const HistoricalDashboard: React.FC = () => {
       }
     };
 
-    // 1. Current
     addIfValid(new Date(base), 'Current');
-
-    // 2. Next
     const next = new Date(base); next.setDate(base.getDate() + 1);
     addIfValid(next, 'Next');
-
-    // 3. Next-to-Next
     const ntn = new Date(base); ntn.setDate(base.getDate() + 2);
     addIfValid(ntn, 'Next-to-Next');
-
-    // 4. Weekly (Find next Friday that is at least 3 days away)
     let weekly = new Date(base);
-    weekly.setDate(base.getDate() + 3); 
-    while (weekly.getDay() !== 5) { 
-      weekly.setDate(weekly.getDate() + 1);
-    }
+    weekly.setDate(base.getDate() + 3);
+    while (weekly.getDay() !== 5) { weekly.setDate(weekly.getDate() + 1); }
     addIfValid(weekly, 'Weekly');
 
     return expList;
@@ -110,7 +112,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   // Auto-select ATM call on chain load + expiry change, auto-scroll to ATM
   useEffect(() => {
-    if (chain.length > 0) {
+    if (chain.length > 0 && !strategyMode) {
       const atmRow = chain.find(r => r.is_atm);
       if (atmRow) {
         setSelectedOption({ strike: atmRow.strike, type: 'CE' });
@@ -120,7 +122,7 @@ export const HistoricalDashboard: React.FC = () => {
         if (atmEl) atmEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 100);
     }
-  }, [chain]);
+  }, [chain, strategyMode]);
 
   // Reset selected option when expiry changes
   useEffect(() => {
@@ -155,16 +157,15 @@ export const HistoricalDashboard: React.FC = () => {
 
   // 4. Fetch Chart Data with AbortController
   useEffect(() => {
-    if (selectedExpiry && selectedOption && simulationDate) {
-      // Cancel previous request
+    if (selectedExpiry && selectedOption && simulationDate && !strategyMode) {
       if (chartAbortController.current) chartAbortController.current.abort();
       chartAbortController.current = new AbortController();
 
       historicalApi.getChartData(
-        selectedExpiry, 
-        selectedOption.strike, 
-        selectedOption.type, 
-        0, 
+        selectedExpiry,
+        selectedOption.strike,
+        selectedOption.type,
+        0,
         timeframe,
         chartAbortController.current.signal
       ).then(res => {
@@ -175,7 +176,36 @@ export const HistoricalDashboard: React.FC = () => {
       });
     }
     return () => { if (chartAbortController.current) chartAbortController.current.abort(); };
-  }, [selectedExpiry, selectedOption, timeframe]);
+  }, [selectedExpiry, selectedOption, timeframe, strategyMode]);
+
+  // Strategy: add a leg
+  const addLeg = useCallback((strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => {
+    const ts = simTimestamp();
+    setStrategyLegs(prev => [...prev, {
+      id: `${Date.now()}-${strike}-${type}-${action}`,
+      expiry: selectedExpiry,
+      strike,
+      type,
+      action,
+      qty: 1,
+      entryPremium: premium,
+      entryTimestamp: ts,
+    }]);
+  }, [selectedExpiry, simTimestamp]);
+
+  const removeLeg = useCallback((id: string) => {
+    setStrategyLegs(prev => prev.filter(l => l.id !== id));
+  }, []);
+
+  const updateLegQty = useCallback((id: string, qty: number) => {
+    setStrategyLegs(prev => prev.map(l => l.id === id ? { ...l, qty } : l));
+  }, []);
+
+  const clearLegs = useCallback(() => setStrategyLegs([]), []);
+
+  const handleStrategyToggle = () => {
+    setStrategyMode(prev => !prev);
+  };
 
   return (
     <div className="historical-container">
@@ -199,53 +229,83 @@ export const HistoricalDashboard: React.FC = () => {
 
       <div className="historical-main">
         <div className="historical-chain-panel">
-          <HistoricalOptionChain 
-            chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain} 
-            onSelectOption={(s, t) => setSelectedOption({strike: s, type: t})} 
+          <HistoricalOptionChain
+            chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain}
+            strategyMode={strategyMode}
+            onSelectOption={(s, t) => setSelectedOption({ strike: s, type: t })}
+            onAddLeg={addLeg}
           />
         </div>
 
-        <div className="historical-chart-panel">
-          {selectedOption ? (
-            <div className="chart-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-              <div className="chart-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div className="chart-title">{selectedOption.strike} — {selectedExpiry}</div>
-                  <div className="tf-group">
-                    {(['CE', 'PE'] as const).map(t => (
-                      <button
-                        key={t}
-                        className={`tf-btn ${selectedOption.type === t ? 'active' : ''}`}
-                        onClick={() => setSelectedOption({ strike: selectedOption.strike, type: t })}
-                      >
-                        {t}
-                      </button>
-                    ))}
+        <div className="historical-chart-panel" style={{ width: strategyMode ? '560px' : '500px' }}>
+          {/* Panel mode toggle tabs */}
+          <div className="chart-mode-bar">
+            <button
+              className={`chart-mode-tab${!strategyMode ? ' active' : ''}`}
+              onClick={() => { setStrategyMode(false); }}
+            >
+              Chart
+            </button>
+            <button
+              className={`chart-mode-tab strategy${strategyMode ? ' active' : ''}`}
+              onClick={() => { setStrategyMode(true); }}
+            >
+              Strategy Builder
+              {strategyLegs.length > 0 && (
+                <span className="strategy-leg-count">{strategyLegs.length}</span>
+              )}
+            </button>
+          </div>
+
+          {strategyMode ? (
+            <StrategyPanel
+              legs={strategyLegs}
+              chain={chain}
+              onRemoveLeg={removeLeg}
+              onUpdateQty={updateLegQty}
+              onClearAll={clearLegs}
+            />
+          ) : (
+            <>
+              {selectedOption ? (
+                <div className="chart-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  <div className="chart-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <div className="chart-title">{selectedOption.strike} — {selectedExpiry}</div>
+                      <div className="tf-group">
+                        {(['CE', 'PE'] as const).map(t => (
+                          <button
+                            key={t}
+                            className={`tf-btn ${selectedOption.type === t ? 'active' : ''}`}
+                            onClick={() => setSelectedOption({ strike: selectedOption.strike, type: t })}
+                          >
+                            {t}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="tf-group">
+                      {['1m', '5m', '15m', '30m', '1h'].map(tf => (
+                        <button
+                          key={tf}
+                          className={`tf-btn ${timeframe === tf ? 'active' : ''}`}
+                          onClick={() => setTimeframe(tf)}
+                        >
+                          {tf}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="chart-body" style={{ flex: 1, padding: 0, minHeight: 0 }}>
+                    <HistoricalChart data={chartData} title="" />
                   </div>
                 </div>
-                <div className="tf-group">
-                  {['1m', '5m', '15m', '30m', '1h'].map(tf => (
-                    <button
-                      key={tf}
-                      className={`tf-btn ${timeframe === tf ? 'active' : ''}`}
-                      onClick={() => setTimeframe(tf)}
-                    >
-                      {tf}
-                    </button>
-                  ))}
+              ) : (
+                <div className="chart-card" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)' }}>
+                  Select an option from the chain to view chart
                 </div>
-              </div>
-              <div className="chart-body" style={{ flex: 1, padding: 0, minHeight: 0 }}>
-                <HistoricalChart 
-                  data={chartData} 
-                  title="" 
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="chart-card" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)' }}>
-              Select an option from the chain to view chart
-            </div>
+              )}
+            </>
           )}
         </div>
       </div>

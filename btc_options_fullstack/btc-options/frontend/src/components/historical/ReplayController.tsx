@@ -62,12 +62,13 @@ export const ReplayController: React.FC<Props> = ({
   };
 
   // Helper to trigger native picker
-  const handleWrapperClick = (ref: React.RefObject<HTMLInputElement>) => {
-    if (ref.current) {
-      if ('showPicker' in ref.current) {
-        (ref.current as any).showPicker();
+  const handleWrapperClick = (ref: React.RefObject<HTMLInputElement | null>) => {
+    const el = ref.current;
+    if (el) {
+      if ('showPicker' in el) {
+        (el as any).showPicker();
       } else {
-        ref.current.click();
+        (el as HTMLInputElement).click();
       }
     }
   };

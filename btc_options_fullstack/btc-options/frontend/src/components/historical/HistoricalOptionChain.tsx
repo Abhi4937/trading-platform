@@ -3,12 +3,16 @@ import type { HistoricalChainRow } from '../../types/historical';
 
 interface Props {
   chain: HistoricalChainRow[];
+  strategyMode: boolean;
   onSelectOption: (strike: number, type: 'CE' | 'PE') => void;
+  onAddLeg: (strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => void;
 }
 
 const f = (n: number, d = 2) => n.toFixed(d);
 
-export const HistoricalOptionChain: React.FC<Props> = ({ chain, onSelectOption }) => {
+export const HistoricalOptionChain: React.FC<Props> = ({
+  chain, strategyMode, onSelectOption, onAddLeg
+}) => {
   return (
     <div className="table-scroll">
       <table className="chain-table">
@@ -31,8 +35,8 @@ export const HistoricalOptionChain: React.FC<Props> = ({ chain, onSelectOption }
         </thead>
         <tbody>
           {chain.map((row) => (
-            <tr 
-              key={row.strike} 
+            <tr
+              key={row.strike}
               className={row.is_atm ? 'atm-row' : ''}
               data-itm-call={row.call.delta > 0.5 ? 'true' : 'false'}
               data-itm-put={Math.abs(row.put.delta) > 0.5 ? 'true' : 'false'}
@@ -42,24 +46,42 @@ export const HistoricalOptionChain: React.FC<Props> = ({ chain, onSelectOption }
               <td className="call-cell">{f(row.call.gamma, 8)}</td>
               <td className="call-cell">{f(row.call.theta, 2)}</td>
               <td className="call-cell">{f(row.call.vega, 2)}</td>
-              <td 
-                className="call-cell ltp clickable"
-                onClick={() => onSelectOption(row.strike, 'CE')}
-              >
-                {f(row.call.last_price, 2)}
+
+              {/* CE Mark — chart click OR strategy B/S */}
+              <td className="call-cell ltp">
+                {strategyMode ? (
+                  <div className="chain-bs-group">
+                    <button className="chain-bs-btn buy" onClick={() => onAddLeg(row.strike, 'CE', 'BUY', row.call.last_price)}>B</button>
+                    <span className="chain-bs-price">{f(row.call.last_price, 2)}</span>
+                    <button className="chain-bs-btn sell" onClick={() => onAddLeg(row.strike, 'CE', 'SELL', row.call.last_price)}>S</button>
+                  </div>
+                ) : (
+                  <span className="clickable" onClick={() => onSelectOption(row.strike, 'CE')}>
+                    {f(row.call.last_price, 2)}
+                  </span>
+                )}
               </td>
-              
+
               <td className={`strike-cell ${row.is_atm ? 'atm-strike' : ''}`}>
                 {row.strike.toLocaleString()}
                 {row.is_atm && <span className="atm-badge">ATM</span>}
               </td>
 
-              <td 
-                className="put-cell ltp clickable"
-                onClick={() => onSelectOption(row.strike, 'PE')}
-              >
-                {f(row.put.last_price, 2)}
+              {/* PE Mark — chart click OR strategy B/S */}
+              <td className="put-cell ltp">
+                {strategyMode ? (
+                  <div className="chain-bs-group">
+                    <button className="chain-bs-btn buy" onClick={() => onAddLeg(row.strike, 'PE', 'BUY', row.put.last_price)}>B</button>
+                    <span className="chain-bs-price">{f(row.put.last_price, 2)}</span>
+                    <button className="chain-bs-btn sell" onClick={() => onAddLeg(row.strike, 'PE', 'SELL', row.put.last_price)}>S</button>
+                  </div>
+                ) : (
+                  <span className="clickable" onClick={() => onSelectOption(row.strike, 'PE')}>
+                    {f(row.put.last_price, 2)}
+                  </span>
+                )}
               </td>
+
               <td className="put-cell">{f(row.put.vega, 2)}</td>
               <td className="put-cell">{f(row.put.theta, 2)}</td>
               <td className="put-cell">{f(row.put.gamma, 8)}</td>

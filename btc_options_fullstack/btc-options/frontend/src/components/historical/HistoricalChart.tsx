@@ -40,7 +40,6 @@ export const HistoricalChart: React.FC<Props> = ({ data, title }) => {
       layout: {
         background: { type: ColorType.Solid, color: '#080e16' },
         textColor: '#7a9bb5',
-        padding: { left: 0, right: 0, top: 2, bottom: 0 },
       },
       grid: {
         vertLines: { color: '#131f2e' },
