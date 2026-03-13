@@ -51,17 +51,41 @@ def compute_greeks(S, K, T, r, sigma, option_type: Literal["call","put"]) -> Gre
                   price_bs=round(max(0.0,price),4))
 
 
-def implied_vol(market_price, S, K, T, r, option_type, max_iter=200, tol=1e-7) -> float:
-    if T<=1e-6 or market_price<=0: return 0.0
-    sigma = math.sqrt(2*math.pi/T)*market_price/S
-    sigma = max(0.01, min(sigma, 5.0))
-    for _ in range(max_iter):
-        g = compute_greeks(S,K,T,r,sigma,option_type)
-        diff = g.price_bs-market_price
-        if abs(diff)<tol: return round(sigma,6)
-        vf = g.vega*100
-        if abs(vf)<1e-12: break
-        sigma -= diff/vf
-        if sigma<=1e-4: sigma=1e-4
-        elif sigma>10.0: sigma=10.0
-    return round(sigma,6) if 0<sigma<10 else 0.0
+def implied_vol(market_price, S, K, T, r, option_type, max_iter=100, tol=1e-6) -> float:
+    if T <= 1e-6 or market_price <= 0: return 0.0
+    
+    intrinsic = max(0.0, S - K) if option_type == "call" else max(0.0, K - S)
+    if market_price <= intrinsic:
+        return 0.0001 # Floor for options priced at intrinsic
+
+    # 1. Bisection search to bracket and narrow the IV
+    # This is extremely robust and prevents the solver from getting 'stuck'
+    low, high = 0.001, 5.0
+    for _ in range(12): # 12 steps narrows the window to ~0.1% width
+        mid = (low + high) / 2
+        theo_price = compute_greeks(S, K, T, r, mid, option_type).price_bs
+        if theo_price < market_price:
+            low = mid
+        else:
+            high = mid
+    
+    # 2. Newton-Raphson to finish with high precision
+    sigma = (low + high) / 2
+    for _ in range(10):
+        g = compute_greeks(S, K, T, r, sigma, option_type)
+        diff = g.price_bs - market_price
+        if abs(diff) < tol:
+            break
+        vf = g.vega * 100 # Vega is per 1% move, multiply by 100 for absolute derivative
+        if abs(vf) < 1e-10: 
+            break # Vega is too small for Newton, stick with Bisection result
+        
+        prev_sigma = sigma
+        sigma -= diff / vf
+        
+        # If Newton jumps out of our bisection bracket, revert and break
+        if sigma < low or sigma > high:
+            sigma = prev_sigma
+            break
+            
+    return round(sigma, 6)
