@@ -180,38 +180,21 @@ export const HistoricalDashboard: React.FC = () => {
   return (
     <div className="historical-container">
       <div className="replay-wrapper">
-        <ReplayController 
+        <ReplayController
           simulationDate={simulationDate}
           simulationTime={simulationTime}
           expiries={expiries}
           selectedExpiry={selectedExpiry}
           minDate={dataRange ? new Date(dataRange.min_ts * 1000).toISOString().split('T')[0] : ''}
           maxDate={dataRange ? new Date(dataRange.max_ts * 1000).toISOString().split('T')[0] : ''}
+          spot={spot}
+          strikeFilter={strikeFilter}
           onDateChange={setSimulationDate}
           onTimeChange={setSimulationTime}
           onExpiryChange={setSelectedExpiry}
           onStep={adjustSimulationTime}
+          onStrikeFilterChange={setStrikeFilter}
         />
-      </div>
-
-      <div className="historical-toolbar-secondary">
-        <div className="ctrl-group">
-          <label className="ctrl-label">Actual Spot</label>
-          <div className="spot-price" style={{ fontSize: '18px', color: 'var(--green)' }}>
-            ${spot.toLocaleString()}
-          </div>
-        </div>
-        <div className="sep" />
-        <div className="ctrl-group" style={{ flex: 1 }}>
-          <label className="ctrl-label">Search Strike</label>
-          <input
-            className="search-input"
-            style={{ width: '100%' }}
-            placeholder="Type strike..."
-            value={strikeFilter}
-            onChange={e => setStrikeFilter(e.target.value)}
-          />
-        </div>
       </div>
 
       <div className="historical-main">

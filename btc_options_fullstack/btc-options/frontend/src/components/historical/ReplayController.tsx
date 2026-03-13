@@ -7,10 +7,13 @@ interface Props {
   selectedExpiry: string;
   minDate?: string;
   maxDate?: string;
+  spot: number;
+  strikeFilter: string;
   onDateChange: (date: string) => void;
   onTimeChange: (time: string) => void;
   onExpiryChange: (expiry: string) => void;
   onStep: (minutes: number) => void;
+  onStrikeFilterChange: (v: string) => void;
 }
 
 export const ReplayController: React.FC<Props> = ({
@@ -20,10 +23,13 @@ export const ReplayController: React.FC<Props> = ({
   selectedExpiry,
   minDate,
   maxDate,
+  spot,
+  strikeFilter,
   onDateChange,
   onTimeChange,
   onExpiryChange,
-  onStep
+  onStep,
+  onStrikeFilterChange,
 }) => {
   const dateInputRef = useRef<HTMLInputElement>(null);
   const timeInputRef = useRef<HTMLInputElement>(null);
@@ -82,13 +88,13 @@ export const ReplayController: React.FC<Props> = ({
         {/* Center: Pickers */}
         <div className="ctrl-pickers">
           <div className="picker-group">
-            <label className="ctrl-label">Simulation Date</label>
+            <label className="ctrl-label">Date</label>
             <div className="picker-input-wrap" onClick={() => handleWrapperClick(dateInputRef)}>
               <span className="picker-display">{formatDateDisplay(simulationDate)}</span>
-              <input 
+              <input
                 ref={dateInputRef}
-                type="date" 
-                className="ghost-input" 
+                type="date"
+                className="ghost-input"
                 value={simulationDate}
                 min={minDate}
                 max={maxDate}
@@ -100,13 +106,13 @@ export const ReplayController: React.FC<Props> = ({
           <div className="sep" />
 
           <div className="picker-group">
-            <label className="ctrl-label">Time (IST)</label>
-            <div className="picker-input-wrap" onClick={() => handleWrapperClick(timeInputRef)}>
+            <label className="ctrl-label">Time IST</label>
+            <div className="picker-input-wrap" style={{ minWidth: '72px' }} onClick={() => handleWrapperClick(timeInputRef)}>
               <span className="picker-display">{simulationTime}</span>
-              <input 
+              <input
                 ref={timeInputRef}
-                type="time" 
-                className="ghost-input" 
+                type="time"
+                className="ghost-input"
                 value={simulationTime}
                 onChange={(e) => onTimeChange(e.target.value)}
               />
@@ -116,8 +122,8 @@ export const ReplayController: React.FC<Props> = ({
           <div className="sep" />
 
           <div className="picker-group">
-            <label className="ctrl-label">Option Expiry</label>
-            <select 
+            <label className="ctrl-label">Expiry</label>
+            <select
               className="sel-input"
               value={selectedExpiry}
               onChange={(e) => onExpiryChange(e.target.value)}
@@ -126,6 +132,28 @@ export const ReplayController: React.FC<Props> = ({
                 <option key={exp.date} value={exp.date}>{exp.label}</option>
               ))}
             </select>
+          </div>
+
+          <div className="sep" />
+
+          <div className="picker-group">
+            <label className="ctrl-label">Spot</label>
+            <div className="spot-price" style={{ fontSize: '14px', color: 'var(--green)', fontWeight: 700, lineHeight: '26px' }}>
+              ${spot.toLocaleString()}
+            </div>
+          </div>
+
+          <div className="sep" />
+
+          <div className="picker-group">
+            <label className="ctrl-label">Search Strike</label>
+            <input
+              className="search-input"
+              style={{ width: '110px' }}
+              placeholder="Type strike..."
+              value={strikeFilter}
+              onChange={e => onStrikeFilterChange(e.target.value)}
+            />
           </div>
         </div>
 
@@ -142,7 +170,7 @@ export const ReplayController: React.FC<Props> = ({
 
       {/* Restore the horizontal time slider with labels */}
       <div className="slider-container">
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px', fontSize: '10px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px', fontSize: '10px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
           <span>00:00</span>
           <span>23:59</span>
         </div>
