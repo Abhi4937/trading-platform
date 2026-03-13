@@ -140,8 +140,12 @@ export const ReplayController: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Restore the horizontal time slider */}
+      {/* Restore the horizontal time slider with labels */}
       <div className="slider-container">
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px', fontSize: '10px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+          <span>00:00</span>
+          <span>23:59</span>
+        </div>
         <input 
           type="range"
           className="replay-slider"

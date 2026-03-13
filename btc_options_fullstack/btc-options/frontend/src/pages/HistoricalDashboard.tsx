@@ -87,15 +87,41 @@ export const HistoricalDashboard: React.FC = () => {
   const adjustSimulationTime = useCallback((minutesToAdd: number) => {
     if (!simulationDate || !simulationTime) return;
 
+    // Use the same IST construction logic as the query
     const current = new Date(`${simulationDate}T${simulationTime}:00+05:30`);
     current.setUTCMinutes(current.getUTCMinutes() + minutesToAdd);
 
-    const newDate = current.toISOString().split('T')[0];
-    const newTime = current.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+    // To extract the new local IST date and time
+    // We can't just use current.toISOString() because that's UTC
+    // We use Intl formatter to get the local string in Asia/Kolkata
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    });
+    
+    const parts = formatter.formatToParts(current);
+    const year = parts.find(p => p.type === 'year')?.value;
+    const month = parts.find(p => p.type === 'month')?.value;
+    const day = parts.find(p => p.type === 'day')?.value;
+    const hour = parts.find(p => p.type === 'hour')?.value;
+    const minute = parts.find(p => p.type === 'minute')?.value;
 
-    setSimulationDate(newDate);
-    setSimulationTime(newTime);
+    setSimulationDate(`${year}-${month}-${day}`);
+    setSimulationTime(`${hour}:${minute}`);
   }, [simulationDate, simulationTime]);
+
+  // Auto-scroll to ATM
+  useEffect(() => {
+    if (chain.length > 0) {
+      setTimeout(() => {
+        const atmRow = document.querySelector('.atm-row');
+        if (atmRow) {
+          atmRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 100);
+    }
+  }, [chain]);
 
   // 3. Side Effect: Fetch new chain when strict parameters change
   useEffect(() => {
@@ -118,13 +144,13 @@ export const HistoricalDashboard: React.FC = () => {
   useEffect(() => {
     if (selectedExpiry && selectedOption && simulationDate && simulationTime) {
       const istString = `${simulationDate}T${simulationTime}:00+05:30`;
-      const startOfDay = Math.floor(new Date(`${simulationDate}T00:00:00+05:30`).getTime() / 1000);
+      const currentTS = Math.floor(new Date(istString).getTime() / 1000);
       
       historicalApi.getChartData(
         selectedExpiry, 
         selectedOption.strike, 
         selectedOption.type, 
-        startOfDay, 
+        currentTS, // Start from the minute on the slider
         timeframe
       ).then(res => {
         setChartData(res.data);

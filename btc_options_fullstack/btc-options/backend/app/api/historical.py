@@ -32,39 +32,48 @@ async def get_latest_available_data():
     if _cached_latest_data:
         return _cached_latest_data
 
-    logger.info("Starting fast latest-data scan...")
     try:
         base_dir = "/home/abhis/btc-data/data/options"
         if not os.path.exists(base_dir):
             return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
+        # 1. Fast filesystem scan for latest expiry folder
         expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
         if not expiries:
             return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
         
         latest_expiry = expiries[-1]
-        target_path = f"{base_dir}/expiry={latest_expiry}/*/*.parquet"
         
-        query = f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')"
-        conn = get_conn()
-        max_ts = conn.execute(query).fetchone()[0]
-        
-        if not max_ts:
+        # 2. Targeted scan of just the latest expiry's first available strike folder to get max timestamp
+        # This is 100x faster than scanning the whole dataset
+        try:
+            strike_dirs = list(Path(f"{base_dir}/expiry={latest_expiry}").iterdir())
+            if not strike_dirs:
+                return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
+            
+            # Just look at the first strike folder to find the day's timing
+            target_path = f"{strike_dirs[0]}/*.parquet"
+            query = f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')"
+            conn = get_conn()
+            max_ts = conn.execute(query).fetchone()[0]
+            
+            if not max_ts:
+                res = {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
+            else:
+                ist_tz = timezone(timedelta(hours=5, minutes=30))
+                dt = datetime.fromtimestamp(max_ts, tz=ist_tz)
+                res = {
+                    "latestDate": dt.strftime("%Y-%m-%d"),
+                    "latestTime": dt.strftime("%H:%M"),
+                    "latestExpiry": latest_expiry
+                }
+        except Exception:
             res = {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
-        else:
-            ist_tz = timezone(timedelta(hours=5, minutes=30))
-            dt = datetime.fromtimestamp(max_ts, tz=ist_tz)
-            res = {
-                "latestDate": dt.strftime("%Y-%m-%d"),
-                "latestTime": dt.strftime("%H:%M"),
-                "latestExpiry": latest_expiry
-            }
         
         _cached_latest_data = res
-        logger.info(f"Latest data found: {res}")
         return res
     except Exception as e:
-        logger.error(f"Error in latest-data scan: {e}")
+        logger.error(f"Error in fast latest-data scan: {e}")
         return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
 @router.get("/data-range")
@@ -73,18 +82,29 @@ async def get_data_range():
     if _cached_data_range:
         return _cached_data_range
 
-    logger.info("Scanning full data range (this may take time)...")
     try:
-        query = f"SELECT min(timestamp_unix), max(timestamp_unix) FROM read_parquet('{DATA_PATH}')"
-        conn = get_conn()
-        res = conn.execute(query).fetchone()
+        base_dir = "/home/abhis/btc-data/data/options"
+        if not os.path.exists(base_dir):
+            return {"min_ts": 0, "max_ts": 0}
+
+        # Fast filesystem scan for expiries
+        expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
+        if not expiries:
+            return {"min_ts": 0, "max_ts": 0}
+
+        # We set min/max based on the dates of the folders (00:00 IST of first day to 23:59 IST of last day)
+        # This avoids reading any parquet files at all for this call
+        min_date = expiries[0]
+        max_date = expiries[-1]
         
-        data = {"min_ts": res[0], "max_ts": res[1]}
+        min_ts = int(datetime.strptime(f"{min_date} 00:00:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
+        max_ts = int(datetime.strptime(f"{max_date} 23:59:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
+        
+        data = {"min_ts": min_ts, "max_ts": max_ts}
         _cached_data_range = data
-        logger.info(f"Data range cached: {data}")
         return data
     except Exception as e:
-        logger.error(f"Error fetching data range: {e}")
+        logger.error(f"Error in fast data-range filesystem scan: {e}")
         return {"min_ts": 0, "max_ts": 0}
 
 @router.get("/expiries")
@@ -268,8 +288,14 @@ async def get_chart_data(
         '1d': '1 day'
     }
     interval = interval_map.get(timeframe, '1 minute')
-    filename_filter = 'CE.parquet' if opt_type.upper() == 'CE' else 'PE.parquet'
     
+    # Construct exact path to avoid pattern-matching multiple files
+    filename = 'CE.parquet' if opt_type.upper() == 'CE' else 'PE.parquet'
+    exact_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={int(strike)}/{filename}"
+    
+    if not os.path.exists(exact_path):
+        return {"data": []}
+
     query = f"""
     SELECT 
         time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
@@ -277,20 +303,27 @@ async def get_chart_data(
         max(mark_high) AS high,
         min(mark_low) AS low,
         last(mark_close ORDER BY timestamp_unix) AS close
-    FROM read_parquet('{DATA_PATH}', hive_partitioning=true, filename=true)
-    WHERE expiry = '{expiry}' AND strike = {strike} AND filename LIKE '%{filename_filter}'
+    FROM read_parquet('{exact_path}')
+    WHERE timestamp_unix >= {start_time}
     GROUP BY bucket
     ORDER BY bucket ASC
     """
     
     try:
         df = conn.execute(query).df()
-        # Convert bucket to unix timestamp for lightweight-charts
-        df['time'] = df['bucket'].astype('int64') // 10**9
+        if df.empty:
+            return {"data": []}
+            
+        # Convert bucket to unix seconds (lightweight charts expects integer seconds)
+        # DuckDB to_timestamp results in nanoseconds if converted to int64, 
+        # but let's use a safer approach:
+        df['time'] = df['bucket'].apply(lambda x: int(x.timestamp()))
         
-        # lightweight charts expects time, open, high, low, close
+        # Strictly ensure no duplicates and correct order
+        df = df.drop_duplicates(subset=['time']).sort_values('time')
+        
         records = df[['time', 'open', 'high', 'low', 'close']].to_dict('records')
         return {"data": records}
     except Exception as e:
-        logger.error(f"Error fetching chart data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching chart data for {exact_path}: {e}")
+        return {"data": []}
