@@ -281,23 +281,37 @@ async def get_historical_chain(
 
     def compute_strike(s: int) -> dict:
         c_price = float(calls.get(s, 0))
-        c_iv = implied_vol(c_price, spot, s, T, r, "call")
-        cg = compute_greeks(spot, s, T, r, c_iv if c_iv > 0 else 0.5, "call")
+        if c_price > 0:
+            c_iv = implied_vol(c_price, spot, s, T, r, "call")
+            cg = compute_greeks(spot, s, T, r, c_iv if c_iv > 0 else 0.5, "call")
+        else:
+            c_iv = 0.0
+            cg = None
 
         p_price = float(puts.get(s, 0))
-        p_iv = implied_vol(p_price, spot, s, T, r, "put")
-        pg = compute_greeks(spot, s, T, r, p_iv if p_iv > 0 else 0.5, "put")
+        if p_price > 0:
+            p_iv = implied_vol(p_price, spot, s, T, r, "put")
+            pg = compute_greeks(spot, s, T, r, p_iv if p_iv > 0 else 0.5, "put")
+        else:
+            p_iv = 0.0
+            pg = None
 
         return {
             "strike": s,
             "is_atm": (s == atm_strike),
             "call": {
                 "strike": s, "last_price": c_price, "iv_pct": round(c_iv * 100, 2),
-                "delta": cg.delta, "gamma": cg.gamma, "theta": cg.theta, "vega": cg.vega
+                "delta": cg.delta if cg else 0.0,
+                "gamma": cg.gamma if cg else 0.0,
+                "theta": cg.theta if cg else 0.0,
+                "vega": cg.vega if cg else 0.0,
             },
             "put": {
                 "strike": s, "last_price": p_price, "iv_pct": round(p_iv * 100, 2),
-                "delta": pg.delta, "gamma": pg.gamma, "theta": pg.theta, "vega": pg.vega
+                "delta": pg.delta if pg else 0.0,
+                "gamma": pg.gamma if pg else 0.0,
+                "theta": pg.theta if pg else 0.0,
+                "vega": pg.vega if pg else 0.0,
             }
         }
 
