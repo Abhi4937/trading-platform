@@ -109,6 +109,7 @@ export interface MarginResult {
   priceShockApplied: number;         // tier price shock, e.g. 0.04
   volUpApplied: number;              // tier vol up, pp
   volDownApplied: number;            // tier vol down, pp
+  skippedLegs: number;               // legs excluded because mark price = 0 (no IV data)
 }
 
 // ─── Main function ────────────────────────────────────────────────────────────
@@ -116,7 +117,8 @@ export interface MarginResult {
 export function computePortfolioMargin(
   legs: MarginLeg[],
   spot: number,
-  contractValue: number = CONTRACT_VALUE
+  contractValue: number = CONTRACT_VALUE,
+  skippedLegs = 0
 ): MarginResult | null {
   if (!legs.length || spot <= 0) return null;
 
@@ -229,12 +231,15 @@ export function computePortfolioMargin(
     priceShockApplied: priceShock,
     volUpApplied: volUp,
     volDownApplied: volDown,
+    skippedLegs,
   };
 }
 
 /**
  * Build MarginLeg[] from the strategy legs + current chain snapshot.
- * Call this inside useMemo in the component.
+ * Legs with mark_price = 0 (and therefore iv_pct = 0) are excluded — using a
+ * fake IV fallback would produce meaningless margin numbers.
+ * Returns both the valid legs and a count of how many were skipped.
  */
 export function buildMarginLegs(
   legs: { strike: number; type: 'CE' | 'PE'; action: 'BUY' | 'SELL'; qty: number; expiry: string }[],
@@ -242,29 +247,39 @@ export function buildMarginLegs(
   spot: number,
   selectedExpiry: string,
   simulationTimestamp: number
-): MarginLeg[] {
+): { marginLegs: MarginLeg[]; skippedLegs: number } {
   // Expiry settlement: 12:00 UTC on expiry date (= 5:30 PM IST)
   const expiryTs = selectedExpiry
     ? new Date(`${selectedExpiry}T12:00:00Z`).getTime() / 1000
     : 0;
   const T = expiryTs > simulationTimestamp
     ? (expiryTs - simulationTimestamp) / (365 * 24 * 3600)
-    : 0.00001; // effectively at expiry
+    : 0.00001;
 
-  return legs.map(leg => {
+  let skippedLegs = 0;
+  const marginLegs: MarginLeg[] = [];
+
+  for (const leg of legs) {
     const row = chain.find(r => r.strike === leg.strike);
     const side = leg.type === 'CE' ? row?.call : row?.put;
-    const currentPrice = side?.last_price ?? 0;
     const iv = (side?.iv_pct ?? 0) / 100;
 
-    return {
+    if (iv <= 0) {
+      // mark_price = 0 at this timestamp — no valid IV, skip rather than fabricate
+      skippedLegs++;
+      continue;
+    }
+
+    marginLegs.push({
       strike: leg.strike,
       isCall: leg.type === 'CE',
       isBuy:  leg.action === 'BUY',
       qty:    leg.qty,
-      currentPrice,
-      iv: iv > 0 ? iv : 0.5, // fallback 50% if no IV data
+      currentPrice: side?.last_price ?? 0,
+      iv,
       T,
-    };
-  });
+    });
+  }
+
+  return { marginLegs, skippedLegs };
 }

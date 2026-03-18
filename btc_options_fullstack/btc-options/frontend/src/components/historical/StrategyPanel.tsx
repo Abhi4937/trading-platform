@@ -50,8 +50,9 @@ export const StrategyPanel: React.FC<Props> = ({
   // ─── Margin computation (memoized) ────────────────────────────────────────
   const marginResult = useMemo(() => {
     if (!legs.length || spot <= 0 || !selectedExpiry || !simulationTimestamp) return null;
-    const marginLegs = buildMarginLegs(legs, chain, spot, selectedExpiry, simulationTimestamp);
-    return computePortfolioMargin(marginLegs, spot);
+    const { marginLegs, skippedLegs } = buildMarginLegs(legs, chain, spot, selectedExpiry, simulationTimestamp);
+    if (!marginLegs.length) return null;
+    return computePortfolioMargin(marginLegs, spot, undefined, skippedLegs);
   }, [legs, chain, spot, selectedExpiry, simulationTimestamp]);
 
   // ─── MTM run ──────────────────────────────────────────────────────────────
@@ -214,6 +215,13 @@ export const StrategyPanel: React.FC<Props> = ({
             </span>
             <span className="margin-expand-toggle">{marginExpanded ? '▲' : '▼'}</span>
           </div>
+
+          {/* Skipped legs warning */}
+          {marginResult.skippedLegs > 0 && (
+            <div className="margin-skip-warning">
+              ⚠ {marginResult.skippedLegs} leg{marginResult.skippedLegs > 1 ? 's' : ''} excluded — mark price is 0 at this timestamp (no IV available)
+            </div>
+          )}
 
           {/* Expandable detail */}
           {marginExpanded && (
