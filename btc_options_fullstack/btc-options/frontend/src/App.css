@@ -608,6 +608,145 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
 .chain-bs-btn.buy  { background: rgba(0,229,160,0.2);  color: var(--green); border: 1px solid rgba(0,229,160,0.4); }
 .chain-bs-btn.sell { background: rgba(255,77,106,0.2); color: var(--red);   border: 1px solid rgba(255,77,106,0.4); }
 
+/* ── Portfolio Margin Card ── */
+.margin-card {
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Compact always-visible row */
+.margin-compact-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.margin-compact-row:hover { background: var(--bg3); }
+
+.margin-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.margin-label {
+  font-size: 9px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+}
+.margin-val {
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.margin-binding-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-left: auto;
+}
+.margin-binding-badge.risk_margin {
+  background: rgba(255,77,106,0.15);
+  color: var(--red);
+  border: 1px solid rgba(255,77,106,0.3);
+}
+.margin-binding-badge.margin_floor {
+  background: rgba(240,180,41,0.15);
+  color: var(--gold);
+  border: 1px solid rgba(240,180,41,0.3);
+}
+
+.margin-expand-toggle {
+  font-size: 9px;
+  color: var(--text3);
+  flex-shrink: 0;
+}
+
+/* Expanded detail panel */
+.margin-detail {
+  padding: 0 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.margin-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+}
+.margin-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(26,45,66,0.4);
+}
+.margin-detail-label {
+  font-size: 10px;
+  color: var(--text3);
+}
+.margin-detail-val {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+/* Scenario rows */
+.margin-scenarios {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 10px;
+  background: var(--bg1);
+  border-radius: 5px;
+  border: 1px solid var(--border);
+}
+.margin-scenario-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-family: var(--mono);
+}
+.margin-scenario-icon { font-size: 9px; flex-shrink: 0; }
+.margin-scenario-row.worst .margin-scenario-icon { color: var(--red); }
+.margin-scenario-row.best  .margin-scenario-icon { color: var(--green); }
+.margin-scenario-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text3);
+  width: 30px;
+  flex-shrink: 0;
+}
+.margin-scenario-desc { color: var(--text2); flex: 1; }
+.margin-scenario-pnl  { font-weight: 700; flex-shrink: 0; }
+
+/* Tier info + disclaimer */
+.margin-tier-info {
+  font-size: 9px;
+  color: var(--text3);
+  text-align: right;
+  font-family: var(--mono);
+}
+.margin-disclaimer-icon {
+  cursor: help;
+  color: var(--accent);
+  font-size: 10px;
+}
+
 /* ── Custom Scrollbar Styling ── */
 ::-webkit-scrollbar {
   width: 8px;

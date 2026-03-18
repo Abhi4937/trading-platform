@@ -1,24 +1,39 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
+import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
 import type { StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
 interface Props {
   legs: StrategyLeg[];
   chain: HistoricalChainRow[];
+  spot: number;
+  selectedExpiry: string;
+  simulationTimestamp: number;
   onRemoveLeg: (id: string) => void;
   onUpdateQty: (id: string, qty: number) => void;
   onClearAll: () => void;
 }
 
+const fmt = (n: number, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+function leverageColor(lev: number): string {
+  if (lev < 5)  return 'var(--green)';
+  if (lev < 15) return 'var(--gold)';
+  return 'var(--red)';
+}
+
 export const StrategyPanel: React.FC<Props> = ({
-  legs, chain, onRemoveLeg, onUpdateQty, onClearAll
+  legs, chain, spot, selectedExpiry, simulationTimestamp,
+  onRemoveLeg, onUpdateQty, onClearAll
 }) => {
   const [mtmData, setMtmData] = useState<MtmPoint[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [marginExpanded, setMarginExpanded] = useState(false);
 
+  // ─── Live P&L helpers ─────────────────────────────────────────────────────
   const getCurrentPrice = (leg: StrategyLeg) => {
     const row = chain.find(r => r.strike === leg.strike);
     if (!row) return leg.entryPremium;
@@ -32,6 +47,14 @@ export const StrategyPanel: React.FC<Props> = ({
 
   const totalPnl = legs.reduce((s, l) => s + getLegPnl(l), 0);
 
+  // ─── Margin computation (memoized) ────────────────────────────────────────
+  const marginResult = useMemo(() => {
+    if (!legs.length || spot <= 0 || !selectedExpiry || !simulationTimestamp) return null;
+    const marginLegs = buildMarginLegs(legs, chain, spot, selectedExpiry, simulationTimestamp);
+    return computePortfolioMargin(marginLegs, spot);
+  }, [legs, chain, spot, selectedExpiry, simulationTimestamp]);
+
+  // ─── MTM run ──────────────────────────────────────────────────────────────
   const runMtm = useCallback(async () => {
     if (!legs.length) return;
     setLoading(true);
@@ -47,7 +70,6 @@ export const StrategyPanel: React.FC<Props> = ({
         )
       );
 
-      // Union of all timestamps from entry onward
       const timeSet = new Set<number>();
       seriesResults.forEach(({ data }) => data.forEach(d => timeSet.add(d.time)));
       const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
@@ -55,7 +77,6 @@ export const StrategyPanel: React.FC<Props> = ({
       const mtmPoints: MtmPoint[] = sortedTimes.map(t => {
         let total = 0;
         seriesResults.forEach(({ leg, data }) => {
-          // carry-forward: use the last candle at or before this time
           const pts = data.filter(d => d.time <= t);
           if (pts.length) {
             const pt = pts[pts.length - 1];
@@ -74,10 +95,11 @@ export const StrategyPanel: React.FC<Props> = ({
     }
   }, [legs]);
 
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: '8px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: 0 }}>
 
-      {/* Legs card */}
+      {/* ── Legs card ── */}
       <div className="strategy-legs-card">
         <div className="strategy-header">
           <span className="strategy-title">Strategy Legs</span>
@@ -166,7 +188,110 @@ export const StrategyPanel: React.FC<Props> = ({
         {error && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{error}</div>}
       </div>
 
-      {/* MTM chart card */}
+      {/* ── Portfolio Margin card ── */}
+      {marginResult && legs.length > 0 && (
+        <div className="margin-card">
+          {/* Compact always-visible row */}
+          <div className="margin-compact-row" onClick={() => setMarginExpanded(e => !e)}>
+            <div className="margin-kv">
+              <span className="margin-label">Margin Req.</span>
+              <span className="margin-val">{fmt(marginResult.portfolioMargin)} USDT</span>
+            </div>
+            <div className="margin-kv">
+              <span className="margin-label">Leverage</span>
+              <span className="margin-val" style={{ color: leverageColor(marginResult.effectiveLeverage) }}>
+                {marginResult.effectiveLeverage.toFixed(1)}×
+              </span>
+            </div>
+            <div className="margin-kv">
+              <span className="margin-label">Net Δ</span>
+              <span className="margin-val" style={{ color: marginResult.netDeltaBtc >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {marginResult.netDeltaBtc >= 0 ? '+' : ''}{marginResult.netDeltaBtc.toFixed(4)} BTC
+              </span>
+            </div>
+            <span className={`margin-binding-badge ${marginResult.bindingConstraint}`}>
+              {marginResult.bindingConstraint === 'risk_margin' ? 'Risk Margin' : 'Margin Floor'}
+            </span>
+            <span className="margin-expand-toggle">{marginExpanded ? '▲' : '▼'}</span>
+          </div>
+
+          {/* Expandable detail */}
+          {marginExpanded && (
+            <div className="margin-detail">
+              <div className="margin-detail-grid">
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Risk Margin</span>
+                  <span className="margin-detail-val">{fmt(marginResult.riskMargin)} USDT</span>
+                </div>
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Margin Floor</span>
+                  <span className="margin-detail-val">{fmt(marginResult.marginFloor)} USDT</span>
+                </div>
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Total Notional</span>
+                  <span className="margin-detail-val">{fmt(marginResult.totalNotional)} USDT</span>
+                </div>
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Premium Collected</span>
+                  <span className="margin-detail-val" style={{ color: 'var(--green)' }}>
+                    {fmt(marginResult.totalPremiumCollected)} USDT
+                  </span>
+                </div>
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Margin / Notional</span>
+                  <span className="margin-detail-val">
+                    {((marginResult.portfolioMargin / marginResult.totalNotional) * 100).toFixed(2)}%
+                  </span>
+                </div>
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Margin per Lot</span>
+                  <span className="margin-detail-val">{fmt(marginResult.marginPerLot)} USDT</span>
+                </div>
+              </div>
+
+              <div className="margin-scenarios">
+                <div className="margin-scenario-row worst">
+                  <span className="margin-scenario-icon">▼</span>
+                  <span className="margin-scenario-label">Worst</span>
+                  <span className="margin-scenario-desc">
+                    Price {marginResult.worstScenario.priceShockPct >= 0 ? '+' : ''}{marginResult.worstScenario.priceShockPct.toFixed(1)}%
+                    &nbsp;·&nbsp;
+                    Vol {marginResult.worstScenario.volShockPts >= 0 ? '+' : ''}{marginResult.worstScenario.volShockPts.toFixed(0)}pp
+                  </span>
+                  <span className="margin-scenario-pnl" style={{ color: 'var(--red)' }}>
+                    −{fmt(Math.abs(marginResult.worstScenario.pnl))} USDT
+                  </span>
+                </div>
+                <div className="margin-scenario-row best">
+                  <span className="margin-scenario-icon">▲</span>
+                  <span className="margin-scenario-label">Best</span>
+                  <span className="margin-scenario-desc">
+                    Price {marginResult.bestScenario.priceShockPct >= 0 ? '+' : ''}{marginResult.bestScenario.priceShockPct.toFixed(1)}%
+                    &nbsp;·&nbsp;
+                    Vol {marginResult.bestScenario.volShockPts >= 0 ? '+' : ''}{marginResult.bestScenario.volShockPts.toFixed(0)}pp
+                  </span>
+                  <span className="margin-scenario-pnl" style={{ color: 'var(--green)' }}>
+                    +{fmt(marginResult.bestScenario.pnl)} USDT
+                  </span>
+                </div>
+              </div>
+
+              <div className="margin-tier-info">
+                Stress tier: ±{(marginResult.priceShockApplied * 100).toFixed(0)}% price ·
+                +{marginResult.volUpApplied}pp / −{marginResult.volDownApplied}pp vol
+                <span
+                  className="margin-disclaimer-icon"
+                  title="Estimated margin based on published Delta Exchange methodology. Actual margin may differ by 10–15%."
+                >
+                  &nbsp;ⓘ
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── MTM chart card ── */}
       <div className="strategy-chart-card">
         <div className="strategy-chart-header">
           <span className="strategy-chart-label">MTM P&amp;L Over Time</span>

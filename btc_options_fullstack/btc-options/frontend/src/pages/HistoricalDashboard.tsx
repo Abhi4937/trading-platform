@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { historicalApi } from '../services/historical_api';
 import { ReplayController } from '../components/historical/ReplayController';
 import { HistoricalOptionChain } from '../components/historical/HistoricalOptionChain';
@@ -30,11 +30,14 @@ export const HistoricalDashboard: React.FC = () => {
   const chainAbortController = useRef<AbortController | null>(null);
   const chartAbortController = useRef<AbortController | null>(null);
 
-  // Computed simulation timestamp (IST)
-  const simTimestamp = useCallback(() => {
+  // Computed simulation timestamp (IST) — as reactive value for margin engine
+  const currentSimTimestamp = useMemo(() => {
     if (!simulationDate || !simulationTime) return 0;
     return Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
   }, [simulationDate, simulationTime]);
+
+  // Also as callback for addLeg (needs latest value at click time)
+  const simTimestamp = useCallback(() => currentSimTimestamp, [currentSimTimestamp]);
 
   // 1. Initial State Initialization
   useEffect(() => {
@@ -261,6 +264,9 @@ export const HistoricalDashboard: React.FC = () => {
             <StrategyPanel
               legs={strategyLegs}
               chain={chain}
+              spot={spot}
+              selectedExpiry={selectedExpiry}
+              simulationTimestamp={currentSimTimestamp}
               onRemoveLeg={removeLeg}
               onUpdateQty={updateLegQty}
               onClearAll={clearLegs}
