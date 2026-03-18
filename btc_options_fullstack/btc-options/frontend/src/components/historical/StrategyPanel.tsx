@@ -138,7 +138,8 @@ export const StrategyPanel: React.FC<Props> = ({
                   <th>Action</th>
                   <th>Strike</th>
                   <th>Type</th>
-                  <th>Qty</th>
+                  <th title="1 lot = 0.001 BTC · 1000 lots = 1 BTC">Lots</th>
+                  <th>BTC</th>
                   <th>Entry</th>
                   <th>Current</th>
                   <th>P&amp;L</th>
@@ -149,6 +150,7 @@ export const StrategyPanel: React.FC<Props> = ({
                 {legs.map(leg => {
                   const curr = getCurrentPrice(leg);
                   const pnl = getLegPnl(leg);
+                  const btcSize = leg.qty * 0.001;
                   return (
                     <tr key={leg.id}>
                       <td>
@@ -170,6 +172,11 @@ export const StrategyPanel: React.FC<Props> = ({
                           min={1}
                           onChange={e => onUpdateQty(leg.id, Math.max(1, parseInt(e.target.value) || 1))}
                         />
+                      </td>
+                      <td style={{ color: 'var(--text3)', fontSize: '11px' }}>
+                        {btcSize < 0.01
+                          ? btcSize.toFixed(3)
+                          : btcSize.toFixed(2)}
                       </td>
                       <td style={{ color: 'var(--text2)' }}>{leg.entryPremium.toFixed(2)}</td>
                       <td>{curr.toFixed(2)}</td>
@@ -237,7 +244,12 @@ export const StrategyPanel: React.FC<Props> = ({
                 </div>
                 <div className="margin-detail-row">
                   <span className="margin-detail-label">Total Notional</span>
-                  <span className="margin-detail-val">{fmt(marginResult.totalNotional)} USDT</span>
+                  <span className="margin-detail-val">
+                    {fmt(marginResult.totalNotional)} USDT
+                    <span style={{ color: 'var(--text3)', fontWeight: 400, marginLeft: '6px', fontSize: '10px' }}>
+                      ({(marginResult.totalNotional / spot).toFixed(3)} BTC)
+                    </span>
+                  </span>
                 </div>
                 <div className="margin-detail-row">
                   <span className="margin-detail-label">Premium Collected</span>
