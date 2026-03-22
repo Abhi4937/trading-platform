@@ -28,7 +28,7 @@ export const HistoricalOptionChain: React.FC<Props> = ({
       const containerHeight = container.clientHeight;
       container.scrollTop = rowTop - containerHeight / 2 + rowHeight / 2;
     }
-  }, [chain]);
+  }, [chain, strategyMode]);
 
   return (
     <div className="table-scroll" ref={scrollRef}>
