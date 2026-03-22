@@ -571,6 +571,31 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   text-transform: uppercase;
   letter-spacing: 0.8px;
 }
+.mtm-range-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mtm-range-label {
+  font-size: 10px;
+  color: var(--text3);
+  white-space: nowrap;
+}
+.mtm-range-input {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 2px 5px;
+  outline: none;
+}
+.mtm-range-input:focus { border-color: var(--accent); }
+
 .strategy-chart-empty {
   flex: 1;
   display: flex;

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
@@ -32,6 +32,12 @@ export const StrategyPanel: React.FC<Props> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [marginExpanded, setMarginExpanded] = useState(false);
+  const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
+  const [endDate, setEndDate] = useState(selectedExpiry);
+  const [endTime, setEndTime] = useState('17:30');
+
+  // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
+  useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
   // ─── Live P&L helpers ─────────────────────────────────────────────────────
   const getCurrentPrice = (leg: StrategyLeg) => {
@@ -63,12 +69,14 @@ export const StrategyPanel: React.FC<Props> = ({
     setError('');
     try {
       const entryTs = Math.min(...legs.map(l => l.entryTimestamp));
+      // End timestamp: user-chosen date + time in IST
+      const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
 
       const seriesResults = await Promise.all(
         legs.map(leg =>
           historicalApi.getChartData(
-            leg.expiry, leg.strike, leg.type, entryTs, '5m'
-          ).then(res => ({ leg, data: res.data.filter(d => d.time >= entryTs) }))
+            leg.expiry, leg.strike, leg.type, entryTs, timeframe
+          ).then(res => ({ leg, data: res.data.filter(d => d.time >= entryTs && d.time <= endTs) }))
         )
       );
 
@@ -96,7 +104,7 @@ export const StrategyPanel: React.FC<Props> = ({
     } finally {
       setLoading(false);
     }
-  }, [legs]);
+  }, [legs, timeframe, endDate, endTime]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -316,10 +324,38 @@ export const StrategyPanel: React.FC<Props> = ({
       {/* ── MTM chart card ── */}
       <div className="strategy-chart-card">
         <div className="strategy-chart-header">
-          <span className="strategy-chart-label">MTM P&amp;L Over Time</span>
+          <span className="strategy-chart-label">MTM P&amp;L</span>
+          {/* Timeframe buttons */}
+          <div style={{ display: 'flex', gap: '3px' }}>
+            {(['1m','5m','15m','30m','1h'] as const).map(tf => (
+              <button
+                key={tf}
+                className={`tf-btn${timeframe === tf ? ' active' : ''}`}
+                onClick={() => setTimeframe(tf)}
+              >{tf}</button>
+            ))}
+          </div>
+        </div>
+        {/* End date/time row */}
+        <div className="mtm-range-row">
+          <span className="mtm-range-label">Show until</span>
+          <input
+            type="date"
+            className="mtm-range-input"
+            value={endDate}
+            min={legs.length ? new Date(Math.min(...legs.map(l => l.entryTimestamp)) * 1000).toISOString().split('T')[0] : undefined}
+            max={selectedExpiry}
+            onChange={e => setEndDate(e.target.value)}
+          />
+          <input
+            type="time"
+            className="mtm-range-input"
+            value={endTime}
+            onChange={e => setEndTime(e.target.value)}
+          />
           {mtmData.length > 0 && (
-            <span style={{ fontSize: '10px', color: 'var(--text3)' }}>
-              {mtmData.length} candles · 5m resolution
+            <span style={{ fontSize: '10px', color: 'var(--text3)', marginLeft: 'auto' }}>
+              {mtmData.length} pts
             </span>
           )}
         </div>
