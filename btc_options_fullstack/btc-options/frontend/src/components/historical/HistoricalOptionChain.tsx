@@ -16,18 +16,20 @@ export const HistoricalOptionChain: React.FC<Props> = ({
   chain, strategyMode, onSelectOption, onAddLeg
 }) => {
   const atmRef = useRef<HTMLTableRowElement>(null);
+  const strikeCellRef = useRef<HTMLTableCellElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to ATM row — rAF ensures layout has settled before measuring
+  // Auto-scroll to center ATM row vertically AND Strike column horizontally
   useEffect(() => {
     const raf = requestAnimationFrame(() => {
-      if (atmRef.current && scrollRef.current) {
+      if (atmRef.current && strikeCellRef.current && scrollRef.current) {
         const container = scrollRef.current;
         const row = atmRef.current;
-        const rowTop = row.offsetTop;
-        const rowHeight = row.offsetHeight;
-        const containerHeight = container.clientHeight;
-        container.scrollTop = rowTop - containerHeight / 2 + rowHeight / 2;
+        const cell = strikeCellRef.current;
+        // Vertical: center ATM row
+        container.scrollTop = row.offsetTop - container.clientHeight / 2 + row.offsetHeight / 2;
+        // Horizontal: center Strike column
+        container.scrollLeft = cell.offsetLeft - container.clientWidth / 2 + cell.offsetWidth / 2;
       }
     });
     return () => cancelAnimationFrame(raf);
@@ -83,7 +85,10 @@ export const HistoricalOptionChain: React.FC<Props> = ({
                 )}
               </td>
 
-              <td className={`strike-cell ${row.is_atm ? 'atm-strike' : ''}`}>
+              <td
+                ref={row.is_atm ? strikeCellRef : undefined}
+                className={`strike-cell ${row.is_atm ? 'atm-strike' : ''}`}
+              >
                 {row.strike.toLocaleString()}
                 {row.is_atm && <span className="atm-badge">ATM</span>}
               </td>
