@@ -4,6 +4,7 @@ import type { HistoricalChainRow } from '../../types/historical';
 interface Props {
   chain: HistoricalChainRow[];
   strategyMode: boolean;
+  selectedStrikes?: Set<number>;
   onSelectOption: (strike: number, type: 'CE' | 'PE') => void;
   onAddLeg: (strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => void;
 }
@@ -13,7 +14,7 @@ const f = (n: number, d = 2) => n.toFixed(d);
 const fd = (mark: number, n: number, d = 2) => mark === 0 ? '-' : n.toFixed(d);
 
 export const HistoricalOptionChain: React.FC<Props> = ({
-  chain, strategyMode, onSelectOption, onAddLeg
+  chain, strategyMode, selectedStrikes, onSelectOption, onAddLeg
 }) => {
   const atmRef = useRef<HTMLTableRowElement>(null);
   const strikeCellRef = useRef<HTMLTableCellElement>(null);
@@ -60,7 +61,10 @@ export const HistoricalOptionChain: React.FC<Props> = ({
             <tr
               key={row.strike}
               ref={row.is_atm ? atmRef : undefined}
-              className={row.is_atm ? 'atm-row' : ''}
+              className={[
+                row.is_atm ? 'atm-row' : '',
+                selectedStrikes?.has(row.strike) ? 'leg-selected-row' : ''
+              ].filter(Boolean).join(' ')}
               data-itm-call={row.call.delta > 0.5 ? 'true' : 'false'}
               data-itm-put={Math.abs(row.put.delta) > 0.5 ? 'true' : 'false'}
             >

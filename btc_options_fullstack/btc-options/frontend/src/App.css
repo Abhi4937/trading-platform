@@ -603,10 +603,30 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   border: none;
   cursor: pointer;
   transition: opacity 0.15s;
+  /* Hidden by default — shown on row hover */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
 }
-.chain-bs-btn:hover { opacity: 0.8; }
+/* Show B/S buttons when hovering the row */
+tr:hover .chain-bs-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chain-bs-btn:hover { opacity: 0.8 !important; }
+.chain-bs-btn:disabled { opacity: 0.2 !important; pointer-events: none; }
 .chain-bs-btn.buy  { background: rgba(0,229,160,0.2);  color: var(--green); border: 1px solid rgba(0,229,160,0.4); }
 .chain-bs-btn.sell { background: rgba(255,77,106,0.2); color: var(--red);   border: 1px solid rgba(255,77,106,0.4); }
+
+/* ── Selected strike highlight (leg already added) ── */
+tr.leg-selected-row td {
+  background: rgba(99, 179, 237, 0.07);
+}
+tr.leg-selected-row td.strike-cell {
+  background: rgba(99, 179, 237, 0.15);
+  color: var(--blue, #63b3ed);
+  font-weight: 700;
+}
 
 /* ── Portfolio Margin Card ── */
 .margin-card {
