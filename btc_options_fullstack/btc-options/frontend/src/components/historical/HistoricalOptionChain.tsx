@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import type { HistoricalChainRow } from '../../types/historical';
 
 interface Props {
@@ -15,39 +15,55 @@ const fd = (mark: number, n: number, d = 2) => mark === 0 ? '-' : n.toFixed(d);
 export const HistoricalOptionChain: React.FC<Props> = ({
   chain, strategyMode, onSelectOption, onAddLeg
 }) => {
+  const atmRef = useRef<HTMLTableRowElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to ATM row whenever chain changes
+  useEffect(() => {
+    if (atmRef.current && scrollRef.current) {
+      const container = scrollRef.current;
+      const row = atmRef.current;
+      const rowTop = row.offsetTop;
+      const rowHeight = row.offsetHeight;
+      const containerHeight = container.clientHeight;
+      container.scrollTop = rowTop - containerHeight / 2 + rowHeight / 2;
+    }
+  }, [chain]);
+
   return (
-    <div className="table-scroll">
+    <div className="table-scroll" ref={scrollRef}>
       <table className="chain-table">
         <thead>
           <tr>
+            <th className="call-header">Vega</th>
+            <th className="call-header">Theta</th>
+            <th className="call-header">Gamma</th>
             <th className="call-header">IV %</th>
             <th className="call-header">Delta</th>
-            <th className="call-header">Gamma</th>
-            <th className="call-header">Theta</th>
-            <th className="call-header">Vega</th>
             <th className="call-header">Mark</th>
             <th className="strike-header">Strike</th>
             <th className="put-header">Mark</th>
-            <th className="put-header">Vega</th>
-            <th className="put-header">Theta</th>
-            <th className="put-header">Gamma</th>
             <th className="put-header">Delta</th>
             <th className="put-header">IV %</th>
+            <th className="put-header">Gamma</th>
+            <th className="put-header">Theta</th>
+            <th className="put-header">Vega</th>
           </tr>
         </thead>
         <tbody>
           {chain.map((row) => (
             <tr
               key={row.strike}
+              ref={row.is_atm ? atmRef : undefined}
               className={row.is_atm ? 'atm-row' : ''}
               data-itm-call={row.call.delta > 0.5 ? 'true' : 'false'}
               data-itm-put={Math.abs(row.put.delta) > 0.5 ? 'true' : 'false'}
             >
+              <td className="call-cell">{fd(row.call.last_price, row.call.vega, 2)}</td>
+              <td className="call-cell">{fd(row.call.last_price, row.call.theta, 2)}</td>
+              <td className="call-cell">{fd(row.call.last_price, row.call.gamma, 8)}</td>
               <td className="call-cell" style={{ color: 'var(--gold)' }}>{fd(row.call.last_price, row.call.iv_pct, 1)}</td>
               <td className="call-cell call-delta">{fd(row.call.last_price, row.call.delta, 3)}</td>
-              <td className="call-cell">{fd(row.call.last_price, row.call.gamma, 8)}</td>
-              <td className="call-cell">{fd(row.call.last_price, row.call.theta, 2)}</td>
-              <td className="call-cell">{fd(row.call.last_price, row.call.vega, 2)}</td>
 
               {/* CE Mark — chart click OR strategy B/S */}
               <td className="call-cell ltp">
@@ -84,11 +100,11 @@ export const HistoricalOptionChain: React.FC<Props> = ({
                 )}
               </td>
 
-              <td className="put-cell">{fd(row.put.last_price, row.put.vega, 2)}</td>
-              <td className="put-cell">{fd(row.put.last_price, row.put.theta, 2)}</td>
-              <td className="put-cell">{fd(row.put.last_price, row.put.gamma, 8)}</td>
               <td className="put-cell put-delta">{fd(row.put.last_price, row.put.delta, 3)}</td>
               <td className="put-cell" style={{ color: 'var(--gold)' }}>{fd(row.put.last_price, row.put.iv_pct, 1)}</td>
+              <td className="put-cell">{fd(row.put.last_price, row.put.gamma, 8)}</td>
+              <td className="put-cell">{fd(row.put.last_price, row.put.theta, 2)}</td>
+              <td className="put-cell">{fd(row.put.last_price, row.put.vega, 2)}</td>
             </tr>
           ))}
           {chain.length === 0 && (
