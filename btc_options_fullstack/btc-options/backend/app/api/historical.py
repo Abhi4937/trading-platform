@@ -385,7 +385,8 @@ async def get_chart_data(
         
         # Strictly ensure no duplicates and correct order
         df = df.drop_duplicates(subset=['time']).sort_values('time')
-        
+        df = df.fillna(0)  # NaN in OHLC (no-trade gaps) would break JSON serialization
+
         records = df[['time', 'open', 'high', 'low', 'close']].to_dict('records')
         return {"data": records}
     except Exception as e:
