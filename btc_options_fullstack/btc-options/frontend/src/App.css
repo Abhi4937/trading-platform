@@ -571,6 +571,35 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   text-transform: uppercase;
   letter-spacing: 0.8px;
 }
+/* ── Download dropdown ── */
+.dl-dropdown {
+  position: relative;
+}
+.dl-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  min-width: 130px;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.dl-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--mono);
+}
+.dl-item:hover { background: var(--bg3); color: var(--accent); }
+
 .mtm-range-row {
   display: flex;
   align-items: center;

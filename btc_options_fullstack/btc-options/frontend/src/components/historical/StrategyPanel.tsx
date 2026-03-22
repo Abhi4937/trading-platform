@@ -1,4 +1,5 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
@@ -35,9 +36,60 @@ export const StrategyPanel: React.FC<Props> = ({
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
+  const [dlOpen, setDlOpen] = useState(false);
+  const dlRef = useRef<HTMLDivElement>(null);
 
   // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dlRef.current && !dlRef.current.contains(e.target as Node)) setDlOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const toIst = (ts: number) => {
+    const d = new Date((ts + 5.5 * 3600) * 1000);
+    return d.toISOString().replace('T', ' ').slice(0, 19) + ' IST';
+  };
+
+  const buildLegsRows = () => legs.map(leg => {
+    const row = chain.find(r => r.strike === leg.strike);
+    const curr = row ? (leg.type === 'CE' ? row.call.last_price : row.put.last_price) : leg.entryPremium;
+    const dir = leg.action === 'BUY' ? 1 : -1;
+    const pnl = (curr - leg.entryPremium) * leg.qty * dir * 0.001;
+    return { Action: leg.action, Strike: leg.strike, Type: leg.type, Lots: leg.qty,
+             'Entry Premium': leg.entryPremium, 'Current Price': curr, 'P&L (USD)': +pnl.toFixed(2) };
+  });
+
+  const buildMtmRows = () => mtmData.map(d => ({ 'Time (IST)': toIst(d.time), 'P&L (USD)': +d.pnl.toFixed(2) }));
+
+  const downloadCsv = () => {
+    const toCsv = (rows: object[]) => {
+      if (!rows.length) return '';
+      const keys = Object.keys(rows[0]);
+      return [keys.join(','), ...rows.map(r => keys.map(k => (r as any)[k]).join(','))].join('\n');
+    };
+    const dl = (content: string, name: string) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([content], { type: 'text/csv' }));
+      a.download = name; a.click();
+    };
+    dl(toCsv(buildLegsRows()), `strategy_legs_${selectedExpiry}.csv`);
+    dl(toCsv(buildMtmRows()), `mtm_pnl_${selectedExpiry}.csv`);
+    setDlOpen(false);
+  };
+
+  const downloadExcel = () => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buildLegsRows()), 'Strategy Legs');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buildMtmRows()), 'MTM P&L');
+    XLSX.writeFile(wb, `strategy_${selectedExpiry}.xlsx`);
+    setDlOpen(false);
+  };
 
   // ─── Live P&L helpers ─────────────────────────────────────────────────────
   const getCurrentPrice = (leg: StrategyLeg) => {
@@ -133,6 +185,21 @@ export const StrategyPanel: React.FC<Props> = ({
             >
               {loading ? 'Calculating…' : 'Run MTM ▶'}
             </button>
+            <div className="dl-dropdown" ref={dlRef}>
+              <button
+                className="strategy-btn-secondary"
+                disabled={!mtmData.length}
+                onClick={() => setDlOpen(o => !o)}
+              >
+                Download ▾
+              </button>
+              {dlOpen && (
+                <div className="dl-menu">
+                  <button className="dl-item" onClick={downloadCsv}>CSV (2 files)</button>
+                  <button className="dl-item" onClick={downloadExcel}>Excel (.xlsx)</button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
