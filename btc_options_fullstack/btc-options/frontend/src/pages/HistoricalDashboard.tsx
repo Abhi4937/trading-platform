@@ -290,7 +290,7 @@ export const HistoricalDashboard: React.FC = () => {
           />
         </div>
 
-        <div className="historical-chart-panel" style={{ width: strategyMode ? '560px' : '500px' }}>
+        <div className="historical-chart-panel" style={{ width: strategyMode ? 'clamp(300px, 40vw, 560px)' : 'clamp(280px, 35vw, 500px)' }}>
           {/* Panel mode toggle tabs */}
           <div className="chart-mode-bar">
             <button

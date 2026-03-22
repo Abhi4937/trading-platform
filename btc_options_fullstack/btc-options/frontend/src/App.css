@@ -177,6 +177,7 @@ body {
 }
 .atm-row td { background: rgba(0,212,255,0.04); }
 .chain-table tbody tr:hover td { background: rgba(0,212,255,0.06); }
+.chain-table tbody tr.no-price-row:hover td { background: none; cursor: default; }
 
 /* ITM highlighting */
 tr[data-itm-call='true'] td.call-cell { background: rgba(96,165,250,0.06); }
@@ -471,7 +472,7 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   letter-spacing: 0.5px;
   color: var(--text3);
   background: var(--bg2);
-  text-align: left;
+  text-align: center;
   position: sticky;
   top: 0;
   z-index: 1;
@@ -480,6 +481,7 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   padding: 5px 8px;
   border-bottom: 1px solid rgba(26,45,66,0.4);
   white-space: nowrap;
+  text-align: center;
 }
 .strategy-badge {
   display: inline-block;
@@ -494,19 +496,45 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
 .strategy-badge.ce   { background: rgba(96,165,250,0.12); color: #60a5fa;      border: 1px solid rgba(96,165,250,0.25); }
 .strategy-badge.pe   { background: rgba(248,113,113,0.12); color: #f87171;     border: 1px solid rgba(248,113,113,0.25); }
 
-.strategy-qty-input {
-  width: 48px;
+.qty-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0px;
   background: var(--bg3);
   border: 1px solid var(--border);
-  color: var(--text);
-  padding: 2px 6px;
   border-radius: 4px;
+  overflow: hidden;
+}
+.qty-btn {
+  width: 20px;
+  height: 22px;
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+.qty-btn:hover { background: var(--bg4); color: var(--text); }
+.strategy-qty-input {
+  width: 36px;
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 4px;
   font-family: var(--mono);
   font-size: 12px;
   outline: none;
   text-align: center;
 }
-.strategy-qty-input:focus { border-color: var(--accent); }
+.strategy-qty-input:focus { background: var(--bg4); }
 
 .strategy-btn-run {
   padding: 4px 12px;
@@ -869,4 +897,126 @@ tr.leg-selected-row td.strike-cell {
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--bg3) var(--bg);
+}
+
+/* ── Responsive ── */
+
+/* Tablet: 768px – 1199px */
+@media (max-width: 1199px) {
+  .topbar { gap: 10px; padding: 6px 14px; }
+  .spot-price { font-size: 17px; }
+  .historical-main { gap: 10px; padding: 10px; }
+  .margin-detail-grid { grid-template-columns: 1fr; }
+}
+
+/* Mobile + small tablet: ≤ 767px */
+@media (max-width: 767px) {
+  /* Allow full page scroll — unlock the viewport lock */
+  .app {
+    height: auto;
+    min-height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .main {
+    overflow: visible;
+    flex-direction: column;
+  }
+
+  /* Topbar */
+  .topbar { gap: 8px; padding: 6px 10px; flex-wrap: wrap; }
+  .logo { font-size: 14px; }
+  .spot-price { font-size: 15px; }
+  .sep { display: none; }
+  .chain-meta { margin-left: 0; font-size: 10px; width: 100%; }
+  .title-center { font-size: 13px; }
+
+  /* Live page chain panel — let it grow, scrollable inside */
+  .chain-panel {
+    flex: none;
+    height: auto;
+    min-height: 60vh;
+    overflow: visible;
+  }
+  .chain-table-wrap { overflow: visible; }
+  .table-scroll { overflow-x: auto; overflow-y: auto; max-height: 55vh; }
+
+  /* Historical: unlock containers */
+  .historical-container {
+    height: auto;
+    overflow: visible;
+  }
+
+  /* Historical layout: stack vertically */
+  .historical-main {
+    flex-direction: column;
+    overflow: visible;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  /* Chain panel: fixed height on mobile so chart is visible below */
+  .historical-chain-panel {
+    flex: none;
+    height: 50vh;
+    min-height: 280px;
+    overflow: hidden;
+  }
+
+  /* Chart panel: take full width, min height so it's always visible */
+  .historical-chart-panel {
+    width: 100% !important;
+    flex: none;
+    min-height: 350px;
+  }
+
+  /* Strategy table */
+  .strategy-table-wrap { max-height: 160px; }
+
+  /* Margin grid: single column */
+  .margin-detail-grid { grid-template-columns: 1fr; }
+
+  /* Replay controller: wrap pickers */
+  .replay-ctrl-bar { flex-wrap: wrap; gap: 6px; }
+  .ctrl-pickers { flex-wrap: wrap; gap: 6px; padding: 4px 8px; }
+
+  /* Shrink tab text */
+  .chart-mode-tab { padding: 6px 10px; font-size: 11px; }
+  .ptab { padding: 8px 12px; font-size: 11px; }
+
+  /* Buttons */
+  .btn-refresh, .btn-mode-toggle-dark { padding: 5px 10px; font-size: 11px; }
+
+  /* iOS fix: font-size ≥ 16px prevents auto-zoom on input focus */
+  input, select, textarea,
+  .sel-input, .date-input, .search-input,
+  .mtm-range-input, .picker-display {
+    font-size: 16px !important;
+    max-width: 100%;
+  }
+
+  /* Compact the pickers so they don't overflow on small screens */
+  .sel-input, .date-input {
+    padding: 4px 6px;
+    max-width: 140px;
+  }
+  .picker-input-wrap {
+    min-width: 70px;
+    padding: 2px 6px;
+  }
+  .ctrl-group { gap: 1px; }
+  .ctrl-label { font-size: 8px; }
+}
+
+/* Small phones: ≤ 480px */
+@media (max-width: 480px) {
+  .topbar { padding: 5px 8px; gap: 6px; }
+  .logo { font-size: 13px; }
+  .spot-price { font-size: 14px; }
+  .historical-chain-panel { height: 45vh; min-height: 240px; }
+  .historical-chart-panel { min-height: 300px; }
+  .table-scroll { max-height: 40vh; }
+  .strategy-table-wrap { max-height: 130px; }
+  .replay-wrapper { padding: 6px 8px; }
+  .slider-container { padding: 0 6px; }
 }

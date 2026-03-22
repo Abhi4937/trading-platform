@@ -104,6 +104,8 @@ async def get_latest_available_data():
         logger.error(f"Error in fast latest-data scan: {e}")
         return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
+SPOT_DATA_PATH_RANGE = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
+
 @router.get("/data-range")
 async def get_data_range():
     try:
@@ -111,22 +113,25 @@ async def get_data_range():
         if not os.path.exists(base_dir):
             return {"min_ts": 0, "max_ts": 0}
 
-        # Fast filesystem scan for expiries
+        # min_ts: earliest expiry folder (options data start)
         expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
         if not expiries:
             return {"min_ts": 0, "max_ts": 0}
 
-        # We set min/max based on the dates of the folders (00:00 IST of first day to 23:59 IST of last day)
-        # This avoids reading any parquet files at all for this call
         min_date = expiries[0]
-        max_date = expiries[-1]
-        
         min_ts = int(datetime.strptime(f"{min_date} 00:00:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
-        max_ts = int(datetime.strptime(f"{max_date} 23:59:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
-        
+
+        # max_ts: latest actual recorded price from spot parquet — not expiry folder name
+        # This correctly reflects the last date data was collected, not the last contract expiry
+        conn = get_conn()
+        spot_max = conn.execute(
+            f"SELECT MAX(timestamp_unix) FROM read_parquet('{SPOT_DATA_PATH_RANGE}')"
+        ).fetchone()[0]
+        max_ts = int(spot_max) if spot_max else min_ts
+
         return {"min_ts": min_ts, "max_ts": max_ts}
     except Exception as e:
-        logger.error(f"Error in fast data-range filesystem scan: {e}")
+        logger.error(f"Error in data-range: {e}")
         return {"min_ts": 0, "max_ts": 0}
 
 @router.get("/expiries")

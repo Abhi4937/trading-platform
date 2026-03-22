@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
@@ -19,6 +19,30 @@ interface Props {
 
 const fmt = (n: number, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 
+const LegQtyInput: React.FC<{ id: string; qty: number; onUpdateQty: (id: string, qty: number) => void }> = ({ id, qty, onUpdateQty }) => {
+  const [val, setVal] = useState(String(qty));
+  useEffect(() => { setVal(String(qty)); }, [qty]);
+  const commit = (n: number) => { const v = Math.max(1, n); setVal(String(v)); onUpdateQty(id, v); };
+  return (
+    <div className="qty-stepper">
+      <button className="qty-btn" onClick={() => commit(Math.max(1, (parseInt(val) || 1) - 1))}>−</button>
+      <input
+        type="text"
+        inputMode="numeric"
+        className="strategy-qty-input"
+        value={val}
+        onChange={e => {
+          setVal(e.target.value);
+          const n = parseInt(e.target.value);
+          if (!isNaN(n) && n >= 1) onUpdateQty(id, n);
+        }}
+        onBlur={() => commit(parseInt(val) || 1)}
+      />
+      <button className="qty-btn" onClick={() => commit((parseInt(val) || 1) + 1)}>+</button>
+    </div>
+  );
+};
+
 function leverageColor(lev: number): string {
   if (lev < 5)  return 'var(--green)';
   if (lev < 15) return 'var(--gold)';
@@ -36,24 +60,34 @@ export const StrategyPanel: React.FC<Props> = ({
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
-  const [dlOpen, setDlOpen] = useState(false);
   const [lastMtmPrices, setLastMtmPrices] = useState<Map<string, number>>(new Map());
-  const dlRef = useRef<HTMLDivElement>(null);
+
+  const prevLegsLengthRef = useRef(0);
+  const [autoRunMtm, setAutoRunMtm] = useState(false);
 
   // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
-  // Clear MTM when legs change — stale chart after adding/removing legs is misleading
-  useEffect(() => { setMtmData([]); setLastMtmPrices(new Map()); }, [legs]);
+  // Detect leg add/remove and decide what to do
+  // useLayoutEffect runs synchronously after DOM mutations, before the next paint,
+  // so prevLegsLengthRef is updated before any async effects fire.
+  useLayoutEffect(() => {
+    const prevLen = prevLegsLengthRef.current;
+    prevLegsLengthRef.current = legs.length;
 
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (dlRef.current && !dlRef.current.contains(e.target as Node)) setDlOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
+    if (legs.length === 0) {
+      setMtmData([]);
+      setLastMtmPrices(new Map());
+    } else if (legs.length < prevLen && mtmData.length > 0) {
+      // Leg removed and MTM exists — schedule auto-recalc on next render
+      // (next render has fresh runMtm with updated legs in its closure)
+      setAutoRunMtm(true);
+    } else if (legs.length > prevLen) {
+      // New leg added — clear so user re-runs manually
+      setMtmData([]);
+      setLastMtmPrices(new Map());
+    }
+  }, [legs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toIst = (ts: number) => {
     const d = new Date((ts + 5.5 * 3600) * 1000);
@@ -73,28 +107,11 @@ export const StrategyPanel: React.FC<Props> = ({
 
   const buildMtmRows = () => mtmData.map(d => ({ 'Time (IST)': toIst(d.time), 'P&L (USD)': +d.pnl.toFixed(2) }));
 
-  const downloadCsv = () => {
-    const toCsv = (rows: object[]) => {
-      if (!rows.length) return '';
-      const keys = Object.keys(rows[0]);
-      return [keys.join(','), ...rows.map(r => keys.map(k => (r as any)[k]).join(','))].join('\n');
-    };
-    const dl = (content: string, name: string) => {
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([content], { type: 'text/csv' }));
-      a.download = name; a.click();
-    };
-    dl(toCsv(buildLegsRows()), `strategy_legs_${selectedExpiry}.csv`);
-    dl(toCsv(buildMtmRows()), `mtm_pnl_${selectedExpiry}.csv`);
-    setDlOpen(false);
-  };
-
   const downloadExcel = () => {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buildLegsRows()), 'Strategy Legs');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buildMtmRows()), 'MTM P&L');
     XLSX.writeFile(wb, `strategy_${selectedExpiry}.xlsx`);
-    setDlOpen(false);
   };
 
   // ─── Live P&L helpers ─────────────────────────────────────────────────────
@@ -171,6 +188,14 @@ export const StrategyPanel: React.FC<Props> = ({
     }
   }, [legs, timeframe, endDate, endTime]);
 
+  // Fires after autoRunMtm=true, by which time runMtm has fresh legs in closure
+  useEffect(() => {
+    if (autoRunMtm) {
+      setAutoRunMtm(false);
+      runMtm();
+    }
+  }, [autoRunMtm, runMtm]);
+
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: 0 }}>
@@ -198,21 +223,13 @@ export const StrategyPanel: React.FC<Props> = ({
             >
               {loading ? 'Calculating…' : 'Run MTM ▶'}
             </button>
-            <div className="dl-dropdown" ref={dlRef}>
-              <button
-                className="strategy-btn-secondary"
-                disabled={!mtmData.length}
-                onClick={() => setDlOpen(o => !o)}
-              >
-                Download ▾
-              </button>
-              {dlOpen && (
-                <div className="dl-menu">
-                  <button className="dl-item" onClick={downloadCsv}>CSV (2 files)</button>
-                  <button className="dl-item" onClick={downloadExcel}>Excel (.xlsx)</button>
-                </div>
-              )}
-            </div>
+            <button
+              className="strategy-btn-secondary"
+              disabled={!mtmData.length}
+              onClick={downloadExcel}
+            >
+              Download ↓
+            </button>
           </div>
         </div>
 
@@ -254,14 +271,8 @@ export const StrategyPanel: React.FC<Props> = ({
                           {leg.type}
                         </span>
                       </td>
-                      <td>
-                        <input
-                          type="number"
-                          className="strategy-qty-input"
-                          value={leg.qty}
-                          min={1}
-                          onChange={e => onUpdateQty(leg.id, Math.max(1, parseInt(e.target.value) || 1))}
-                        />
+                      <td style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                        <LegQtyInput id={leg.id} qty={leg.qty} onUpdateQty={onUpdateQty} />
                       </td>
                       <td style={{ color: 'var(--text3)', fontSize: '11px' }}>
                         {btcSize < 0.01

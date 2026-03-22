@@ -1,5 +1,11 @@
 # Claude Instructions — BTC Options Platform
 
+## RULE #1 — Always Ask Before Making Changes
+Before editing ANY file (code, config, docs, anything):
+1. Describe what you plan to change and why
+2. Ask "shall I proceed?" and wait for confirmation
+Do NOT assume a question about behavior is a request to fix it.
+
 ## Session Start Checklist (do this first, every session)
 1. Read `HANDOFF.md` — who worked last, what changed, what's pending
 2. Read `docs/memories/current_state.md` — active tasks and open issues
@@ -34,9 +40,10 @@
 - `feature/chain-only-no-charts` — clean chain-only for testing/new development
 
 ## After Any Code Change
-1. Rebuild backend: `cd docker && docker compose up --build -d backend`
-2. Restart frontend: `fuser -k 3000/tcp && cd frontend && npm run dev`
-3. Commit and push to current branch
+- **Frontend change:** `fuser -k 3000/tcp && cd frontend && npm run dev`
+- **Backend change:** `cd docker && docker compose up --build -d backend` then restart frontend
+- Always restart/rebuild immediately after making changes — do not wait for user to ask
+- Once the user confirms the change works, commit and push to current branch immediately
 
 ## Key Facts
 - Greeks computed with Black-Scholes server-side (verified match with Delta's live greeks)

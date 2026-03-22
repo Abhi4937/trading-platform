@@ -25,21 +25,31 @@ export const HistoricalOptionChain: React.FC<Props> = ({
   const strikeCellRef = useRef<HTMLTableCellElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to center ATM row vertically AND Strike column horizontally
+  // Center ATM row vertically and Strike column horizontally
+  const centerAtm = () => {
+    if (atmRef.current && strikeCellRef.current && scrollRef.current) {
+      const container = scrollRef.current;
+      const row = atmRef.current;
+      const cell = strikeCellRef.current;
+      container.scrollTop = row.offsetTop - container.clientHeight / 2 + row.offsetHeight / 2;
+      container.scrollLeft = cell.offsetLeft - container.clientWidth / 2 + cell.offsetWidth / 2;
+    }
+  };
+
+  // Run on chain/strategyMode change
   useEffect(() => {
-    const raf = requestAnimationFrame(() => {
-      if (atmRef.current && strikeCellRef.current && scrollRef.current) {
-        const container = scrollRef.current;
-        const row = atmRef.current;
-        const cell = strikeCellRef.current;
-        // Vertical: center ATM row
-        container.scrollTop = row.offsetTop - container.clientHeight / 2 + row.offsetHeight / 2;
-        // Horizontal: center Strike column
-        container.scrollLeft = cell.offsetLeft - container.clientWidth / 2 + cell.offsetWidth / 2;
-      }
-    });
+    const raf = requestAnimationFrame(centerAtm);
     return () => cancelAnimationFrame(raf);
   }, [chain, strategyMode]);
+
+  // Re-center whenever the container is resized (e.g. Strategy Builder panel opens/closes)
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(() => requestAnimationFrame(centerAtm));
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <div className="table-scroll" ref={scrollRef}>
@@ -68,7 +78,8 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               ref={row.is_atm ? atmRef : undefined}
               className={[
                 row.is_atm ? 'atm-row' : '',
-                legMap?.has(row.strike) ? 'leg-selected-row' : ''
+                legMap?.has(row.strike) ? 'leg-selected-row' : '',
+                row.call.last_price === 0 && row.put.last_price === 0 ? 'no-price-row' : ''
               ].filter(Boolean).join(' ')}
               data-itm-call={row.call.delta > 0.5 ? 'true' : 'false'}
               data-itm-put={Math.abs(row.put.delta) > 0.5 ? 'true' : 'false'}
@@ -82,11 +93,15 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               {/* CE Mark — chart click OR strategy B/S */}
               <td className="call-cell ltp">
                 {strategyMode ? (
-                  <div className="chain-bs-group">
-                    <button className="chain-bs-btn buy" disabled={row.call.last_price === 0} onClick={() => onAddLeg(row.strike, 'CE', 'BUY', row.call.last_price)}>B</button>
-                    <span className="chain-bs-price">{row.call.last_price === 0 ? '-' : f(row.call.last_price, 2)}</span>
-                    <button className="chain-bs-btn sell" disabled={row.call.last_price === 0} onClick={() => onAddLeg(row.strike, 'CE', 'SELL', row.call.last_price)}>S</button>
-                  </div>
+                  row.call.last_price === 0 ? (
+                    <span className="chain-bs-price">-</span>
+                  ) : (
+                    <div className="chain-bs-group">
+                      <button className="chain-bs-btn buy" onClick={() => onAddLeg(row.strike, 'CE', 'BUY', row.call.last_price)}>B</button>
+                      <span className="chain-bs-price">{f(row.call.last_price, 2)}</span>
+                      <button className="chain-bs-btn sell" onClick={() => onAddLeg(row.strike, 'CE', 'SELL', row.call.last_price)}>S</button>
+                    </div>
+                  )
                 ) : (
                   <span className="clickable" onClick={() => onSelectOption(row.strike, 'CE')}>
                     {row.call.last_price === 0 ? '-' : f(row.call.last_price, 2)}
@@ -115,11 +130,15 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               {/* PE Mark — chart click OR strategy B/S */}
               <td className="put-cell ltp">
                 {strategyMode ? (
-                  <div className="chain-bs-group">
-                    <button className="chain-bs-btn buy" disabled={row.put.last_price === 0} onClick={() => onAddLeg(row.strike, 'PE', 'BUY', row.put.last_price)}>B</button>
-                    <span className="chain-bs-price">{row.put.last_price === 0 ? '-' : f(row.put.last_price, 2)}</span>
-                    <button className="chain-bs-btn sell" disabled={row.put.last_price === 0} onClick={() => onAddLeg(row.strike, 'PE', 'SELL', row.put.last_price)}>S</button>
-                  </div>
+                  row.put.last_price === 0 ? (
+                    <span className="chain-bs-price">-</span>
+                  ) : (
+                    <div className="chain-bs-group">
+                      <button className="chain-bs-btn buy" onClick={() => onAddLeg(row.strike, 'PE', 'BUY', row.put.last_price)}>B</button>
+                      <span className="chain-bs-price">{f(row.put.last_price, 2)}</span>
+                      <button className="chain-bs-btn sell" onClick={() => onAddLeg(row.strike, 'PE', 'SELL', row.put.last_price)}>S</button>
+                    </div>
+                  )
                 ) : (
                   <span className="clickable" onClick={() => onSelectOption(row.strike, 'PE')}>
                     {row.put.last_price === 0 ? '-' : f(row.put.last_price, 2)}
