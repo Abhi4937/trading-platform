@@ -37,6 +37,7 @@ export const StrategyPanel: React.FC<Props> = ({
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
   const [dlOpen, setDlOpen] = useState(false);
+  const [lastMtmPrices, setLastMtmPrices] = useState<Map<string, number>>(new Map());
   const dlRef = useRef<HTMLDivElement>(null);
 
   // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
@@ -57,12 +58,14 @@ export const StrategyPanel: React.FC<Props> = ({
   };
 
   const buildLegsRows = () => legs.map(leg => {
-    const row = chain.find(r => r.strike === leg.strike);
-    const curr = row ? (leg.type === 'CE' ? row.call.last_price : row.put.last_price) : leg.entryPremium;
+    // Use final MTM price if available, otherwise fall back to live chain
+    const chainRow = chain.find(r => r.strike === leg.strike);
+    const livePrice = chainRow ? (leg.type === 'CE' ? chainRow.call.last_price : chainRow.put.last_price) : leg.entryPremium;
+    const curr = lastMtmPrices.get(leg.id) ?? livePrice;
     const dir = leg.action === 'BUY' ? 1 : -1;
     const pnl = (curr - leg.entryPremium) * leg.qty * dir * 0.001;
     return { Action: leg.action, Strike: leg.strike, Type: leg.type, Lots: leg.qty,
-             'Entry Premium': leg.entryPremium, 'Current Price': curr, 'P&L (USD)': +pnl.toFixed(2) };
+             'Entry Premium': leg.entryPremium, 'Exit Price (MTM end)': curr, 'P&L (USD)': +pnl.toFixed(2) };
   });
 
   const buildMtmRows = () => mtmData.map(d => ({ 'Time (IST)': toIst(d.time), 'P&L (USD)': +d.pnl.toFixed(2) }));
@@ -151,6 +154,13 @@ export const StrategyPanel: React.FC<Props> = ({
       });
 
       setMtmData(mtmPoints);
+
+      // Store final close price per leg for download
+      const prices = new Map<string, number>();
+      seriesResults.forEach(({ leg, data }) => {
+        if (data.length) prices.set(leg.id, data[data.length - 1].close);
+      });
+      setLastMtmPrices(prices);
     } catch {
       setError('Failed to calculate MTM. Check console.');
     } finally {
