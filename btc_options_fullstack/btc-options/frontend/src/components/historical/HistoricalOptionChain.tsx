@@ -18,16 +18,19 @@ export const HistoricalOptionChain: React.FC<Props> = ({
   const atmRef = useRef<HTMLTableRowElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to ATM row whenever chain changes
+  // Auto-scroll to ATM row — rAF ensures layout has settled before measuring
   useEffect(() => {
-    if (atmRef.current && scrollRef.current) {
-      const container = scrollRef.current;
-      const row = atmRef.current;
-      const rowTop = row.offsetTop;
-      const rowHeight = row.offsetHeight;
-      const containerHeight = container.clientHeight;
-      container.scrollTop = rowTop - containerHeight / 2 + rowHeight / 2;
-    }
+    const raf = requestAnimationFrame(() => {
+      if (atmRef.current && scrollRef.current) {
+        const container = scrollRef.current;
+        const row = atmRef.current;
+        const rowTop = row.offsetTop;
+        const rowHeight = row.offsetHeight;
+        const containerHeight = container.clientHeight;
+        container.scrollTop = rowTop - containerHeight / 2 + rowHeight / 2;
+      }
+    });
+    return () => cancelAnimationFrame(raf);
   }, [chain, strategyMode]);
 
   return (
