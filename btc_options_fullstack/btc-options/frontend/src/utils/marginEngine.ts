@@ -275,7 +275,9 @@ export function buildMarginLegs(
       isCall: leg.type === 'CE',
       isBuy:  leg.action === 'BUY',
       qty:    leg.qty,
-      currentPrice: side?.last_price ?? 0,
+      // Parquet prices are USDT/BTC; convert to USDT/contract (= × 0.001)
+      // so stress-test comparison with bsPrice(…) × contractValue is consistent
+      currentPrice: (side?.last_price ?? 0) * CONTRACT_VALUE,
       iv,
       T,
     });

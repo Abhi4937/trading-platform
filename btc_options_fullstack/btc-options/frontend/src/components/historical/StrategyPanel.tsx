@@ -42,7 +42,8 @@ export const StrategyPanel: React.FC<Props> = ({
 
   const getLegPnl = (leg: StrategyLeg) => {
     const dir = leg.action === 'BUY' ? 1 : -1;
-    return (getCurrentPrice(leg) - leg.entryPremium) * leg.qty * dir;
+    // Parquet prices are USDT/BTC; multiply by 0.001 (contract size) to get USDT/contract
+    return (getCurrentPrice(leg) - leg.entryPremium) * leg.qty * dir * 0.001;
   };
 
   const totalPnl = legs.reduce((s, l) => s + getLegPnl(l), 0);
@@ -82,7 +83,8 @@ export const StrategyPanel: React.FC<Props> = ({
           if (pts.length) {
             const pt = pts[pts.length - 1];
             const dir = leg.action === 'BUY' ? 1 : -1;
-            total += (pt.close - leg.entryPremium) * leg.qty * dir;
+            // Parquet close prices are USDT/BTC; × 0.001 converts to USDT/contract
+            total += (pt.close - leg.entryPremium) * leg.qty * dir * 0.001;
           }
         });
         return { time: t, pnl: total };

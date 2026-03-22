@@ -55,29 +55,64 @@ export const HistoricalDashboard: React.FC = () => {
   const generateExpiries = useCallback((simDate: string) => {
     if (!simDate || !dataRange) return [];
 
-    const base = new Date(simDate);
-    const maxDateStr = new Date(dataRange.max_ts * 1000).toISOString().split('T')[0];
-    const maxDate = new Date(maxDateStr);
+    // Use UTC throughout to avoid local-timezone date shifts
+    const base = new Date(simDate + 'T00:00:00Z');
+    const maxDate = new Date(
+      new Date(dataRange.max_ts * 1000).toISOString().split('T')[0] + 'T00:00:00Z'
+    );
 
+    const addedDates = new Set<string>();
     const expList: {date: string, label: string}[] = [];
 
-    const addIfValid = (dateObj: Date, labelPrefix: string) => {
+    const addIfValid = (dateObj: Date, label: string) => {
       const dateStr = dateObj.toISOString().split('T')[0];
-      if (dateObj <= maxDate) {
-        expList.push({ date: dateStr, label: `${labelPrefix} (${dateStr})` });
+      if (dateObj <= maxDate && !addedDates.has(dateStr)) {
+        addedDates.add(dateStr);
+        expList.push({ date: dateStr, label: `${label} (${dateStr})` });
       }
     };
 
-    addIfValid(new Date(base), 'Current');
-    const next = new Date(base); next.setDate(base.getDate() + 1);
-    addIfValid(next, 'Next');
-    const ntn = new Date(base); ntn.setDate(base.getDate() + 2);
-    addIfValid(ntn, 'Next-to-Next');
-    let weekly = new Date(base);
-    weekly.setDate(base.getDate() + 3);
-    while (weekly.getDay() !== 5) { weekly.setDate(weekly.getDate() + 1); }
-    addIfValid(weekly, 'Weekly');
+    // Next Friday strictly after `from`
+    const nextFridayAfter = (from: Date): Date => {
+      const d = new Date(from);
+      d.setUTCDate(d.getUTCDate() + 1);
+      while (d.getUTCDay() !== 5) d.setUTCDate(d.getUTCDate() + 1);
+      return d;
+    };
 
+    // Last Friday of a calendar month (0-indexed month, handles overflow)
+    const lastFridayOfMonth = (year: number, month: number): Date => {
+      const d = new Date(Date.UTC(year, month + 1, 0)); // last day of month
+      while (d.getUTCDay() !== 5) d.setUTCDate(d.getUTCDate() - 1);
+      return d;
+    };
+
+    // Daily
+    addIfValid(base, 'Current');
+    const next = new Date(base); next.setUTCDate(base.getUTCDate() + 1);
+    addIfValid(next, 'Next');
+    const ntn = new Date(base); ntn.setUTCDate(base.getUTCDate() + 2);
+    addIfValid(ntn, 'Next-to-Next');
+
+    // Monthly first so "Monthly" label wins when it coincides with a weekly
+    const baseYear = base.getUTCFullYear();
+    const baseMonth = base.getUTCMonth();
+    let monthly = lastFridayOfMonth(baseYear, baseMonth);
+    if (monthly <= base) monthly = lastFridayOfMonth(baseYear, baseMonth + 1);
+    addIfValid(monthly, 'Monthly');
+
+    const nextMonthly = lastFridayOfMonth(monthly.getUTCFullYear(), monthly.getUTCMonth() + 1);
+    addIfValid(nextMonthly, 'Next Monthly');
+
+    // Weekly (deduped against dailies and monthlies above)
+    const w1 = nextFridayAfter(base);
+    addIfValid(w1, 'Next Weekly');
+
+    const w2 = new Date(w1);
+    w2.setUTCDate(w1.getUTCDate() + 7);
+    addIfValid(w2, 'Next-to-Next Weekly');
+
+    expList.sort((a, b) => a.date.localeCompare(b.date));
     return expList;
   }, [dataRange]);
 
@@ -144,7 +179,12 @@ export const HistoricalDashboard: React.FC = () => {
 
       const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
 
-      historicalApi.getOptionChain(selectedExpiry, timestamp, chainAbortController.current.signal).then(res => {
+      // Pin strikes for any strategy legs on this expiry so they stay in the chain even after BTC moves
+      const pinStrikes = strategyLegs
+        .filter(l => l.expiry === selectedExpiry)
+        .map(l => l.strike);
+
+      historicalApi.getOptionChain(selectedExpiry, timestamp, chainAbortController.current.signal, pinStrikes.length ? pinStrikes : undefined).then(res => {
         setChain(res.chain);
         setSpot((res as any).spot_actual || 0);
       }).catch(err => {
@@ -156,7 +196,7 @@ export const HistoricalDashboard: React.FC = () => {
     }, 300);
 
     return () => { clearTimeout(timer); if (chainAbortController.current) chainAbortController.current.abort(); };
-  }, [selectedExpiry, simulationDate, simulationTime, expiries]);
+  }, [selectedExpiry, simulationDate, simulationTime, expiries, strategyLegs]);
 
   // 4. Fetch Chart Data with AbortController
   useEffect(() => {

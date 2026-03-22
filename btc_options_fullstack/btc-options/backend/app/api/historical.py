@@ -24,10 +24,6 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-# Simple in-memory cache to avoid repeated slow disk scans
-_cached_data_range = None
-_cached_latest_data = None
-
 # Strike index: {expiry_str: sorted list of available strikes}
 # Built once on first use by scanning folder names only (no parquet reads)
 _strike_index: dict[str, list[int]] = {}
@@ -65,10 +61,6 @@ def get_strikes_for_expiry(expiry: str) -> list[int]:
 
 @router.get("/latest-available-data")
 async def get_latest_available_data():
-    global _cached_latest_data
-    if _cached_latest_data:
-        return _cached_latest_data
-
     try:
         base_dir = "/home/abhis/btc-data/data/options"
         if not os.path.exists(base_dir):
@@ -107,7 +99,6 @@ async def get_latest_available_data():
         except Exception:
             res = {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
         
-        _cached_latest_data = res
         return res
     except Exception as e:
         logger.error(f"Error in fast latest-data scan: {e}")
@@ -115,10 +106,6 @@ async def get_latest_available_data():
 
 @router.get("/data-range")
 async def get_data_range():
-    global _cached_data_range
-    if _cached_data_range:
-        return _cached_data_range
-
     try:
         base_dir = "/home/abhis/btc-data/data/options"
         if not os.path.exists(base_dir):
@@ -137,9 +124,7 @@ async def get_data_range():
         min_ts = int(datetime.strptime(f"{min_date} 00:00:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
         max_ts = int(datetime.strptime(f"{max_date} 23:59:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
         
-        data = {"min_ts": min_ts, "max_ts": max_ts}
-        _cached_data_range = data
-        return data
+        return {"min_ts": min_ts, "max_ts": max_ts}
     except Exception as e:
         logger.error(f"Error in fast data-range filesystem scan: {e}")
         return {"min_ts": 0, "max_ts": 0}
@@ -193,7 +178,8 @@ SPOT_DATA_PATH = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
 async def get_historical_chain(
     request: Request,
     target_date: str = Query(..., alias="date"),
-    timestamp: int = Query(...) # UNIX timestamp
+    timestamp: int = Query(...), # UNIX timestamp
+    pin_strikes: str = Query(None) # comma-separated strikes to always include (e.g. strategy legs)
 ):
     conn = get_conn()
     
@@ -211,7 +197,7 @@ async def get_historical_chain(
     if not all_strikes:
         return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
 
-    # 3. Find ATM strike from spot, then filter to ±20 strikes
+    # 3. Find ATM strike from spot, then filter to ±50 strikes
     if spot:
         atm_strike = min(all_strikes, key=lambda x: abs(x - spot))
     else:
@@ -219,9 +205,22 @@ async def get_historical_chain(
         spot = atm_strike
 
     atm_idx = all_strikes.index(atm_strike)
-    start_idx = max(0, atm_idx - 20)
-    end_idx = min(len(all_strikes), atm_idx + 21)
-    filtered_strikes = all_strikes[start_idx:end_idx]
+    start_idx = max(0, atm_idx - 50)
+    end_idx = min(len(all_strikes), atm_idx + 51)
+    filtered_strikes = list(all_strikes[start_idx:end_idx])
+
+    # Always include pinned strikes (e.g. active strategy legs) even if outside ±50 window
+    if pin_strikes:
+        pin_set = set(filtered_strikes)
+        for s in pin_strikes.split(','):
+            try:
+                s_int = int(s.strip())
+                if s_int in all_strikes and s_int not in pin_set:
+                    filtered_strikes.append(s_int)
+                    pin_set.add(s_int)
+            except ValueError:
+                pass
+        filtered_strikes.sort()
 
     # 4. Build exact file paths for only the ±20 strikes — no wildcard scan
     base_dir = "/home/abhis/btc-data/data/options"

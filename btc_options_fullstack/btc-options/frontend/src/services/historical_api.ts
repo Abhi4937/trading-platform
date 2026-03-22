@@ -28,8 +28,10 @@ export const historicalApi = {
     return res.json();
   },
 
-  async getOptionChain(date: string, timestamp: number, signal?: AbortSignal): Promise<HistoricalOptionChainResponse> {
-    const res = await fetch(`${API_BASE}/historical/option-chain?date=${date}&timestamp=${timestamp}`, { signal });
+  async getOptionChain(date: string, timestamp: number, signal?: AbortSignal, pinStrikes?: number[]): Promise<HistoricalOptionChainResponse> {
+    let url = `${API_BASE}/historical/option-chain?date=${date}&timestamp=${timestamp}`;
+    if (pinStrikes && pinStrikes.length > 0) url += `&pin_strikes=${pinStrikes.join(',')}`;
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error('Failed to fetch option chain');
     return res.json();
   },
