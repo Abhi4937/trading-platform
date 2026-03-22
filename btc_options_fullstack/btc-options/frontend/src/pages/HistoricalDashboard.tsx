@@ -275,7 +275,16 @@ export const HistoricalDashboard: React.FC = () => {
           <HistoricalOptionChain
             chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain}
             strategyMode={strategyMode}
-            selectedStrikes={new Set(strategyLegs.filter(l => l.expiry === selectedExpiry).map(l => l.strike))}
+            legMap={(() => {
+              const m = new Map<number, { ce?: 'BUY'|'SELL'; pe?: 'BUY'|'SELL' }>();
+              strategyLegs.filter(l => l.expiry === selectedExpiry).forEach(l => {
+                const entry = m.get(l.strike) ?? {};
+                if (l.type === 'CE') entry.ce = l.action;
+                else entry.pe = l.action;
+                m.set(l.strike, entry);
+              });
+              return m;
+            })()}
             onSelectOption={(s, t) => setSelectedOption({ strike: s, type: t })}
             onAddLeg={addLeg}
           />

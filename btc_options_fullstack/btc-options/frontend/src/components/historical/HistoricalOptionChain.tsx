@@ -1,10 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 import type { HistoricalChainRow } from '../../types/historical';
 
+interface LegIndicator {
+  ce?: 'BUY' | 'SELL';
+  pe?: 'BUY' | 'SELL';
+}
+
 interface Props {
   chain: HistoricalChainRow[];
   strategyMode: boolean;
-  selectedStrikes?: Set<number>;
+  legMap?: Map<number, LegIndicator>;
   onSelectOption: (strike: number, type: 'CE' | 'PE') => void;
   onAddLeg: (strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => void;
 }
@@ -14,7 +19,7 @@ const f = (n: number, d = 2) => n.toFixed(d);
 const fd = (mark: number, n: number, d = 2) => mark === 0 ? '-' : n.toFixed(d);
 
 export const HistoricalOptionChain: React.FC<Props> = ({
-  chain, strategyMode, selectedStrikes, onSelectOption, onAddLeg
+  chain, strategyMode, legMap, onSelectOption, onAddLeg
 }) => {
   const atmRef = useRef<HTMLTableRowElement>(null);
   const strikeCellRef = useRef<HTMLTableCellElement>(null);
@@ -63,7 +68,7 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               ref={row.is_atm ? atmRef : undefined}
               className={[
                 row.is_atm ? 'atm-row' : '',
-                selectedStrikes?.has(row.strike) ? 'leg-selected-row' : ''
+                legMap?.has(row.strike) ? 'leg-selected-row' : ''
               ].filter(Boolean).join(' ')}
               data-itm-call={row.call.delta > 0.5 ? 'true' : 'false'}
               data-itm-put={Math.abs(row.put.delta) > 0.5 ? 'true' : 'false'}
@@ -93,8 +98,18 @@ export const HistoricalOptionChain: React.FC<Props> = ({
                 ref={row.is_atm ? strikeCellRef : undefined}
                 className={`strike-cell ${row.is_atm ? 'atm-strike' : ''}`}
               >
+                {legMap?.get(row.strike)?.ce && (
+                  <span className={`leg-side-badge ${legMap.get(row.strike)!.ce === 'BUY' ? 'buy' : 'sell'}`}>
+                    {legMap.get(row.strike)!.ce === 'BUY' ? 'B' : 'S'}
+                  </span>
+                )}
                 {row.strike.toLocaleString()}
                 {row.is_atm && <span className="atm-badge">ATM</span>}
+                {legMap?.get(row.strike)?.pe && (
+                  <span className={`leg-side-badge ${legMap.get(row.strike)!.pe === 'BUY' ? 'buy' : 'sell'}`}>
+                    {legMap.get(row.strike)!.pe === 'BUY' ? 'B' : 'S'}
+                  </span>
+                )}
               </td>
 
               {/* PE Mark — chart click OR strategy B/S */}
