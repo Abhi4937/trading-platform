@@ -8,7 +8,7 @@ interface Props {
   onAddLeg: (strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => void;
 }
 
-const f = (n: number, d = 2) => n.toFixed(d);
+const f = (n: number, d = 2) => n === 0 ? '-' : n.toFixed(d);
 
 export const HistoricalOptionChain: React.FC<Props> = ({
   chain, strategyMode, onSelectOption, onAddLeg
@@ -51,9 +51,9 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               <td className="call-cell ltp">
                 {strategyMode ? (
                   <div className="chain-bs-group">
-                    <button className="chain-bs-btn buy" onClick={() => onAddLeg(row.strike, 'CE', 'BUY', row.call.last_price)}>B</button>
+                    <button className="chain-bs-btn buy" disabled={row.call.last_price === 0} onClick={() => onAddLeg(row.strike, 'CE', 'BUY', row.call.last_price)}>B</button>
                     <span className="chain-bs-price">{f(row.call.last_price, 2)}</span>
-                    <button className="chain-bs-btn sell" onClick={() => onAddLeg(row.strike, 'CE', 'SELL', row.call.last_price)}>S</button>
+                    <button className="chain-bs-btn sell" disabled={row.call.last_price === 0} onClick={() => onAddLeg(row.strike, 'CE', 'SELL', row.call.last_price)}>S</button>
                   </div>
                 ) : (
                   <span className="clickable" onClick={() => onSelectOption(row.strike, 'CE')}>
@@ -71,9 +71,9 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               <td className="put-cell ltp">
                 {strategyMode ? (
                   <div className="chain-bs-group">
-                    <button className="chain-bs-btn buy" onClick={() => onAddLeg(row.strike, 'PE', 'BUY', row.put.last_price)}>B</button>
+                    <button className="chain-bs-btn buy" disabled={row.put.last_price === 0} onClick={() => onAddLeg(row.strike, 'PE', 'BUY', row.put.last_price)}>B</button>
                     <span className="chain-bs-price">{f(row.put.last_price, 2)}</span>
-                    <button className="chain-bs-btn sell" onClick={() => onAddLeg(row.strike, 'PE', 'SELL', row.put.last_price)}>S</button>
+                    <button className="chain-bs-btn sell" disabled={row.put.last_price === 0} onClick={() => onAddLeg(row.strike, 'PE', 'SELL', row.put.last_price)}>S</button>
                   </div>
                 ) : (
                   <span className="clickable" onClick={() => onSelectOption(row.strike, 'PE')}>
