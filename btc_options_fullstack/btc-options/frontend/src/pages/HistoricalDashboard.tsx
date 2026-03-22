@@ -39,82 +39,88 @@ export const HistoricalDashboard: React.FC = () => {
   // Also as callback for addLeg (needs latest value at click time)
   const simTimestamp = useCallback(() => currentSimTimestamp, [currentSimTimestamp]);
 
-  // 1. Initial State Initialization
-  useEffect(() => {
-    Promise.all([
-      historicalApi.getLatestAvailableData(),
-      historicalApi.getDataRange()
-    ]).then(([latest, range]) => {
-      setDataRange(range);
-      setSimulationDate(latest.latestDate);
-      setSimulationTime('00:00');
-    }).catch(console.error);
-  }, []);
-
-  // Helper to generate expiries locally
+  // Generate expiries locally from date math (fast, no API call)
   const generateExpiries = useCallback((simDate: string) => {
     if (!simDate || !dataRange) return [];
 
-    // Use UTC throughout to avoid local-timezone date shifts
+    const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
     const base = new Date(simDate + 'T00:00:00Z');
-    const maxDate = new Date(
-      new Date(dataRange.max_ts * 1000).toISOString().split('T')[0] + 'T00:00:00Z'
-    );
-
+    const dateStr = (d: Date) => d.toISOString().split('T')[0];
     const addedDates = new Set<string>();
     const expList: {date: string, label: string}[] = [];
 
-    const addIfValid = (dateObj: Date, label: string) => {
-      const dateStr = dateObj.toISOString().split('T')[0];
-      if (dateObj <= maxDate && !addedDates.has(dateStr)) {
-        addedDates.add(dateStr);
-        expList.push({ date: dateStr, label: `${label} (${dateStr})` });
+    const add = (d: Date, label: string) => {
+      const s = dateStr(d);
+      if (!addedDates.has(s)) {
+        addedDates.add(s);
+        expList.push({ date: s, label: `${label} (${s})` });
       }
     };
 
-    // Next Friday strictly after `from`
-    const nextFridayAfter = (from: Date): Date => {
-      const d = new Date(from);
-      d.setUTCDate(d.getUTCDate() + 1);
-      while (d.getUTCDay() !== 5) d.setUTCDate(d.getUTCDate() + 1);
-      return d;
-    };
-
-    // Last Friday of a calendar month (0-indexed month, handles overflow)
     const lastFridayOfMonth = (year: number, month: number): Date => {
-      const d = new Date(Date.UTC(year, month + 1, 0)); // last day of month
+      const d = new Date(Date.UTC(year, month + 1, 0));
       while (d.getUTCDay() !== 5) d.setUTCDate(d.getUTCDate() - 1);
       return d;
     };
 
-    // Daily
-    addIfValid(base, 'Current');
-    const next = new Date(base); next.setUTCDate(base.getUTCDate() + 1);
-    addIfValid(next, 'Next');
-    const ntn = new Date(base); ntn.setUTCDate(base.getUTCDate() + 2);
-    addIfValid(ntn, 'Next-to-Next');
+    // This week's Friday (first Friday >= base)
+    const thisWeekFriday = new Date(base);
+    while (thisWeekFriday.getUTCDay() !== 5) thisWeekFriday.setUTCDate(thisWeekFriday.getUTCDate() + 1);
 
-    // Monthly first so "Monthly" label wins when it coincides with a weekly
-    const baseYear = base.getUTCFullYear();
-    const baseMonth = base.getUTCMonth();
+    // Monthly expiries
+    const baseYear = base.getUTCFullYear(), baseMonth = base.getUTCMonth();
     let monthly = lastFridayOfMonth(baseYear, baseMonth);
-    if (monthly <= base) monthly = lastFridayOfMonth(baseYear, baseMonth + 1);
-    addIfValid(monthly, 'Monthly');
-
+    if (dateStr(monthly) <= dateStr(base)) monthly = lastFridayOfMonth(baseYear, baseMonth + 1);
     const nextMonthly = lastFridayOfMonth(monthly.getUTCFullYear(), monthly.getUTCMonth() + 1);
-    addIfValid(nextMonthly, 'Next Monthly');
 
-    // Weekly (deduped against dailies and monthlies above)
-    const w1 = nextFridayAfter(base);
-    addIfValid(w1, 'Next Weekly');
+    // Daily slots: Current, Next, Next-to-Next
+    // If a daily slot is a Friday → label it "Weekly" (or "Monthly" if it coincides)
+    const dailyLabel = (d: Date, fallback: string): string => {
+      const s = dateStr(d);
+      if (s === dateStr(monthly)) return 'Monthly';
+      if (d.getUTCDay() === 5) return 'Weekly';
+      return fallback;
+    };
 
-    const w2 = new Date(w1);
-    w2.setUTCDate(w1.getUTCDate() + 7);
-    addIfValid(w2, 'Next-to-Next Weekly');
+    const day0Label = dailyLabel(base, `Current ${DAYS[base.getUTCDay()]}`);
+    add(base, day0Label);
+
+    const d1 = new Date(base); d1.setUTCDate(base.getUTCDate() + 1);
+    add(d1, dailyLabel(d1, `Next ${DAYS[d1.getUTCDay()]}`));
+
+    const d2 = new Date(base); d2.setUTCDate(base.getUTCDate() + 2);
+    add(d2, dailyLabel(d2, `Next-to-Next ${DAYS[d2.getUTCDay()]}`));
+
+    // Weekly — this week's Friday (if not already added as a daily slot)
+    add(thisWeekFriday, dateStr(thisWeekFriday) === dateStr(monthly) ? 'Monthly' : 'Weekly');
+
+    // Next Weekly = next Friday after thisWeekFriday
+    const nextWeekly = new Date(thisWeekFriday); nextWeekly.setUTCDate(thisWeekFriday.getUTCDate() + 7);
+    add(nextWeekly, dateStr(nextWeekly) === dateStr(monthly) ? 'Monthly' : 'Next Weekly');
+
+    // Next-to-Next Weekly
+    const ntnWeekly = new Date(nextWeekly); ntnWeekly.setUTCDate(nextWeekly.getUTCDate() + 7);
+    add(ntnWeekly, dateStr(ntnWeekly) === dateStr(monthly) ? 'Monthly' : 'Next-to-Next Weekly');
+
+    // Monthly & Next Monthly
+    add(monthly, 'Monthly');
+    add(nextMonthly, 'Next Monthly');
 
     expList.sort((a, b) => a.date.localeCompare(b.date));
     return expList;
   }, [dataRange]);
+
+  // 1. Initial State Initialization
+  useEffect(() => {
+    historicalApi.getDataRange().then(range => {
+      setDataRange(range);
+      // Use spot parquet max_ts as default date — accurate last day of real data
+      const defaultDate = new Date(range.max_ts * 1000).toISOString().split('T')[0];
+      setSimulationDate(defaultDate);
+      setSimulationTime('00:00');
+    }).catch(console.error);
+  }, []);
+
 
   useEffect(() => {
     if (simulationDate) {
@@ -290,7 +296,7 @@ export const HistoricalDashboard: React.FC = () => {
           />
         </div>
 
-        <div className="historical-chart-panel" style={{ width: strategyMode ? 'clamp(300px, 40vw, 560px)' : 'clamp(280px, 35vw, 500px)' }}>
+        <div className="historical-chart-panel" style={{ width: strategyMode ? 'clamp(420px, 48vw, 740px)' : 'clamp(300px, 38vw, 560px)' }}>
           {/* Panel mode toggle tabs */}
           <div className="chart-mode-bar">
             <button

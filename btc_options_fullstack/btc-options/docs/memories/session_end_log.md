@@ -37,3 +37,63 @@ cc63bc2 chore: update HANDOFF.md with latest commits
  M frontend/src/pages/HistoricalDashboard.tsx
  M frontend/src/utils/marginEngine.ts
 ```
+
+---
+## Snapshot — 2026-03-22 23:16 (branch: mainbranch-gemini)
+
+### Recent Commits (last 10)
+```
+a6059e6 feat: responsive UI, lot stepper, B/S fixes, date picker max fix
+10c31a0 fix: clear MTM chart when legs change — prevents stale P&L after adding/removing legs
+27d8014 feat: MTM chart hover tooltip — P&L value + time (IST) on crosshair move
+80d6670 fix: download uses final MTM price per leg instead of live simulation price
+b37f8b3 feat: Download ▾ dropdown on Strategy Builder — exports CSV (2 files) or Excel (2 sheets)
+3d9b899 fix: fillna(0) on chart-data OHLC to prevent NaN JSON serialization crash (500 → CORS error)
+85ccb5f feat: MTM timeframe selector (1m/5m/15m/30m/1h) + end date/time range picker
+ad1ebd8 feat: show B/S badge on strike cell — left for CE leg, right for PE leg
+2258dfc feat: show B/S buttons on hover only + highlight rows with active strategy legs
+2c9b525 fix: center chain both vertically (ATM row) and horizontally (Strike column) on load/tab switch
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 110 +++++++++++----------
+ 1 file changed, 58 insertions(+), 52 deletions(-)
+```
+
+### Git Status
+```
+ M frontend/src/pages/HistoricalDashboard.tsx
+?? "UI ss/"
+```
+
+---
+## Snapshot — 2026-03-22 23:16 (branch: mainbranch-gemini)
+
+### Recent Commits (last 10)
+```
+a6059e6 feat: responsive UI, lot stepper, B/S fixes, date picker max fix
+10c31a0 fix: clear MTM chart when legs change — prevents stale P&L after adding/removing legs
+27d8014 feat: MTM chart hover tooltip — P&L value + time (IST) on crosshair move
+80d6670 fix: download uses final MTM price per leg instead of live simulation price
+b37f8b3 feat: Download ▾ dropdown on Strategy Builder — exports CSV (2 files) or Excel (2 sheets)
+3d9b899 fix: fillna(0) on chart-data OHLC to prevent NaN JSON serialization crash (500 → CORS error)
+85ccb5f feat: MTM timeframe selector (1m/5m/15m/30m/1h) + end date/time range picker
+ad1ebd8 feat: show B/S badge on strike cell — left for CE leg, right for PE leg
+2258dfc feat: show B/S buttons on hover only + highlight rows with active strategy legs
+2c9b525 fix: center chain both vertically (ATM row) and horizontally (Strike column) on load/tab switch
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   |  29 ++++++
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 110 +++++++++++----------
+ 2 files changed, 87 insertions(+), 52 deletions(-)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+ M frontend/src/pages/HistoricalDashboard.tsx
+?? "UI ss/"
+```

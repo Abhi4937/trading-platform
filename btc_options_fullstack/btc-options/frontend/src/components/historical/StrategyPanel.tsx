@@ -121,6 +121,19 @@ export const StrategyPanel: React.FC<Props> = ({
     return leg.type === 'CE' ? row.call.last_price : row.put.last_price;
   };
 
+  const getLegGreeks = (leg: StrategyLeg) => {
+    const row = chain.find(r => r.strike === leg.strike);
+    if (!row) return null;
+    const opt = leg.type === 'CE' ? row.call : row.put;
+    const dir = leg.action === 'BUY' ? 1 : -1;
+    return {
+      iv_pct: opt.iv_pct,
+      delta: opt.delta * leg.qty * dir,
+      theta: opt.theta * leg.qty * dir,
+      vega: opt.vega * leg.qty * dir,
+    };
+  };
+
   const getLegPnl = (leg: StrategyLeg) => {
     const dir = leg.action === 'BUY' ? 1 : -1;
     // Parquet prices are USDT/BTC; multiply by 0.001 (contract size) to get USDT/contract
@@ -250,6 +263,10 @@ export const StrategyPanel: React.FC<Props> = ({
                   <th>Entry</th>
                   <th>Current</th>
                   <th>P&amp;L</th>
+                  <th title="Implied Volatility %">IV%</th>
+                  <th title="Net Delta (qty × direction)">Delta</th>
+                  <th title="Net Theta per day (qty × direction)">Theta</th>
+                  <th title="Net Vega (qty × direction)">Vega</th>
                   <th></th>
                 </tr>
               </thead>
@@ -258,6 +275,7 @@ export const StrategyPanel: React.FC<Props> = ({
                   const curr = getCurrentPrice(leg);
                   const pnl = getLegPnl(leg);
                   const btcSize = leg.qty * 0.001;
+                  const greeks = getLegGreeks(leg);
                   return (
                     <tr key={leg.id}>
                       <td>
@@ -283,6 +301,18 @@ export const StrategyPanel: React.FC<Props> = ({
                       <td>{curr.toFixed(2)}</td>
                       <td style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
                         {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+                      </td>
+                      <td style={{ color: 'var(--gold)' }}>
+                        {greeks ? greeks.iv_pct.toFixed(1) : '-'}
+                      </td>
+                      <td style={{ color: greeks && greeks.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {greeks ? (greeks.delta >= 0 ? '+' : '') + greeks.delta.toFixed(3) : '-'}
+                      </td>
+                      <td style={{ color: greeks && greeks.theta < 0 ? 'var(--red)' : 'var(--green)' }}>
+                        {greeks ? (greeks.theta >= 0 ? '+' : '') + greeks.theta.toFixed(2) : '-'}
+                      </td>
+                      <td style={{ color: greeks && greeks.vega >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {greeks ? (greeks.vega >= 0 ? '+' : '') + greeks.vega.toFixed(2) : '-'}
                       </td>
                       <td>
                         <button className="strategy-btn-remove" onClick={() => onRemoveLeg(leg.id)}>×</button>
