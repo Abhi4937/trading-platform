@@ -43,6 +43,9 @@ export const StrategyPanel: React.FC<Props> = ({
   // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
+  // Clear MTM when legs change — stale chart after adding/removing legs is misleading
+  useEffect(() => { setMtmData([]); setLastMtmPrices(new Map()); }, [legs]);
+
   // Close dropdown on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
