@@ -45,6 +45,11 @@ Do NOT assume a question about behavior is a request to fix it.
 - Always restart/rebuild immediately after making changes — do not wait for user to ask
 - Once the user confirms the change works, commit and push to current branch immediately
 
+## RULE #2 — Commit Before Starting New Work
+Before making any new change, check `git status`.
+If there are uncommitted changes, ask the user: "There are uncommitted changes — shall I commit and push first?"
+Do NOT start new work on top of uncommitted changes.
+
 ## Key Facts
 - Greeks computed with Black-Scholes server-side (verified match with Delta's live greeks)
 - OI and Volume displayed in USD using Delta's `oi_value_usd` and `turnover_usd` fields
