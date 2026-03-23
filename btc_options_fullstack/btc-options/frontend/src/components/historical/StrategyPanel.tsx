@@ -1,46 +1,44 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
 import { CompareChart } from './CompareChart';
-import type { CompareSeries } from './CompareChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
-import type { StrategyLeg, MtmPoint } from '../../types/strategy';
+import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
 interface Props {
-  legs: StrategyLeg[];
+  strategies: Strategy[];
+  activeStrategyId: string;
   chain: HistoricalChainRow[];
   legChains: Map<string, HistoricalChainRow[]>;
   spot: number;
   selectedExpiry: string;
   simulationTimestamp: number;
-  onRemoveLeg: (id: string) => void;
-  onUpdateQty: (id: string, qty: number) => void;
-  onClearAll: () => void;
+  onSetActiveStrategy: (id: string) => void;
+  onAddStrategy: () => void;
+  onRemoveStrategy: (stratId: string) => void;
+  onRemoveLeg: (stratId: string, legId: string) => void;
+  onUpdateQty: (stratId: string, legId: string, qty: number) => void;
+  onClearLegs: (stratId: string) => void;
 }
 
 const fmt = (n: number, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const STRAT_COLORS = ['#00d4ff', '#f0b429', '#a78bfa', '#fb923c', '#34d399', '#f472b6', '#60a5fa', '#ff6b6b'];
 
-const LEG_COLORS = ['#00d4ff', '#f0b429', '#a78bfa', '#fb923c', '#34d399', '#f472b6', '#60a5fa', '#ff6b6b'];
-
-const LegQtyInput: React.FC<{ id: string; qty: number; onUpdateQty: (id: string, qty: number) => void }> = ({ id, qty, onUpdateQty }) => {
+const LegQtyInput: React.FC<{
+  stratId: string; id: string; qty: number;
+  onUpdateQty: (stratId: string, id: string, qty: number) => void;
+}> = ({ stratId, id, qty, onUpdateQty }) => {
   const [val, setVal] = useState(String(qty));
   useEffect(() => { setVal(String(qty)); }, [qty]);
-  const commit = (n: number) => { const v = Math.max(1, n); setVal(String(v)); onUpdateQty(id, v); };
+  const commit = (n: number) => { const v = Math.max(1, n); setVal(String(v)); onUpdateQty(stratId, id, v); };
   return (
     <div className="qty-stepper">
       <button className="qty-btn" onClick={() => commit(Math.max(1, (parseInt(val) || 1) - 1))}>−</button>
       <input
-        type="text"
-        inputMode="numeric"
-        className="strategy-qty-input"
-        value={val}
-        onChange={e => {
-          setVal(e.target.value);
-          const n = parseInt(e.target.value);
-          if (!isNaN(n) && n >= 1) onUpdateQty(id, n);
-        }}
+        type="text" inputMode="numeric" className="strategy-qty-input" value={val}
+        onChange={e => { setVal(e.target.value); const n = parseInt(e.target.value); if (!isNaN(n) && n >= 1) onUpdateQty(stratId, id, n); }}
         onBlur={() => commit(parseInt(val) || 1)}
       />
       <button className="qty-btn" onClick={() => commit((parseInt(val) || 1) + 1)}>+</button>
@@ -55,81 +53,37 @@ function leverageColor(lev: number): string {
 }
 
 export const StrategyPanel: React.FC<Props> = ({
-  legs, chain, legChains, spot, selectedExpiry, simulationTimestamp,
-  onRemoveLeg, onUpdateQty, onClearAll
+  strategies, activeStrategyId, chain, legChains, spot, selectedExpiry, simulationTimestamp,
+  onSetActiveStrategy, onAddStrategy, onRemoveStrategy, onRemoveLeg, onUpdateQty, onClearLegs,
 }) => {
-  const [mtmData, setMtmData] = useState<MtmPoint[]>([]);
+  const [strategyMtmData, setStrategyMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [marginExpanded, setMarginExpanded] = useState(false);
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
-  const [lastMtmPrices, setLastMtmPrices] = useState<Map<string, number>>(new Map());
 
-  const prevLegsLengthRef = useRef(0);
-  const [autoRunMtm, setAutoRunMtm] = useState(false);
-
-  // Compare mode — per-leg individual MTM curves
+  // Per-leg compare for active strategy
   const [compareMode, setCompareMode] = useState(false);
   const [legMtmData, setLegMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
   const [compareLoading, setCompareLoading] = useState(false);
 
-  // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
+  const prevStrategiesRef = useRef<Strategy[]>(strategies);
+  useEffect(() => { prevStrategiesRef.current = strategies; }, [strategies]);
+
+  // Clear MTM when strategies change (legs added/removed)
+  useEffect(() => {
+    setStrategyMtmData(new Map());
+    setLegMtmData(new Map());
+  }, [strategies]);
+
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
-  // Detect leg add/remove and decide what to do
-  // useLayoutEffect runs synchronously after DOM mutations, before the next paint,
-  // so prevLegsLengthRef is updated before any async effects fire.
-  useLayoutEffect(() => {
-    const prevLen = prevLegsLengthRef.current;
-    prevLegsLengthRef.current = legs.length;
+  const activeStrategy = useMemo(() => strategies.find(s => s.id === activeStrategyId) ?? strategies[0], [strategies, activeStrategyId]);
+  const activeLegs = activeStrategy?.legs ?? [];
 
-    if (legs.length === 0) {
-      setMtmData([]);
-      setLastMtmPrices(new Map());
-      setLegMtmData(new Map());
-    } else if (legs.length < prevLen && mtmData.length > 0) {
-      // Leg removed and MTM exists — schedule auto-recalc on next render
-      setAutoRunMtm(true);
-      setLegMtmData(new Map());
-    } else if (legs.length > prevLen) {
-      // New leg added — clear so user re-runs manually
-      setMtmData([]);
-      setLastMtmPrices(new Map());
-      setLegMtmData(new Map());
-    }
-  }, [legs]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const toIst = (ts: number) => {
-    const d = new Date((ts + 5.5 * 3600) * 1000);
-    return d.toISOString().replace('T', ' ').slice(0, 19) + ' IST';
-  };
-
-  const buildLegsRows = () => legs.map(leg => {
-    // Use final MTM price if available, otherwise fall back to live chain
-    const chainRow = chain.find(r => r.strike === leg.strike);
-    const livePrice = chainRow ? (leg.type === 'CE' ? chainRow.call.last_price : chainRow.put.last_price) : leg.entryPremium;
-    const curr = lastMtmPrices.get(leg.id) ?? livePrice;
-    const dir = leg.action === 'BUY' ? 1 : -1;
-    const pnl = (curr - leg.entryPremium) * leg.qty * dir * 0.001;
-    return { Action: leg.action, Strike: leg.strike, Type: leg.type, Lots: leg.qty,
-             'Entry Premium': leg.entryPremium, 'Exit Price (MTM end)': curr, 'P&L (USD)': +pnl.toFixed(2) };
-  });
-
-  const buildMtmRows = () => mtmData.map(d => ({ 'Time (IST)': toIst(d.time), 'P&L (USD)': +d.pnl.toFixed(2) }));
-
-  const downloadExcel = () => {
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buildLegsRows()), 'Strategy Legs');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buildMtmRows()), 'MTM P&L');
-    XLSX.writeFile(wb, `strategy_${selectedExpiry}.xlsx`);
-  };
-
-  // ─── Live P&L helpers ─────────────────────────────────────────────────────
-  // Resolve the correct chain for a leg's expiry:
-  //   - selectedExpiry → use the main `chain` prop (already fetched)
-  //   - any other expiry → use legChains map (fetched in parallel by HistoricalDashboard)
+  // ─── Live P&L helpers (active strategy only) ──────────────────────────────
   const getChainForLeg = (leg: StrategyLeg): HistoricalChainRow[] =>
     leg.expiry === selectedExpiry ? chain : (legChains.get(leg.expiry) ?? []);
 
@@ -154,169 +108,207 @@ export const StrategyPanel: React.FC<Props> = ({
 
   const getLegPnl = (leg: StrategyLeg) => {
     const dir = leg.action === 'BUY' ? 1 : -1;
-    // Parquet prices are USDT/BTC; multiply by 0.001 (contract size) to get USDT/contract
     return (getCurrentPrice(leg) - leg.entryPremium) * leg.qty * dir * 0.001;
   };
 
-  const totalPnl = legs.reduce((s, l) => s + getLegPnl(l), 0);
+  const totalPnl = activeLegs.reduce((s, l) => s + getLegPnl(l), 0);
 
-  // ─── Margin computation (memoized) ────────────────────────────────────────
+  // ─── Margin (active strategy) ──────────────────────────────────────────────
   const marginResult = useMemo(() => {
-    if (!legs.length || spot <= 0 || !selectedExpiry || !simulationTimestamp) return null;
-    const { marginLegs, skippedLegs } = buildMarginLegs(legs, chain, spot, selectedExpiry, simulationTimestamp);
+    if (!activeLegs.length || spot <= 0 || !selectedExpiry || !simulationTimestamp) return null;
+    const { marginLegs, skippedLegs } = buildMarginLegs(activeLegs, chain, spot, selectedExpiry, simulationTimestamp);
     if (!marginLegs.length) return null;
     return computePortfolioMargin(marginLegs, spot, undefined, skippedLegs);
-  }, [legs, chain, spot, selectedExpiry, simulationTimestamp]);
+  }, [activeLegs, chain, spot, selectedExpiry, simulationTimestamp]);
 
-  // ─── MTM run ──────────────────────────────────────────────────────────────
+  // ─── Download (active strategy) ────────────────────────────────────────────
+  const toIst = (ts: number) => {
+    const d = new Date((ts + 5.5 * 3600) * 1000);
+    return d.toISOString().replace('T', ' ').slice(0, 19) + ' IST';
+  };
+
+  const downloadExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const legsRows = activeLegs.map(leg => ({
+      Action: leg.action, Expiry: leg.expiry, Strike: leg.strike, Type: leg.type,
+      Lots: leg.qty, 'Entry Premium': leg.entryPremium,
+      'Current Price': getCurrentPrice(leg),
+      'P&L (USD)': +getLegPnl(leg).toFixed(2),
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(legsRows), activeStrategy.label);
+
+    // Add MTM sheet if available
+    const mtmPoints = strategyMtmData.get(activeStrategyId);
+    if (mtmPoints?.length) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        mtmPoints.map(d => ({ 'Time (IST)': toIst(d.time), 'P&L (USD)': +d.pnl.toFixed(2) }))
+      ), 'MTM P&L');
+    }
+    XLSX.writeFile(wb, `strategy_${selectedExpiry}.xlsx`);
+  };
+
+  // ─── Run MTM for ALL strategies ────────────────────────────────────────────
   const runMtm = useCallback(async () => {
-    if (!legs.length) return;
+    const nonEmpty = strategies.filter(s => s.legs.length > 0);
+    if (!nonEmpty.length) return;
     setLoading(true);
     setError('');
+    setCompareMode(false);
     try {
-      const entryTs = Math.min(...legs.map(l => l.entryTimestamp));
-      // End timestamp: user-chosen date + time in IST
+      const startTs = simulationTimestamp;
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
 
-      const seriesResults = await Promise.all(
-        legs.map(leg =>
-          historicalApi.getChartData(
-            leg.expiry, leg.strike, leg.type, entryTs, timeframe
-          ).then(res => ({ leg, data: res.data.filter(d => d.time >= entryTs && d.time <= endTs) }))
-        )
-      );
+      const map = new Map<string, MtmPoint[]>();
 
-      const timeSet = new Set<number>();
-      seriesResults.forEach(({ data }) => data.forEach(d => timeSet.add(d.time)));
-      const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+      await Promise.all(nonEmpty.map(async strat => {
+        const seriesResults = await Promise.all(
+          strat.legs.map(leg =>
+            historicalApi.getChartData(leg.expiry, leg.strike, leg.type, startTs, timeframe)
+              .then(res => ({ leg, data: res.data.filter(d => d.time >= startTs && d.time <= endTs) }))
+          )
+        );
 
-      const mtmPoints: MtmPoint[] = sortedTimes.map(t => {
-        let total = 0;
-        seriesResults.forEach(({ leg, data }) => {
-          const pts = data.filter(d => d.time <= t);
-          if (pts.length) {
-            const pt = pts[pts.length - 1];
-            const dir = leg.action === 'BUY' ? 1 : -1;
-            // Parquet close prices are USDT/BTC; × 0.001 converts to USDT/contract
-            total += (pt.close - leg.entryPremium) * leg.qty * dir * 0.001;
-          }
+        const timeSet = new Set<number>();
+        seriesResults.forEach(({ data }) => data.forEach(d => timeSet.add(d.time)));
+        const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+
+        const points: MtmPoint[] = sortedTimes.map(t => {
+          let total = 0;
+          seriesResults.forEach(({ leg, data }) => {
+            const pts = data.filter(d => d.time <= t);
+            if (pts.length) {
+              const dir = leg.action === 'BUY' ? 1 : -1;
+              total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
+            }
+          });
+          return { time: t, pnl: total };
         });
-        return { time: t, pnl: total };
-      });
 
-      setMtmData(mtmPoints);
+        map.set(strat.id, points);
+      }));
 
-      // Store final close price per leg for download
-      const prices = new Map<string, number>();
-      seriesResults.forEach(({ leg, data }) => {
-        if (data.length) prices.set(leg.id, data[data.length - 1].close);
-      });
-      setLastMtmPrices(prices);
+      setStrategyMtmData(map);
     } catch {
       setError('Failed to calculate MTM. Check console.');
     } finally {
       setLoading(false);
     }
-  }, [legs, timeframe, endDate, endTime]);
+  }, [strategies, simulationTimestamp, endDate, endTime, timeframe]);
 
-  // ─── Per-leg Compare run ──────────────────────────────────────────────────
+  // ─── Per-leg compare (active strategy) ────────────────────────────────────
   const runCompare = useCallback(async () => {
-    if (!legs.length) return;
+    if (!activeLegs.length) return;
     setCompareLoading(true);
     setCompareMode(true);
     try {
-      const entryTs = Math.min(...legs.map(l => l.entryTimestamp));
+      const startTs = simulationTimestamp;
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
-
       const results = await Promise.all(
-        legs.map(leg =>
-          historicalApi.getChartData(leg.expiry, leg.strike, leg.type, entryTs, timeframe)
-            .then(res => ({ leg, data: res.data.filter(d => d.time >= entryTs && d.time <= endTs) }))
+        activeLegs.map(leg =>
+          historicalApi.getChartData(leg.expiry, leg.strike, leg.type, startTs, timeframe)
+            .then(res => ({ leg, data: res.data.filter(d => d.time >= startTs && d.time <= endTs) }))
         )
       );
-
-      const map = new Map<string, MtmPoint[]>();
+      const legMap = new Map<string, MtmPoint[]>();
       results.forEach(({ leg, data }) => {
         const dir = leg.action === 'BUY' ? 1 : -1;
-        map.set(leg.id, data.map(d => ({
+        legMap.set(leg.id, data.map(d => ({
           time: d.time,
           pnl: (d.close - leg.entryPremium) * leg.qty * dir * 0.001,
         })));
       });
-      setLegMtmData(map);
+      setLegMtmData(legMap);
     } catch {
       setCompareMode(false);
     } finally {
       setCompareLoading(false);
     }
-  }, [legs, timeframe, endDate, endTime]);
+  }, [activeLegs, simulationTimestamp, endDate, endTime, timeframe]);
 
-  // Fires after autoRunMtm=true, by which time runMtm has fresh legs in closure
-  useEffect(() => {
-    if (autoRunMtm) {
-      setAutoRunMtm(false);
-      runMtm();
-    }
-  }, [autoRunMtm, runMtm]);
+  // Memoized series for charts
+  const stratCompareSeries = useMemo(() =>
+    strategies.filter(s => s.legs.length > 0).map((s, i) => ({
+      id: s.id,
+      label: s.label,
+      color: STRAT_COLORS[i % STRAT_COLORS.length],
+      data: strategyMtmData.get(s.id) ?? [],
+    })),
+  [strategies, strategyMtmData]);
 
-  // Memoize compare series so CompareChart only re-renders when data actually changes
-  const compareSeries = useMemo(() =>
-    legs.map((leg, i) => ({
+  const legCompareSeries = useMemo(() =>
+    activeLegs.map((leg, i) => ({
       id: leg.id,
       label: `${leg.action[0]} ${leg.strike} ${leg.type}`,
-      color: LEG_COLORS[i % LEG_COLORS.length],
+      color: STRAT_COLORS[i % STRAT_COLORS.length],
       data: legMtmData.get(leg.id) ?? [],
     })),
-  [legs, legMtmData]);
+  [activeLegs, legMtmData]);
+
+  const allLegs = useMemo(() => strategies.flatMap(s => s.legs), [strategies]);
+  const hasAnyLegs = allLegs.length > 0;
+  const minEntryTs = hasAnyLegs ? Math.min(...allLegs.map(l => l.entryTimestamp)) : undefined;
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: 0 }}>
 
-      {/* ── Legs card ── */}
+      {/* ── Strategy Tabs ── */}
+      <div className="strat-tabs">
+        {strategies.map((s, i) => (
+          <button
+            key={s.id}
+            className={`strat-tab${s.id === activeStrategyId ? ' active' : ''}`}
+            style={{ '--strat-color': STRAT_COLORS[i % STRAT_COLORS.length] } as React.CSSProperties}
+            onClick={() => onSetActiveStrategy(s.id)}
+          >
+            <span className="strat-tab-dot" style={{ background: STRAT_COLORS[i % STRAT_COLORS.length] }} />
+            {s.label}
+            {s.legs.length > 0 && <span className="strategy-leg-count">{s.legs.length}</span>}
+            {strategies.length > 1 && (
+              <span className="strat-tab-close" onClick={e => { e.stopPropagation(); onRemoveStrategy(s.id); }}>×</span>
+            )}
+          </button>
+        ))}
+        <button className="strat-tab-add" onClick={onAddStrategy}>＋</button>
+      </div>
+
+      {/* ── Active Strategy Legs card ── */}
       <div className="strategy-legs-card">
         <div className="strategy-header">
-          <span className="strategy-title">Strategy Legs</span>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            {legs.length > 0 && (
-              <span style={{
-                fontSize: '13px', fontWeight: 700,
-                color: totalPnl >= 0 ? 'var(--green)' : 'var(--red)'
-              }}>
+          <span className="strategy-title">{activeStrategy?.label}</span>
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            {activeLegs.length > 0 && (
+              <span style={{ fontSize: '12px', fontWeight: 700, color: totalPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
                 {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USD
               </span>
             )}
-            {legs.length > 0 && (
-              <button className="strategy-btn-secondary" onClick={onClearAll}>Clear</button>
+            {activeLegs.length > 0 && (
+              <button className="strategy-btn-secondary" onClick={() => onClearLegs(activeStrategyId)}>Clear</button>
             )}
             <button
               className={`strategy-btn-secondary${compareMode ? ' active-mode' : ''}`}
               onClick={runCompare}
-              disabled={compareLoading || !legs.length}
-              title="Show individual P&L curve per leg"
+              disabled={compareLoading || !activeLegs.length}
+              title="Per-leg P&L curves for this strategy"
             >
               {compareLoading ? '…' : 'Compare ⊞'}
             </button>
             <button
-              className={`strategy-btn-run${loading ? ' loading' : ''}${!compareMode && mtmData.length > 0 ? ' active-mode' : ''}`}
+              className={`strategy-btn-run${loading ? ' loading' : ''}`}
               onClick={() => { setCompareMode(false); runMtm(); }}
-              disabled={loading || !legs.length}
+              disabled={loading || !hasAnyLegs}
             >
               {loading ? 'Calculating…' : 'Run MTM ▶'}
             </button>
-            <button
-              className="strategy-btn-secondary"
-              disabled={!mtmData.length}
-              onClick={downloadExcel}
-            >
+            <button className="strategy-btn-secondary" disabled={!activeLegs.length} onClick={downloadExcel}>
               Download ↓
             </button>
           </div>
         </div>
 
-        {legs.length === 0 ? (
+        {activeLegs.length === 0 ? (
           <div className="strategy-empty">
-            Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike in the chain to add a leg
+            Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg to {activeStrategy?.label}
           </div>
         ) : (
           <div className="strategy-table-wrap">
@@ -327,56 +319,40 @@ export const StrategyPanel: React.FC<Props> = ({
                   <th>Expiry</th>
                   <th>Strike</th>
                   <th>Type</th>
-                  <th title="1 lot = 0.001 BTC · 1000 lots = 1 BTC">Lots</th>
+                  <th title="1 lot = 0.001 BTC">Lots</th>
                   <th>BTC</th>
                   <th>Entry</th>
                   <th>Current</th>
                   <th>P&amp;L</th>
                   <th title="Implied Volatility %">IV%</th>
-                  <th title="Net Delta (qty × direction)">Delta</th>
-                  <th title="Net Theta per day (qty × direction)">Theta</th>
-                  <th title="Net Vega (qty × direction)">Vega</th>
+                  <th title="Net Delta">Delta</th>
+                  <th title="Net Theta">Theta</th>
+                  <th title="Net Vega">Vega</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {legs.map(leg => {
+                {activeLegs.map(leg => {
                   const curr = getCurrentPrice(leg);
                   const pnl = getLegPnl(leg);
                   const btcSize = leg.qty * 0.001;
                   const greeks = getLegGreeks(leg);
                   return (
                     <tr key={leg.id}>
-                      <td>
-                        <span className={`strategy-badge ${leg.action === 'BUY' ? 'buy' : 'sell'}`}>
-                          {leg.action}
-                        </span>
-                      </td>
-                      <td style={{ color: leg.expiry === selectedExpiry ? 'var(--accent)' : 'var(--text3)', fontSize: '10px', whiteSpace: 'nowrap' }}>
-                        {leg.expiry}
-                      </td>
+                      <td><span className={`strategy-badge ${leg.action === 'BUY' ? 'buy' : 'sell'}`}>{leg.action}</span></td>
+                      <td style={{ color: leg.expiry === selectedExpiry ? 'var(--accent)' : 'var(--text3)', fontSize: '10px', whiteSpace: 'nowrap' }}>{leg.expiry}</td>
                       <td style={{ fontWeight: 700 }}>{leg.strike.toLocaleString()}</td>
-                      <td>
-                        <span className={`strategy-badge ${leg.type === 'CE' ? 'ce' : 'pe'}`}>
-                          {leg.type}
-                        </span>
-                      </td>
+                      <td><span className={`strategy-badge ${leg.type === 'CE' ? 'ce' : 'pe'}`}>{leg.type}</span></td>
                       <td style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                        <LegQtyInput id={leg.id} qty={leg.qty} onUpdateQty={onUpdateQty} />
+                        <LegQtyInput stratId={activeStrategyId} id={leg.id} qty={leg.qty} onUpdateQty={onUpdateQty} />
                       </td>
-                      <td style={{ color: 'var(--text3)', fontSize: '11px' }}>
-                        {btcSize < 0.01
-                          ? btcSize.toFixed(3)
-                          : btcSize.toFixed(2)}
-                      </td>
+                      <td style={{ color: 'var(--text3)', fontSize: '11px' }}>{btcSize < 0.01 ? btcSize.toFixed(3) : btcSize.toFixed(2)}</td>
                       <td style={{ color: 'var(--text2)' }}>{leg.entryPremium.toFixed(2)}</td>
                       <td>{curr.toFixed(2)}</td>
                       <td style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
                         {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
                       </td>
-                      <td style={{ color: 'var(--gold)' }}>
-                        {greeks ? greeks.iv_pct.toFixed(1) : '-'}
-                      </td>
+                      <td style={{ color: 'var(--gold)' }}>{greeks ? greeks.iv_pct.toFixed(1) : '-'}</td>
                       <td style={{ color: greeks && greeks.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
                         {greeks ? (greeks.delta >= 0 ? '+' : '') + greeks.delta.toFixed(3) : '-'}
                       </td>
@@ -387,7 +363,7 @@ export const StrategyPanel: React.FC<Props> = ({
                         {greeks ? (greeks.vega >= 0 ? '+' : '') + greeks.vega.toFixed(2) : '-'}
                       </td>
                       <td>
-                        <button className="strategy-btn-remove" onClick={() => onRemoveLeg(leg.id)}>×</button>
+                        <button className="strategy-btn-remove" onClick={() => onRemoveLeg(activeStrategyId, leg.id)}>×</button>
                       </td>
                     </tr>
                   );
@@ -399,10 +375,9 @@ export const StrategyPanel: React.FC<Props> = ({
         {error && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{error}</div>}
       </div>
 
-      {/* ── Portfolio Margin card ── */}
-      {marginResult && legs.length > 0 && (
+      {/* ── Portfolio Margin (active strategy) ── */}
+      {marginResult && activeLegs.length > 0 && (
         <div className="margin-card">
-          {/* Compact always-visible row */}
           <div className="margin-compact-row" onClick={() => setMarginExpanded(e => !e)}>
             <div className="margin-kv">
               <span className="margin-label">Margin Req.</span>
@@ -425,89 +400,39 @@ export const StrategyPanel: React.FC<Props> = ({
             </span>
             <span className="margin-expand-toggle">{marginExpanded ? '▲' : '▼'}</span>
           </div>
-
-          {/* Skipped legs warning */}
           {marginResult.skippedLegs > 0 && (
             <div className="margin-skip-warning">
-              ⚠ {marginResult.skippedLegs} leg{marginResult.skippedLegs > 1 ? 's' : ''} excluded — mark price is 0 at this timestamp (no IV available)
+              ⚠ {marginResult.skippedLegs} leg{marginResult.skippedLegs > 1 ? 's' : ''} excluded — mark price is 0 at this timestamp
             </div>
           )}
-
-          {/* Expandable detail */}
           {marginExpanded && (
             <div className="margin-detail">
               <div className="margin-detail-grid">
-                <div className="margin-detail-row">
-                  <span className="margin-detail-label">Risk Margin</span>
-                  <span className="margin-detail-val">{fmt(marginResult.riskMargin)} USDT</span>
-                </div>
-                <div className="margin-detail-row">
-                  <span className="margin-detail-label">Margin Floor</span>
-                  <span className="margin-detail-val">{fmt(marginResult.marginFloor)} USDT</span>
-                </div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Risk Margin</span><span className="margin-detail-val">{fmt(marginResult.riskMargin)} USDT</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Margin Floor</span><span className="margin-detail-val">{fmt(marginResult.marginFloor)} USDT</span></div>
                 <div className="margin-detail-row">
                   <span className="margin-detail-label">Total Notional</span>
-                  <span className="margin-detail-val">
-                    {fmt(marginResult.totalNotional)} USDT
-                    <span style={{ color: 'var(--text3)', fontWeight: 400, marginLeft: '6px', fontSize: '10px' }}>
-                      ({(marginResult.totalNotional / spot).toFixed(3)} BTC)
-                    </span>
-                  </span>
+                  <span className="margin-detail-val">{fmt(marginResult.totalNotional)} USDT <span style={{ color: 'var(--text3)', fontSize: '10px' }}>({(marginResult.totalNotional / spot).toFixed(3)} BTC)</span></span>
                 </div>
-                <div className="margin-detail-row">
-                  <span className="margin-detail-label">Premium Collected</span>
-                  <span className="margin-detail-val" style={{ color: 'var(--green)' }}>
-                    {fmt(marginResult.totalPremiumCollected)} USDT
-                  </span>
-                </div>
-                <div className="margin-detail-row">
-                  <span className="margin-detail-label">Margin / Notional</span>
-                  <span className="margin-detail-val">
-                    {((marginResult.portfolioMargin / marginResult.totalNotional) * 100).toFixed(2)}%
-                  </span>
-                </div>
-                <div className="margin-detail-row">
-                  <span className="margin-detail-label">Margin per Lot</span>
-                  <span className="margin-detail-val">{fmt(marginResult.marginPerLot)} USDT</span>
-                </div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Premium Collected</span><span className="margin-detail-val" style={{ color: 'var(--green)' }}>{fmt(marginResult.totalPremiumCollected)} USDT</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Margin / Notional</span><span className="margin-detail-val">{((marginResult.portfolioMargin / marginResult.totalNotional) * 100).toFixed(2)}%</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Margin per Lot</span><span className="margin-detail-val">{fmt(marginResult.marginPerLot)} USDT</span></div>
               </div>
-
               <div className="margin-scenarios">
                 <div className="margin-scenario-row worst">
-                  <span className="margin-scenario-icon">▼</span>
-                  <span className="margin-scenario-label">Worst</span>
-                  <span className="margin-scenario-desc">
-                    Price {marginResult.worstScenario.priceShockPct >= 0 ? '+' : ''}{marginResult.worstScenario.priceShockPct.toFixed(1)}%
-                    &nbsp;·&nbsp;
-                    Vol {marginResult.worstScenario.volShockPts >= 0 ? '+' : ''}{marginResult.worstScenario.volShockPts.toFixed(0)}pp
-                  </span>
-                  <span className="margin-scenario-pnl" style={{ color: 'var(--red)' }}>
-                    −{fmt(Math.abs(marginResult.worstScenario.pnl))} USDT
-                  </span>
+                  <span className="margin-scenario-icon">▼</span><span className="margin-scenario-label">Worst</span>
+                  <span className="margin-scenario-desc">Price {marginResult.worstScenario.priceShockPct >= 0 ? '+' : ''}{marginResult.worstScenario.priceShockPct.toFixed(1)}% · Vol {marginResult.worstScenario.volShockPts >= 0 ? '+' : ''}{marginResult.worstScenario.volShockPts.toFixed(0)}pp</span>
+                  <span className="margin-scenario-pnl" style={{ color: 'var(--red)' }}>−{fmt(Math.abs(marginResult.worstScenario.pnl))} USDT</span>
                 </div>
                 <div className="margin-scenario-row best">
-                  <span className="margin-scenario-icon">▲</span>
-                  <span className="margin-scenario-label">Best</span>
-                  <span className="margin-scenario-desc">
-                    Price {marginResult.bestScenario.priceShockPct >= 0 ? '+' : ''}{marginResult.bestScenario.priceShockPct.toFixed(1)}%
-                    &nbsp;·&nbsp;
-                    Vol {marginResult.bestScenario.volShockPts >= 0 ? '+' : ''}{marginResult.bestScenario.volShockPts.toFixed(0)}pp
-                  </span>
-                  <span className="margin-scenario-pnl" style={{ color: 'var(--green)' }}>
-                    +{fmt(marginResult.bestScenario.pnl)} USDT
-                  </span>
+                  <span className="margin-scenario-icon">▲</span><span className="margin-scenario-label">Best</span>
+                  <span className="margin-scenario-desc">Price {marginResult.bestScenario.priceShockPct >= 0 ? '+' : ''}{marginResult.bestScenario.priceShockPct.toFixed(1)}% · Vol {marginResult.bestScenario.volShockPts >= 0 ? '+' : ''}{marginResult.bestScenario.volShockPts.toFixed(0)}pp</span>
+                  <span className="margin-scenario-pnl" style={{ color: 'var(--green)' }}>+{fmt(marginResult.bestScenario.pnl)} USDT</span>
                 </div>
               </div>
-
               <div className="margin-tier-info">
-                Stress tier: ±{(marginResult.priceShockApplied * 100).toFixed(0)}% price ·
-                +{marginResult.volUpApplied}pp / −{marginResult.volDownApplied}pp vol
-                <span
-                  className="margin-disclaimer-icon"
-                  title="Estimated margin based on published Delta Exchange methodology. Actual margin may differ by 10–15%."
-                >
-                  &nbsp;ⓘ
-                </span>
+                Stress tier: ±{(marginResult.priceShockApplied * 100).toFixed(0)}% price · +{marginResult.volUpApplied}pp / −{marginResult.volDownApplied}pp vol
+                <span className="margin-disclaimer-icon" title="Estimated margin based on Delta Exchange methodology. Actual may differ 10–15%.">&nbsp;ⓘ</span>
               </div>
             </div>
           )}
@@ -517,61 +442,60 @@ export const StrategyPanel: React.FC<Props> = ({
       {/* ── MTM chart card ── */}
       <div className="strategy-chart-card">
         <div className="strategy-chart-header">
-          <span className="strategy-chart-label">{compareMode ? 'Per-Leg P&L' : 'MTM P&L'}</span>
-          {/* Timeframe buttons */}
+          <span className="strategy-chart-label">
+            {compareMode ? `${activeStrategy?.label} — Per-Leg` : strategies.length > 1 ? 'Strategy Comparison' : 'MTM P&L'}
+          </span>
           <div style={{ display: 'flex', gap: '3px' }}>
             {(['1m','5m','15m','30m','1h'] as const).map(tf => (
-              <button
-                key={tf}
-                className={`tf-btn${timeframe === tf ? ' active' : ''}`}
-                onClick={() => setTimeframe(tf)}
-              >{tf}</button>
+              <button key={tf} className={`tf-btn${timeframe === tf ? ' active' : ''}`} onClick={() => setTimeframe(tf)}>{tf}</button>
             ))}
           </div>
         </div>
-        {/* End date/time row */}
         <div className="mtm-range-row">
           <span className="mtm-range-label">Show until</span>
-          <input
-            type="date"
-            className="mtm-range-input"
-            value={endDate}
-            min={legs.length ? new Date(Math.min(...legs.map(l => l.entryTimestamp)) * 1000).toISOString().split('T')[0] : undefined}
-            max={selectedExpiry}
-            onChange={e => setEndDate(e.target.value)}
-          />
-          <input
-            type="time"
-            className="mtm-range-input"
-            value={endTime}
-            onChange={e => setEndTime(e.target.value)}
-          />
-          {mtmData.length > 0 && (
-            <span style={{ fontSize: '10px', color: 'var(--text3)', marginLeft: 'auto' }}>
-              {mtmData.length} pts
-            </span>
-          )}
+          <input type="date" className="mtm-range-input" value={endDate}
+            min={minEntryTs ? new Date(minEntryTs * 1000).toISOString().split('T')[0] : undefined}
+            max={selectedExpiry} onChange={e => setEndDate(e.target.value)} />
+          <input type="time" className="mtm-range-input" value={endTime} onChange={e => setEndTime(e.target.value)} />
         </div>
+
+        {/* Per-leg compare (active strategy) */}
         {compareMode && legMtmData.size > 0 ? (
           <>
-            {/* Legend */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 10px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              {legs.map((leg, i) => (
+              {activeLegs.map((leg, i) => (
                 <span key={leg.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
-                  <span style={{ width: '10px', height: '2px', background: LEG_COLORS[i % LEG_COLORS.length], display: 'inline-block', borderRadius: '1px' }} />
+                  <span style={{ width: '10px', height: '2px', background: STRAT_COLORS[i % STRAT_COLORS.length], display: 'inline-block', borderRadius: '1px' }} />
                   <span style={{ color: 'var(--text2)' }}>{leg.action[0]} {leg.strike} {leg.type} ({leg.expiry})</span>
                 </span>
               ))}
             </div>
-            <CompareChart series={compareSeries} />
+            <CompareChart series={legCompareSeries} />
           </>
-        ) : !compareMode && mtmData.length > 0 ? (
-          <MtmChart data={mtmData} />
+        /* Strategy MTM comparison */
+        ) : !compareMode && strategyMtmData.size > 0 ? (
+          strategies.length === 1 ? (
+            // Single strategy → show baseline chart
+            <MtmChart data={strategyMtmData.get(strategies[0].id) ?? []} />
+          ) : (
+            // Multiple strategies → show compare chart with legend
+            <>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 10px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                {strategies.filter(s => s.legs.length > 0).map((s, i) => (
+                  <span key={s.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
+                    <span style={{ width: '10px', height: '2px', background: STRAT_COLORS[i % STRAT_COLORS.length], display: 'inline-block', borderRadius: '1px' }} />
+                    <span style={{ color: 'var(--text2)' }}>{s.label} ({s.legs.length} legs)</span>
+                  </span>
+                ))}
+              </div>
+              <CompareChart series={stratCompareSeries} />
+            </>
+          )
         ) : (
           <div className="strategy-chart-empty">
-            {legs.length > 0
-              ? <>Click <b>Run MTM ▶</b> for combined P&L or <b>Compare ⊞</b> for per-leg curves</>
-              : 'Add legs to the strategy first'}
+            {hasAnyLegs
+              ? <>Click <b>Run MTM ▶</b> to compare strategies, or <b>Compare ⊞</b> for per-leg breakdown</>
+              : 'Add legs to a strategy first'}
           </div>
         )}
       </div>

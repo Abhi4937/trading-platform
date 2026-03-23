@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart, ColorType, LineSeries } from 'lightweight-charts';
+import { createChart, ColorType, LineSeries, UTCTimestamp } from 'lightweight-charts';
 import type { MtmPoint } from '../../types/strategy';
 
 export interface CompareSeries {
@@ -81,7 +81,7 @@ export const CompareChart: React.FC<Props> = ({ series }) => {
       });
       seriesRefs.current.set(s.id, sr);
       if (s.data.length) {
-        sr.setData(s.data.map(d => ({ time: d.time + IST_OFFSET, value: d.pnl })));
+        sr.setData(s.data.map(d => ({ time: (d.time + IST_OFFSET) as UTCTimestamp, value: d.pnl })));
       }
     });
 

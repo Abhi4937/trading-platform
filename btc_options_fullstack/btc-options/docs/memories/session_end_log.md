@@ -97,3 +97,36 @@ ad1ebd8 feat: show B/S badge on strike cell — left for CE leg, right for PE le
  M frontend/src/pages/HistoricalDashboard.tsx
 ?? "UI ss/"
 ```
+
+---
+## Snapshot — 2026-03-23 00:52 (branch: mainbranch-gemini_claude_compare)
+
+### Recent Commits (last 10)
+```
+da644eb feat: Compare button — per-leg MTM curves on shared chart
+499fa12 docs: add RULE #2 — commit and push before starting new work
+1d4965b feat: multi-expiry strategy support — live P&L for all legs across expiries
+110bfde style: tighten fonts/spacing + fix multi-expiry current price bug + add expiry column
+6bf6ce3 style: increase chart/strategy builder panel width, shrink chain panel
+5d5ffcd feat: add Greeks columns to strategy table + wider panel
+a6059e6 feat: responsive UI, lot stepper, B/S fixes, date picker max fix
+10c31a0 fix: clear MTM chart when legs change — prevents stale P&L after adding/removing legs
+27d8014 feat: MTM chart hover tooltip — P&L value + time (IST) on crosshair move
+80d6670 fix: download uses final MTM price per leg instead of live simulation price
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../src/components/historical/StrategyPanel.tsx    | 520 +++++++++------------
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 101 ++--
+ .../btc-options/frontend/src/types/strategy.ts     |   6 +
+ 3 files changed, 292 insertions(+), 335 deletions(-)
+```
+
+### Git Status
+```
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/pages/HistoricalDashboard.tsx
+ M frontend/src/types/strategy.ts
+?? "UI ss/"
+```

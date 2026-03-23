@@ -13,3 +13,9 @@ export interface MtmPoint {
   time: number; // unix seconds
   pnl: number;  // total combined P&L in USD
 }
+
+export interface Strategy {
+  id: string;
+  label: string;
+  legs: StrategyLeg[];
+}

@@ -5,7 +5,7 @@ import { HistoricalOptionChain } from '../components/historical/HistoricalOption
 import { HistoricalChart } from '../components/historical/HistoricalChart';
 import { StrategyPanel } from '../components/historical/StrategyPanel';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
-import type { StrategyLeg } from '../types/strategy';
+import type { Strategy } from '../types/strategy';
 
 export const HistoricalDashboard: React.FC = () => {
   const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
@@ -22,9 +22,15 @@ export const HistoricalDashboard: React.FC = () => {
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
-  // Strategy Builder
+  // Strategy Builder — multiple strategies
   const [strategyMode, setStrategyMode] = useState(false);
-  const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
+  const [strategies, setStrategies] = useState<Strategy[]>([{ id: 's1', label: 'Strategy 1', legs: [] }]);
+  const [activeStrategyId, setActiveStrategyId] = useState<string>('s1');
+
+  // All legs across all strategies (for chain pin, legChains fetch)
+  const allLegs = useMemo(() => strategies.flatMap(s => s.legs), [strategies]);
+  // Active strategy's legs (for legMap, addLeg)
+  const activeLegs = useMemo(() => strategies.find(s => s.id === activeStrategyId)?.legs ?? [], [strategies, activeStrategyId]);
 
   // AbortControllers to prevent race conditions
   const chainAbortController = useRef<AbortController | null>(null);
@@ -190,7 +196,7 @@ export const HistoricalDashboard: React.FC = () => {
       const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
 
       // Pin strikes for any strategy legs on this expiry so they stay in the chain even after BTC moves
-      const pinStrikes = strategyLegs
+      const pinStrikes = allLegs
         .filter(l => l.expiry === selectedExpiry)
         .map(l => l.strike);
 
@@ -206,13 +212,13 @@ export const HistoricalDashboard: React.FC = () => {
     }, 300);
 
     return () => { clearTimeout(timer); if (chainAbortController.current) chainAbortController.current.abort(); };
-  }, [selectedExpiry, simulationDate, simulationTime, expiries, strategyLegs]);
+  }, [selectedExpiry, simulationDate, simulationTime, expiries, allLegs]);
 
   // 3b. Fetch chains for off-expiry strategy legs so multi-expiry P&L stays live
   useEffect(() => {
-    if (!strategyMode || !simulationDate || !simulationTime || !strategyLegs.length) return;
+    if (!strategyMode || !simulationDate || !simulationTime || !allLegs.length) return;
 
-    const otherExpiries = [...new Set(strategyLegs.map(l => l.expiry).filter(e => e !== selectedExpiry))];
+    const otherExpiries = [...new Set(allLegs.map(l => l.expiry).filter(e => e !== selectedExpiry))];
     if (!otherExpiries.length) return;
 
     const timer = setTimeout(() => {
@@ -224,7 +230,7 @@ export const HistoricalDashboard: React.FC = () => {
 
       Promise.all(
         otherExpiries.map(expiry => {
-          const pinStrikes = strategyLegs.filter(l => l.expiry === expiry).map(l => l.strike);
+          const pinStrikes = allLegs.filter(l => l.expiry === expiry).map(l => l.strike);
           return historicalApi.getOptionChain(expiry, timestamp, signal, pinStrikes)
             .then(res => ({ expiry, chain: res.chain }));
         })
@@ -232,8 +238,7 @@ export const HistoricalDashboard: React.FC = () => {
         if (signal.aborted) return;
         setLegChains(prev => {
           const next = new Map(prev);
-          // Remove expiries that no longer have legs
-          const activeExpiries = new Set(strategyLegs.map(l => l.expiry));
+          const activeExpiries = new Set(allLegs.map(l => l.expiry));
           for (const key of next.keys()) if (!activeExpiries.has(key)) next.delete(key);
           results.forEach(({ expiry, chain }) => next.set(expiry, chain));
           return next;
@@ -242,7 +247,7 @@ export const HistoricalDashboard: React.FC = () => {
     }, 300);
 
     return () => { clearTimeout(timer); if (legChainsAbortController.current) legChainsAbortController.current.abort(); };
-  }, [simulationDate, simulationTime, strategyLegs, selectedExpiry, strategyMode]);
+  }, [simulationDate, simulationTime, allLegs, selectedExpiry, strategyMode]);
 
   // 4. Fetch Chart Data with AbortController
   useEffect(() => {
@@ -267,34 +272,52 @@ export const HistoricalDashboard: React.FC = () => {
     return () => { if (chartAbortController.current) chartAbortController.current.abort(); };
   }, [selectedExpiry, selectedOption, timeframe, strategyMode]);
 
-  // Strategy: add a leg
+  // Strategy: add a leg to the active strategy
   const addLeg = useCallback((strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => {
     const ts = simTimestamp();
-    setStrategyLegs(prev => [...prev, {
-      id: `${Date.now()}-${strike}-${type}-${action}`,
-      expiry: selectedExpiry,
-      strike,
-      type,
-      action,
-      qty: 1,
-      entryPremium: premium,
-      entryTimestamp: ts,
-    }]);
-  }, [selectedExpiry, simTimestamp]);
+    setStrategies(prev => prev.map(s => s.id !== activeStrategyId ? s : {
+      ...s,
+      legs: [...s.legs, {
+        id: `${Date.now()}-${strike}-${type}-${action}`,
+        expiry: selectedExpiry,
+        strike, type, action, qty: 1,
+        entryPremium: premium,
+        entryTimestamp: ts,
+      }]
+    }));
+  }, [activeStrategyId, selectedExpiry, simTimestamp]);
 
-  const removeLeg = useCallback((id: string) => {
-    setStrategyLegs(prev => prev.filter(l => l.id !== id));
+  const removeLeg = useCallback((stratId: string, legId: string) => {
+    setStrategies(prev => prev.map(s => s.id !== stratId ? s : {
+      ...s, legs: s.legs.filter(l => l.id !== legId)
+    }));
   }, []);
 
-  const updateLegQty = useCallback((id: string, qty: number) => {
-    setStrategyLegs(prev => prev.map(l => l.id === id ? { ...l, qty } : l));
+  const updateLegQty = useCallback((stratId: string, legId: string, qty: number) => {
+    setStrategies(prev => prev.map(s => s.id !== stratId ? s : {
+      ...s, legs: s.legs.map(l => l.id === legId ? { ...l, qty } : l)
+    }));
   }, []);
 
-  const clearLegs = useCallback(() => setStrategyLegs([]), []);
+  const clearLegs = useCallback((stratId: string) => {
+    setStrategies(prev => prev.map(s => s.id !== stratId ? s : { ...s, legs: [] }));
+  }, []);
 
-  const handleStrategyToggle = () => {
-    setStrategyMode(prev => !prev);
-  };
+  const addStrategy = useCallback(() => {
+    const newId = `s${Date.now()}`;
+    const n = strategies.length + 1;
+    setStrategies(prev => [...prev, { id: newId, label: `Strategy ${n}`, legs: [] }]);
+    setActiveStrategyId(newId);
+  }, [strategies.length]);
+
+  const removeStrategy = useCallback((stratId: string) => {
+    setStrategies(prev => {
+      const next = prev.filter(s => s.id !== stratId);
+      if (next.length === 0) return [{ id: 's1', label: 'Strategy 1', legs: [] }];
+      return next;
+    });
+    setActiveStrategyId(prev => prev === stratId ? strategies.find(s => s.id !== stratId)?.id ?? 's1' : prev);
+  }, [strategies]);
 
   return (
     <div className="historical-container">
@@ -323,7 +346,7 @@ export const HistoricalDashboard: React.FC = () => {
             strategyMode={strategyMode}
             legMap={(() => {
               const m = new Map<number, { ce?: 'BUY'|'SELL'; pe?: 'BUY'|'SELL' }>();
-              strategyLegs.filter(l => l.expiry === selectedExpiry).forEach(l => {
+              activeLegs.filter(l => l.expiry === selectedExpiry).forEach(l => {
                 const entry = m.get(l.strike) ?? {};
                 if (l.type === 'CE') entry.ce = l.action;
                 else entry.pe = l.action;
@@ -350,23 +373,27 @@ export const HistoricalDashboard: React.FC = () => {
               onClick={() => { setStrategyMode(true); }}
             >
               Strategy Builder
-              {strategyLegs.length > 0 && (
-                <span className="strategy-leg-count">{strategyLegs.length}</span>
+              {allLegs.length > 0 && (
+                <span className="strategy-leg-count">{allLegs.length}</span>
               )}
             </button>
           </div>
 
           {strategyMode ? (
             <StrategyPanel
-              legs={strategyLegs}
+              strategies={strategies}
+              activeStrategyId={activeStrategyId}
               chain={chain}
               legChains={legChains}
               spot={spot}
               selectedExpiry={selectedExpiry}
               simulationTimestamp={currentSimTimestamp}
+              onSetActiveStrategy={setActiveStrategyId}
+              onAddStrategy={addStrategy}
+              onRemoveStrategy={removeStrategy}
               onRemoveLeg={removeLeg}
               onUpdateQty={updateLegQty}
-              onClearAll={clearLegs}
+              onClearLegs={clearLegs}
             />
           ) : (
             <>
