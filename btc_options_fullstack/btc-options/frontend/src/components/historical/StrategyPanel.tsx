@@ -7,6 +7,128 @@ import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngin
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
+// ── MTM statistics ────────────────────────────────────────────────────────────
+interface DrawdownPeriod {
+  peakTime: number; peakPnl: number;
+  troughTime: number; troughPnl: number;
+  drawdown: number; // negative
+}
+interface MtmStats {
+  maxPnl: number; maxPnlTime: number;
+  minPnl: number; minPnlTime: number;
+  finalPnl: number;
+  maxDrawdown: number;
+  maxDdPeakTime: number; maxDdPeakPnl: number;
+  maxDdTroughTime: number; maxDdTroughPnl: number;
+  drawdowns: DrawdownPeriod[];
+}
+
+function computeMtmStats(data: MtmPoint[]): MtmStats | null {
+  if (data.length < 2) return null;
+  let maxPnl = -Infinity, maxPnlTime = data[0].time;
+  let minPnl = Infinity, minPnlTime = data[0].time;
+  let peakPnl = data[0].pnl, ddPeakPnl = data[0].pnl, ddPeakTime = data[0].time;
+  let troughPnl = data[0].pnl, troughTime = data[0].time;
+  let inDd = false;
+  const drawdowns: DrawdownPeriod[] = [];
+
+  for (const pt of data) {
+    if (pt.pnl > maxPnl) { maxPnl = pt.pnl; maxPnlTime = pt.time; }
+    if (pt.pnl < minPnl) { minPnl = pt.pnl; minPnlTime = pt.time; }
+    if (pt.pnl >= peakPnl) {
+      if (inDd) {
+        drawdowns.push({ peakTime: ddPeakTime, peakPnl: ddPeakPnl, troughTime, troughPnl, drawdown: troughPnl - ddPeakPnl });
+        inDd = false;
+      }
+      peakPnl = pt.pnl; ddPeakPnl = pt.pnl; ddPeakTime = pt.time;
+      troughPnl = pt.pnl; troughTime = pt.time;
+    } else {
+      inDd = true;
+      if (pt.pnl < troughPnl) { troughPnl = pt.pnl; troughTime = pt.time; }
+    }
+  }
+  if (inDd) drawdowns.push({ peakTime: ddPeakTime, peakPnl: ddPeakPnl, troughTime, troughPnl, drawdown: troughPnl - ddPeakPnl });
+  drawdowns.sort((a, b) => a.drawdown - b.drawdown); // worst first
+
+  const worst = drawdowns[0];
+  return {
+    maxPnl, maxPnlTime, minPnl, minPnlTime,
+    finalPnl: data[data.length - 1].pnl,
+    maxDrawdown: worst?.drawdown ?? 0,
+    maxDdPeakTime: worst?.peakTime ?? 0, maxDdPeakPnl: worst?.peakPnl ?? 0,
+    maxDdTroughTime: worst?.troughTime ?? 0, maxDdTroughPnl: worst?.troughPnl ?? 0,
+    drawdowns,
+  };
+}
+
+const IST = 5.5 * 3600;
+const fmtTs = (ts: number) => {
+  const d = new Date((ts + IST) * 1000);
+  return `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
+};
+
+const MtmStatsPanel: React.FC<{ stats: MtmStats; color?: string }> = ({ stats, color = 'var(--accent)' }) => {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="mtm-stats-panel">
+      <div className="mtm-stats-row" onClick={() => setExpanded(e => !e)} style={{ cursor: 'pointer' }}>
+        <span className="mtm-stats-title" style={{ color }}>MTM Stats</span>
+        <div className="mtm-stat">
+          <span className="mtm-stat-key">Max P&L</span>
+          <span className="mtm-stat-val" style={{ color: 'var(--green)' }}>+{stats.maxPnl.toFixed(2)}</span>
+          <span className="mtm-stat-time">{fmtTs(stats.maxPnlTime)}</span>
+        </div>
+        <div className="mtm-stat">
+          <span className="mtm-stat-key">Min P&L</span>
+          <span className="mtm-stat-val" style={{ color: stats.minPnl < 0 ? 'var(--red)' : 'var(--green)' }}>{stats.minPnl.toFixed(2)}</span>
+          <span className="mtm-stat-time">{fmtTs(stats.minPnlTime)}</span>
+        </div>
+        <div className="mtm-stat">
+          <span className="mtm-stat-key">Max DD</span>
+          <span className="mtm-stat-val" style={{ color: 'var(--red)' }}>{stats.maxDrawdown.toFixed(2)}</span>
+          <span className="mtm-stat-time">{fmtTs(stats.maxDdPeakTime)} → {fmtTs(stats.maxDdTroughTime)}</span>
+        </div>
+        <div className="mtm-stat">
+          <span className="mtm-stat-key">Final P&L</span>
+          <span className="mtm-stat-val" style={{ color: stats.finalPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+            {stats.finalPnl >= 0 ? '+' : ''}{stats.finalPnl.toFixed(2)}
+          </span>
+        </div>
+        <span className="mtm-stats-toggle">{expanded ? '▲' : '▼'} {stats.drawdowns.length} DD{stats.drawdowns.length !== 1 ? 's' : ''}</span>
+      </div>
+
+      {expanded && stats.drawdowns.length > 0 && (
+        <div className="mtm-dd-table-wrap">
+          <table className="mtm-dd-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Drawdown</th>
+                <th>Peak P&L</th>
+                <th>Peak Time</th>
+                <th>Trough P&L</th>
+                <th>Trough Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.drawdowns.map((dd, i) => (
+                <tr key={i}>
+                  <td style={{ color: 'var(--text3)' }}>{i + 1}</td>
+                  <td style={{ color: 'var(--red)', fontWeight: 600 }}>{dd.drawdown.toFixed(2)}</td>
+                  <td style={{ color: dd.peakPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{dd.peakPnl >= 0 ? '+' : ''}{dd.peakPnl.toFixed(2)}</td>
+                  <td style={{ color: 'var(--text3)' }}>{fmtTs(dd.peakTime)}</td>
+                  <td style={{ color: dd.troughPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{dd.troughPnl >= 0 ? '+' : ''}{dd.troughPnl.toFixed(2)}</td>
+                  <td style={{ color: 'var(--text3)' }}>{fmtTs(dd.troughTime)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
 interface Props {
   // Build mode
   legs: StrategyLeg[];
@@ -457,6 +579,18 @@ export const StrategyPanel: React.FC<Props> = ({
                 ))}
               </div>
               <CompareChart series={compareChartSeries} />
+              {/* Per-strategy stats */}
+              <div className="compare-stats-section">
+                {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
+                  const pts = compareMtmData.get(s.id);
+                  if (!pts?.length) return null;
+                  const stats = computeMtmStats(pts);
+                  if (!stats) return null;
+                  return (
+                    <MtmStatsPanel key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]} />
+                  );
+                })}
+              </div>
             </>
           ) : (
             <div className="strategy-chart-empty">
@@ -631,7 +765,10 @@ export const StrategyPanel: React.FC<Props> = ({
         {endPicker}
 
         {buildMtmData.length > 0 ? (
-          <MtmChart data={buildMtmData} />
+          <>
+            <MtmChart data={buildMtmData} />
+            {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
+          </>
         ) : (
           <div className="strategy-chart-empty">
             {legs.length > 0
