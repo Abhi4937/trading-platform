@@ -2,6 +2,8 @@ import React, { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffe
 import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
+import { CompareChart } from './CompareChart';
+import type { CompareSeries } from './CompareChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
 import type { StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
@@ -19,6 +21,8 @@ interface Props {
 }
 
 const fmt = (n: number, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+const LEG_COLORS = ['#00d4ff', '#f0b429', '#a78bfa', '#fb923c', '#34d399', '#f472b6', '#60a5fa', '#ff6b6b'];
 
 const LegQtyInput: React.FC<{ id: string; qty: number; onUpdateQty: (id: string, qty: number) => void }> = ({ id, qty, onUpdateQty }) => {
   const [val, setVal] = useState(String(qty));
@@ -66,6 +70,11 @@ export const StrategyPanel: React.FC<Props> = ({
   const prevLegsLengthRef = useRef(0);
   const [autoRunMtm, setAutoRunMtm] = useState(false);
 
+  // Compare mode — per-leg individual MTM curves
+  const [compareMode, setCompareMode] = useState(false);
+  const [legMtmData, setLegMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
+  const [compareLoading, setCompareLoading] = useState(false);
+
   // Keep endDate in sync when expiry changes (only if user hasn't changed it manually)
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
@@ -79,14 +88,16 @@ export const StrategyPanel: React.FC<Props> = ({
     if (legs.length === 0) {
       setMtmData([]);
       setLastMtmPrices(new Map());
+      setLegMtmData(new Map());
     } else if (legs.length < prevLen && mtmData.length > 0) {
       // Leg removed and MTM exists — schedule auto-recalc on next render
-      // (next render has fresh runMtm with updated legs in its closure)
       setAutoRunMtm(true);
+      setLegMtmData(new Map());
     } else if (legs.length > prevLen) {
       // New leg added — clear so user re-runs manually
       setMtmData([]);
       setLastMtmPrices(new Map());
+      setLegMtmData(new Map());
     }
   }, [legs]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -208,6 +219,38 @@ export const StrategyPanel: React.FC<Props> = ({
     }
   }, [legs, timeframe, endDate, endTime]);
 
+  // ─── Per-leg Compare run ──────────────────────────────────────────────────
+  const runCompare = useCallback(async () => {
+    if (!legs.length) return;
+    setCompareLoading(true);
+    setCompareMode(true);
+    try {
+      const entryTs = Math.min(...legs.map(l => l.entryTimestamp));
+      const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
+
+      const results = await Promise.all(
+        legs.map(leg =>
+          historicalApi.getChartData(leg.expiry, leg.strike, leg.type, entryTs, timeframe)
+            .then(res => ({ leg, data: res.data.filter(d => d.time >= entryTs && d.time <= endTs) }))
+        )
+      );
+
+      const map = new Map<string, MtmPoint[]>();
+      results.forEach(({ leg, data }) => {
+        const dir = leg.action === 'BUY' ? 1 : -1;
+        map.set(leg.id, data.map(d => ({
+          time: d.time,
+          pnl: (d.close - leg.entryPremium) * leg.qty * dir * 0.001,
+        })));
+      });
+      setLegMtmData(map);
+    } catch {
+      setCompareMode(false);
+    } finally {
+      setCompareLoading(false);
+    }
+  }, [legs, timeframe, endDate, endTime]);
+
   // Fires after autoRunMtm=true, by which time runMtm has fresh legs in closure
   useEffect(() => {
     if (autoRunMtm) {
@@ -215,6 +258,16 @@ export const StrategyPanel: React.FC<Props> = ({
       runMtm();
     }
   }, [autoRunMtm, runMtm]);
+
+  // Memoize compare series so CompareChart only re-renders when data actually changes
+  const compareSeries = useMemo(() =>
+    legs.map((leg, i) => ({
+      id: leg.id,
+      label: `${leg.action[0]} ${leg.strike} ${leg.type}`,
+      color: LEG_COLORS[i % LEG_COLORS.length],
+      data: legMtmData.get(leg.id) ?? [],
+    })),
+  [legs, legMtmData]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -237,8 +290,16 @@ export const StrategyPanel: React.FC<Props> = ({
               <button className="strategy-btn-secondary" onClick={onClearAll}>Clear</button>
             )}
             <button
-              className={`strategy-btn-run${loading ? ' loading' : ''}`}
-              onClick={runMtm}
+              className={`strategy-btn-secondary${compareMode ? ' active-mode' : ''}`}
+              onClick={runCompare}
+              disabled={compareLoading || !legs.length}
+              title="Show individual P&L curve per leg"
+            >
+              {compareLoading ? '…' : 'Compare ⊞'}
+            </button>
+            <button
+              className={`strategy-btn-run${loading ? ' loading' : ''}${!compareMode && mtmData.length > 0 ? ' active-mode' : ''}`}
+              onClick={() => { setCompareMode(false); runMtm(); }}
               disabled={loading || !legs.length}
             >
               {loading ? 'Calculating…' : 'Run MTM ▶'}
@@ -456,7 +517,7 @@ export const StrategyPanel: React.FC<Props> = ({
       {/* ── MTM chart card ── */}
       <div className="strategy-chart-card">
         <div className="strategy-chart-header">
-          <span className="strategy-chart-label">MTM P&amp;L</span>
+          <span className="strategy-chart-label">{compareMode ? 'Per-Leg P&L' : 'MTM P&L'}</span>
           {/* Timeframe buttons */}
           <div style={{ display: 'flex', gap: '3px' }}>
             {(['1m','5m','15m','30m','1h'] as const).map(tf => (
@@ -491,12 +552,25 @@ export const StrategyPanel: React.FC<Props> = ({
             </span>
           )}
         </div>
-        {mtmData.length > 0 ? (
+        {compareMode && legMtmData.size > 0 ? (
+          <>
+            {/* Legend */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 10px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              {legs.map((leg, i) => (
+                <span key={leg.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
+                  <span style={{ width: '10px', height: '2px', background: LEG_COLORS[i % LEG_COLORS.length], display: 'inline-block', borderRadius: '1px' }} />
+                  <span style={{ color: 'var(--text2)' }}>{leg.action[0]} {leg.strike} {leg.type} ({leg.expiry})</span>
+                </span>
+              ))}
+            </div>
+            <CompareChart series={compareSeries} />
+          </>
+        ) : !compareMode && mtmData.length > 0 ? (
           <MtmChart data={mtmData} />
         ) : (
           <div className="strategy-chart-empty">
             {legs.length > 0
-              ? 'Click "Run MTM ▶" to generate P&L curve'
+              ? <>Click <b>Run MTM ▶</b> for combined P&L or <b>Compare ⊞</b> for per-leg curves</>
               : 'Add legs to the strategy first'}
           </div>
         )}
