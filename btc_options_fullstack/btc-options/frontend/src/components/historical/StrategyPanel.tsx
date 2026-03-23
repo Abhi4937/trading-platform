@@ -115,13 +115,18 @@ export const StrategyPanel: React.FC<Props> = ({
   };
 
   // ─── Live P&L helpers ─────────────────────────────────────────────────────
+  // Only use live chain data when the chain's expiry matches the leg's expiry.
+  // Otherwise fall back to entryPremium so switching the expiry dropdown doesn't
+  // corrupt prices of legs that belong to a different expiry.
   const getCurrentPrice = (leg: StrategyLeg) => {
+    if (leg.expiry !== selectedExpiry) return leg.entryPremium;
     const row = chain.find(r => r.strike === leg.strike);
     if (!row) return leg.entryPremium;
     return leg.type === 'CE' ? row.call.last_price : row.put.last_price;
   };
 
   const getLegGreeks = (leg: StrategyLeg) => {
+    if (leg.expiry !== selectedExpiry) return null;
     const row = chain.find(r => r.strike === leg.strike);
     if (!row) return null;
     const opt = leg.type === 'CE' ? row.call : row.put;
@@ -256,6 +261,7 @@ export const StrategyPanel: React.FC<Props> = ({
               <thead>
                 <tr>
                   <th>Action</th>
+                  <th>Expiry</th>
                   <th>Strike</th>
                   <th>Type</th>
                   <th title="1 lot = 0.001 BTC · 1000 lots = 1 BTC">Lots</th>
@@ -282,6 +288,9 @@ export const StrategyPanel: React.FC<Props> = ({
                         <span className={`strategy-badge ${leg.action === 'BUY' ? 'buy' : 'sell'}`}>
                           {leg.action}
                         </span>
+                      </td>
+                      <td style={{ color: leg.expiry === selectedExpiry ? 'var(--accent)' : 'var(--text3)', fontSize: '10px', whiteSpace: 'nowrap' }}>
+                        {leg.expiry}
                       </td>
                       <td style={{ fontWeight: 700 }}>{leg.strike.toLocaleString()}</td>
                       <td>
