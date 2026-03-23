@@ -527,6 +527,43 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   max-height: 200px;
   overflow-y: auto;
 }
+.strategy-net-greeks {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+.net-greeks-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text3);
+  margin-right: 2px;
+}
+.net-greeks-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.net-greeks-stat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.net-greeks-key {
+  font-size: 9px;
+  color: var(--text3);
+  font-weight: 500;
+}
+.net-greeks-val {
+  font-size: 11px;
+  font-weight: 600;
+}
 .strategy-table {
   width: 100%;
   border-collapse: collapse;

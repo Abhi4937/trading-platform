@@ -107,11 +107,13 @@ export const StrategyPanel: React.FC<Props> = ({
     if (!row) return null;
     const opt = leg.type === 'CE' ? row.call : row.put;
     const dir = leg.action === 'BUY' ? 1 : -1;
+    const btc = leg.qty * 0.001; // chain Greeks are per 1 BTC (= 1000 lots)
     return {
       iv_pct: opt.iv_pct,
-      delta: opt.delta * leg.qty * dir,
-      theta: opt.theta * leg.qty * dir,
-      vega: opt.vega * leg.qty * dir,
+      delta: opt.delta * btc * dir,
+      gamma: opt.gamma * btc * dir,
+      theta: opt.theta * btc * dir,
+      vega: opt.vega * btc * dir,
     };
   };
 
@@ -121,6 +123,16 @@ export const StrategyPanel: React.FC<Props> = ({
   };
 
   const totalPnl = legs.reduce((s, l) => s + getLegPnl(l), 0);
+
+  const netGreeks = useMemo(() => {
+    let delta = 0, gamma = 0, theta = 0, vega = 0, hasData = false;
+    legs.forEach(leg => {
+      const g = getLegGreeks(leg);
+      if (g) { delta += g.delta; gamma += g.gamma; theta += g.theta; vega += g.vega; hasData = true; }
+    });
+    return hasData ? { delta, gamma, theta, vega } : null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [legs, chain, legChains, selectedExpiry]);
 
   // ── Margin (build mode) ────────────────────────────────────────────────────
   const marginResult = useMemo(() => {
@@ -296,6 +308,7 @@ export const StrategyPanel: React.FC<Props> = ({
             <th>P&amp;L</th>
             <th title="Implied Volatility %">IV%</th>
             <th title="Net Delta">Delta</th>
+            <th title="Net Gamma">Gamma</th>
             <th title="Net Theta">Theta</th>
             <th title="Net Vega">Vega</th>
             <th></th>
@@ -324,7 +337,10 @@ export const StrategyPanel: React.FC<Props> = ({
                 </td>
                 <td style={{ color: 'var(--gold)' }}>{greeks ? greeks.iv_pct.toFixed(1) : '-'}</td>
                 <td style={{ color: greeks && greeks.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                  {greeks ? (greeks.delta >= 0 ? '+' : '') + greeks.delta.toFixed(3) : '-'}
+                  {greeks ? (greeks.delta >= 0 ? '+' : '') + greeks.delta.toFixed(4) : '-'}
+                </td>
+                <td style={{ color: greeks && greeks.gamma >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {greeks ? (greeks.gamma >= 0 ? '+' : '') + greeks.gamma.toFixed(5) : '-'}
                 </td>
                 <td style={{ color: greeks && greeks.theta < 0 ? 'var(--red)' : 'var(--green)' }}>
                   {greeks ? (greeks.theta >= 0 ? '+' : '') + greeks.theta.toFixed(2) : '-'}
@@ -500,6 +516,45 @@ export const StrategyPanel: React.FC<Props> = ({
         ) : (
           renderLegsTable(legs, onRemoveLeg, onUpdateQty)
         )}
+
+        {/* ── Net portfolio Greeks summary ── */}
+        {legs.length > 0 && netGreeks && (
+          <div className="strategy-net-greeks">
+            <span className="net-greeks-label">Portfolio</span>
+            <div className="net-greeks-stat">
+              <span className="net-greeks-key">P&amp;L</span>
+              <span className="net-greeks-val" style={{ color: totalPnl >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+                {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USD
+              </span>
+            </div>
+            <div className="net-greeks-divider" />
+            <div className="net-greeks-stat">
+              <span className="net-greeks-key">Net Δ</span>
+              <span className="net-greeks-val" style={{ color: netGreeks.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {netGreeks.delta >= 0 ? '+' : ''}{netGreeks.delta.toFixed(4)}
+              </span>
+            </div>
+            <div className="net-greeks-stat">
+              <span className="net-greeks-key">Net Γ</span>
+              <span className="net-greeks-val" style={{ color: netGreeks.gamma >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {netGreeks.gamma >= 0 ? '+' : ''}{netGreeks.gamma.toFixed(5)}
+              </span>
+            </div>
+            <div className="net-greeks-stat">
+              <span className="net-greeks-key">Net θ</span>
+              <span className="net-greeks-val" style={{ color: netGreeks.theta < 0 ? 'var(--red)' : 'var(--green)' }}>
+                {netGreeks.theta >= 0 ? '+' : ''}{netGreeks.theta.toFixed(2)}
+              </span>
+            </div>
+            <div className="net-greeks-stat">
+              <span className="net-greeks-key">Net ν</span>
+              <span className="net-greeks-val" style={{ color: netGreeks.vega >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {netGreeks.vega >= 0 ? '+' : ''}{netGreeks.vega.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        )}
+
         {buildError && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{buildError}</div>}
       </div>
 
