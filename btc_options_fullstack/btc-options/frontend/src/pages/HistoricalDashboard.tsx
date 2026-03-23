@@ -5,12 +5,12 @@ import { HistoricalOptionChain } from '../components/historical/HistoricalOption
 import { HistoricalChart } from '../components/historical/HistoricalChart';
 import { StrategyPanel } from '../components/historical/StrategyPanel';
 import type { HistoricalChainRow, OHLCData } from '../types/historical';
-import type { Strategy } from '../types/strategy';
+import type { Strategy, StrategyLeg } from '../types/strategy';
 
 export const HistoricalDashboard: React.FC = () => {
   const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
-  const [simulationDate, setSimulationDate] = useState<string>(''); // YYYY-MM-DD
-  const [simulationTime, setSimulationTime] = useState<string>(''); // HH:mm
+  const [simulationDate, setSimulationDate] = useState<string>('');
+  const [simulationTime, setSimulationTime] = useState<string>('');
   const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
 
@@ -22,34 +22,44 @@ export const HistoricalDashboard: React.FC = () => {
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
-  // Strategy Builder — multiple strategies
+  // Panel mode
   const [strategyMode, setStrategyMode] = useState(false);
-  const [strategies, setStrategies] = useState<Strategy[]>([{ id: 's1', label: 'Strategy 1', legs: [] }]);
-  const [activeStrategyId, setActiveStrategyId] = useState<string>('s1');
 
-  // All legs across all strategies (for chain pin, legChains fetch)
-  const allLegs = useMemo(() => strategies.flatMap(s => s.legs), [strategies]);
-  // Active strategy's legs (for legMap, addLeg)
-  const activeLegs = useMemo(() => strategies.find(s => s.id === activeStrategyId)?.legs ?? [], [strategies, activeStrategyId]);
+  // Build mode — single strategy legs
+  const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
 
-  // AbortControllers to prevent race conditions
+  // Compare mode
+  const [panelMode, setPanelMode] = useState<'build' | 'compare'>('build');
+  const [compareStrategies, setCompareStrategies] = useState<Strategy[]>([]);
+  const [activeCompareStratId, setActiveCompareStratId] = useState<string>('');
+
+  // All legs (for pin strikes and legChains fetch)
+  const allLegs = useMemo(() => {
+    if (panelMode === 'compare') return compareStrategies.flatMap(s => s.legs);
+    return strategyLegs;
+  }, [panelMode, strategyLegs, compareStrategies]);
+
+  // Active legs for chain highlighting
+  const activeLegSet = useMemo(() => {
+    if (panelMode === 'compare') {
+      return compareStrategies.find(s => s.id === activeCompareStratId)?.legs ?? [];
+    }
+    return strategyLegs;
+  }, [panelMode, strategyLegs, compareStrategies, activeCompareStratId]);
+
   const chainAbortController = useRef<AbortController | null>(null);
   const chartAbortController = useRef<AbortController | null>(null);
   const legChainsAbortController = useRef<AbortController | null>(null);
 
-  // Chains for all off-expiry strategy legs (keyed by expiry string)
   const [legChains, setLegChains] = useState<Map<string, HistoricalChainRow[]>>(new Map());
 
-  // Computed simulation timestamp (IST) — as reactive value for margin engine
   const currentSimTimestamp = useMemo(() => {
     if (!simulationDate || !simulationTime) return 0;
     return Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
   }, [simulationDate, simulationTime]);
 
-  // Also as callback for addLeg (needs latest value at click time)
   const simTimestamp = useCallback(() => currentSimTimestamp, [currentSimTimestamp]);
 
-  // Generate expiries locally from date math (fast, no API call)
   const generateExpiries = useCallback((simDate: string) => {
     if (!simDate || !dataRange) return [];
 
@@ -73,18 +83,14 @@ export const HistoricalDashboard: React.FC = () => {
       return d;
     };
 
-    // This week's Friday (first Friday >= base)
     const thisWeekFriday = new Date(base);
     while (thisWeekFriday.getUTCDay() !== 5) thisWeekFriday.setUTCDate(thisWeekFriday.getUTCDate() + 1);
 
-    // Monthly expiries
     const baseYear = base.getUTCFullYear(), baseMonth = base.getUTCMonth();
     let monthly = lastFridayOfMonth(baseYear, baseMonth);
     if (dateStr(monthly) <= dateStr(base)) monthly = lastFridayOfMonth(baseYear, baseMonth + 1);
     const nextMonthly = lastFridayOfMonth(monthly.getUTCFullYear(), monthly.getUTCMonth() + 1);
 
-    // Daily slots: Current, Next, Next-to-Next
-    // If a daily slot is a Friday → label it "Weekly" (or "Monthly" if it coincides)
     const dailyLabel = (d: Date, fallback: string): string => {
       const s = dateStr(d);
       if (s === dateStr(monthly)) return 'Monthly';
@@ -101,18 +107,14 @@ export const HistoricalDashboard: React.FC = () => {
     const d2 = new Date(base); d2.setUTCDate(base.getUTCDate() + 2);
     add(d2, dailyLabel(d2, `Next-to-Next ${DAYS[d2.getUTCDay()]}`));
 
-    // Weekly — this week's Friday (if not already added as a daily slot)
     add(thisWeekFriday, dateStr(thisWeekFriday) === dateStr(monthly) ? 'Monthly' : 'Weekly');
 
-    // Next Weekly = next Friday after thisWeekFriday
     const nextWeekly = new Date(thisWeekFriday); nextWeekly.setUTCDate(thisWeekFriday.getUTCDate() + 7);
     add(nextWeekly, dateStr(nextWeekly) === dateStr(monthly) ? 'Monthly' : 'Next Weekly');
 
-    // Next-to-Next Weekly
     const ntnWeekly = new Date(nextWeekly); ntnWeekly.setUTCDate(nextWeekly.getUTCDate() + 7);
     add(ntnWeekly, dateStr(ntnWeekly) === dateStr(monthly) ? 'Monthly' : 'Next-to-Next Weekly');
 
-    // Monthly & Next Monthly
     add(monthly, 'Monthly');
     add(nextMonthly, 'Next Monthly');
 
@@ -120,17 +122,14 @@ export const HistoricalDashboard: React.FC = () => {
     return expList;
   }, [dataRange]);
 
-  // 1. Initial State Initialization
   useEffect(() => {
     historicalApi.getDataRange().then(range => {
       setDataRange(range);
-      // Use spot parquet max_ts as default date — accurate last day of real data
       const defaultDate = new Date(range.max_ts * 1000).toISOString().split('T')[0];
       setSimulationDate(defaultDate);
       setSimulationTime('00:00');
     }).catch(console.error);
   }, []);
-
 
   useEffect(() => {
     if (simulationDate) {
@@ -144,7 +143,6 @@ export const HistoricalDashboard: React.FC = () => {
     }
   }, [simulationDate, generateExpiries]);
 
-  // 2. Adjust Time Logic
   const adjustSimulationTime = useCallback((minutesToAdd: number) => {
     if (!simulationDate || !simulationTime) return;
     const current = new Date(`${simulationDate}T${simulationTime}:00+05:30`);
@@ -164,13 +162,10 @@ export const HistoricalDashboard: React.FC = () => {
     setSimulationTime(`${hour}:${minute}`);
   }, [simulationDate, simulationTime]);
 
-  // Auto-select ATM call on chain load + expiry change, auto-scroll to ATM
   useEffect(() => {
     if (chain.length > 0 && !strategyMode) {
       const atmRow = chain.find(r => r.is_atm);
-      if (atmRow) {
-        setSelectedOption({ strike: atmRow.strike, type: 'CE' });
-      }
+      if (atmRow) setSelectedOption({ strike: atmRow.strike, type: 'CE' });
       setTimeout(() => {
         const atmEl = document.querySelector('.atm-row');
         if (atmEl) atmEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -178,13 +173,11 @@ export const HistoricalDashboard: React.FC = () => {
     }
   }, [chain, strategyMode]);
 
-  // Reset selected option when expiry changes
   useEffect(() => {
     setSelectedOption(null);
     setChain([]);
   }, [selectedExpiry]);
 
-  // 3. Fetch Option Chain with AbortController + debounce
   useEffect(() => {
     const isValidExpiry = expiries.some(e => e.date === selectedExpiry);
     if (!selectedExpiry || !simulationDate || !simulationTime || !isValidExpiry) return;
@@ -194,18 +187,13 @@ export const HistoricalDashboard: React.FC = () => {
       chainAbortController.current = new AbortController();
 
       const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
-
-      // Pin strikes for any strategy legs on this expiry so they stay in the chain even after BTC moves
-      const pinStrikes = allLegs
-        .filter(l => l.expiry === selectedExpiry)
-        .map(l => l.strike);
+      const pinStrikes = allLegs.filter(l => l.expiry === selectedExpiry).map(l => l.strike);
 
       historicalApi.getOptionChain(selectedExpiry, timestamp, chainAbortController.current.signal, pinStrikes.length ? pinStrikes : undefined).then(res => {
         setChain(res.chain);
         setSpot((res as any).spot_actual || 0);
       }).catch(err => {
         if (err.name === 'AbortError') return;
-        console.error("Option chain fetch failed", err);
         setChain([]);
         setSpot(0);
       });
@@ -214,7 +202,6 @@ export const HistoricalDashboard: React.FC = () => {
     return () => { clearTimeout(timer); if (chainAbortController.current) chainAbortController.current.abort(); };
   }, [selectedExpiry, simulationDate, simulationTime, expiries, allLegs]);
 
-  // 3b. Fetch chains for off-expiry strategy legs so multi-expiry P&L stays live
   useEffect(() => {
     if (!strategyMode || !simulationDate || !simulationTime || !allLegs.length) return;
 
@@ -225,7 +212,6 @@ export const HistoricalDashboard: React.FC = () => {
       if (legChainsAbortController.current) legChainsAbortController.current.abort();
       legChainsAbortController.current = new AbortController();
       const signal = legChainsAbortController.current.signal;
-
       const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
 
       Promise.all(
@@ -249,75 +235,100 @@ export const HistoricalDashboard: React.FC = () => {
     return () => { clearTimeout(timer); if (legChainsAbortController.current) legChainsAbortController.current.abort(); };
   }, [simulationDate, simulationTime, allLegs, selectedExpiry, strategyMode]);
 
-  // 4. Fetch Chart Data with AbortController
   useEffect(() => {
     if (selectedExpiry && selectedOption && simulationDate && !strategyMode) {
       if (chartAbortController.current) chartAbortController.current.abort();
       chartAbortController.current = new AbortController();
 
-      historicalApi.getChartData(
-        selectedExpiry,
-        selectedOption.strike,
-        selectedOption.type,
-        0,
-        timeframe,
-        chartAbortController.current.signal
-      ).then(res => {
-        setChartData(res.data);
-      }).catch(err => {
-        if (err.name === 'AbortError') return;
-        console.error("Chart data fetch failed", err);
-      });
+      historicalApi.getChartData(selectedExpiry, selectedOption.strike, selectedOption.type, 0, timeframe, chartAbortController.current.signal)
+        .then(res => setChartData(res.data))
+        .catch(err => { if (err.name !== 'AbortError') console.error('Chart data fetch failed', err); });
     }
     return () => { if (chartAbortController.current) chartAbortController.current.abort(); };
   }, [selectedExpiry, selectedOption, timeframe, strategyMode]);
 
-  // Strategy: add a leg to the active strategy
+  // ── Build mode callbacks ───────────────────────────────────────────────────
   const addLeg = useCallback((strike: number, type: 'CE' | 'PE', action: 'BUY' | 'SELL', premium: number) => {
     const ts = simTimestamp();
-    setStrategies(prev => prev.map(s => s.id !== activeStrategyId ? s : {
-      ...s,
-      legs: [...s.legs, {
-        id: `${Date.now()}-${strike}-${type}-${action}`,
-        expiry: selectedExpiry,
-        strike, type, action, qty: 1,
-        entryPremium: premium,
-        entryTimestamp: ts,
-      }]
-    }));
-  }, [activeStrategyId, selectedExpiry, simTimestamp]);
+    const leg: StrategyLeg = {
+      id: `${Date.now()}-${strike}-${type}-${action}`,
+      expiry: selectedExpiry, strike, type, action, qty: 1,
+      entryPremium: premium, entryTimestamp: ts,
+    };
+    if (panelMode === 'compare') {
+      setCompareStrategies(prev => prev.map(s =>
+        s.id !== activeCompareStratId ? s : { ...s, legs: [...s.legs, leg] }
+      ));
+    } else {
+      setStrategyLegs(prev => [...prev, leg]);
+    }
+  }, [panelMode, activeCompareStratId, selectedExpiry, simTimestamp]);
 
-  const removeLeg = useCallback((stratId: string, legId: string) => {
-    setStrategies(prev => prev.map(s => s.id !== stratId ? s : {
-      ...s, legs: s.legs.filter(l => l.id !== legId)
-    }));
+  const removeLeg = useCallback((legId: string) => {
+    setStrategyLegs(prev => prev.filter(l => l.id !== legId));
   }, []);
 
-  const updateLegQty = useCallback((stratId: string, legId: string, qty: number) => {
-    setStrategies(prev => prev.map(s => s.id !== stratId ? s : {
-      ...s, legs: s.legs.map(l => l.id === legId ? { ...l, qty } : l)
-    }));
+  const updateLegQty = useCallback((legId: string, qty: number) => {
+    setStrategyLegs(prev => prev.map(l => l.id === legId ? { ...l, qty } : l));
   }, []);
 
-  const clearLegs = useCallback((stratId: string) => {
-    setStrategies(prev => prev.map(s => s.id !== stratId ? s : { ...s, legs: [] }));
+  const clearLegs = useCallback(() => setStrategyLegs([]), []);
+
+  // ── Compare mode callbacks ─────────────────────────────────────────────────
+  const enterCompare = useCallback(() => {
+    const s1Id = `cs1-${Date.now()}`;
+    const s1: Strategy = { id: s1Id, label: 'Strategy 1', legs: [...strategyLegs] };
+    setCompareStrategies([s1]);
+    setActiveCompareStratId(s1Id);
+    setPanelMode('compare');
+  }, [strategyLegs]);
+
+  const exitCompare = useCallback(() => {
+    setPanelMode('build');
   }, []);
 
-  const addStrategy = useCallback(() => {
-    const newId = `s${Date.now()}`;
-    const n = strategies.length + 1;
-    setStrategies(prev => [...prev, { id: newId, label: `Strategy ${n}`, legs: [] }]);
-    setActiveStrategyId(newId);
-  }, [strategies.length]);
-
-  const removeStrategy = useCallback((stratId: string) => {
-    setStrategies(prev => {
-      const next = prev.filter(s => s.id !== stratId);
-      if (next.length === 0) return [{ id: 's1', label: 'Strategy 1', legs: [] }];
-      return next;
+  const addCompareStrategy = useCallback(() => {
+    const newId = `cs${Date.now()}`;
+    setCompareStrategies(prev => {
+      const n = prev.length + 1;
+      return [...prev, { id: newId, label: `Strategy ${n}`, legs: [] }];
     });
-    setActiveStrategyId(prev => prev === stratId ? strategies.find(s => s.id !== stratId)?.id ?? 's1' : prev);
-  }, [strategies]);
+    setActiveCompareStratId(newId);
+  }, []);
+
+  const removeCompareStrategy = useCallback((stratId: string) => {
+    setCompareStrategies(prev => {
+      if (prev.length <= 1) return prev;
+      return prev.filter(s => s.id !== stratId);
+    });
+    setActiveCompareStratId(prev => {
+      if (prev !== stratId) return prev;
+      return compareStrategies.find(s => s.id !== stratId)?.id ?? '';
+    });
+  }, [compareStrategies]);
+
+  const removeCompareLeg = useCallback((stratId: string, legId: string) => {
+    setCompareStrategies(prev => prev.map(s =>
+      s.id !== stratId ? s : { ...s, legs: s.legs.filter(l => l.id !== legId) }
+    ));
+  }, []);
+
+  const updateCompareLegQty = useCallback((stratId: string, legId: string, qty: number) => {
+    setCompareStrategies(prev => prev.map(s =>
+      s.id !== stratId ? s : { ...s, legs: s.legs.map(l => l.id === legId ? { ...l, qty } : l) }
+    ));
+  }, []);
+
+  const clearCompareLegs = useCallback((stratId: string) => {
+    setCompareStrategies(prev => prev.map(s =>
+      s.id !== stratId ? s : { ...s, legs: [] }
+    ));
+  }, []);
+
+  // Leg count badge
+  const legCount = panelMode === 'compare'
+    ? compareStrategies.reduce((n, s) => n + s.legs.length, 0)
+    : strategyLegs.length;
 
   return (
     <div className="historical-container">
@@ -346,7 +357,7 @@ export const HistoricalDashboard: React.FC = () => {
             strategyMode={strategyMode}
             legMap={(() => {
               const m = new Map<number, { ce?: 'BUY'|'SELL'; pe?: 'BUY'|'SELL' }>();
-              activeLegs.filter(l => l.expiry === selectedExpiry).forEach(l => {
+              activeLegSet.filter(l => l.expiry === selectedExpiry).forEach(l => {
                 const entry = m.get(l.strike) ?? {};
                 if (l.type === 'CE') entry.ce = l.action;
                 else entry.pe = l.action;
@@ -360,40 +371,48 @@ export const HistoricalDashboard: React.FC = () => {
         </div>
 
         <div className="historical-chart-panel" style={{ width: strategyMode ? 'clamp(500px, 55vw, 900px)' : 'clamp(360px, 44vw, 640px)' }}>
-          {/* Panel mode toggle tabs */}
           <div className="chart-mode-bar">
             <button
               className={`chart-mode-tab${!strategyMode ? ' active' : ''}`}
-              onClick={() => { setStrategyMode(false); }}
+              onClick={() => setStrategyMode(false)}
             >
               Chart
             </button>
             <button
               className={`chart-mode-tab strategy${strategyMode ? ' active' : ''}`}
-              onClick={() => { setStrategyMode(true); }}
+              onClick={() => setStrategyMode(true)}
             >
               Strategy Builder
-              {allLegs.length > 0 && (
-                <span className="strategy-leg-count">{allLegs.length}</span>
-              )}
+              {legCount > 0 && <span className="strategy-leg-count">{legCount}</span>}
             </button>
           </div>
 
           {strategyMode ? (
             <StrategyPanel
-              strategies={strategies}
-              activeStrategyId={activeStrategyId}
+              // Build mode
+              legs={strategyLegs}
+              onRemoveLeg={removeLeg}
+              onUpdateQty={updateLegQty}
+              onClearLegs={clearLegs}
+              // Mode
+              compareMode={panelMode === 'compare'}
+              onEnterCompare={enterCompare}
+              onExitCompare={exitCompare}
+              // Compare mode
+              compareStrategies={compareStrategies}
+              activeCompareStratId={activeCompareStratId}
+              onSetActiveCompareStrat={setActiveCompareStratId}
+              onAddCompareStrategy={addCompareStrategy}
+              onRemoveCompareStrategy={removeCompareStrategy}
+              onRemoveCompareLeg={removeCompareLeg}
+              onUpdateCompareLegQty={updateCompareLegQty}
+              onClearCompareLegs={clearCompareLegs}
+              // Shared
               chain={chain}
               legChains={legChains}
               spot={spot}
               selectedExpiry={selectedExpiry}
               simulationTimestamp={currentSimTimestamp}
-              onSetActiveStrategy={setActiveStrategyId}
-              onAddStrategy={addStrategy}
-              onRemoveStrategy={removeStrategy}
-              onRemoveLeg={removeLeg}
-              onUpdateQty={updateLegQty}
-              onClearLegs={clearLegs}
             />
           ) : (
             <>
