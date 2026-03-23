@@ -29,6 +29,10 @@ export const HistoricalDashboard: React.FC = () => {
   // AbortControllers to prevent race conditions
   const chainAbortController = useRef<AbortController | null>(null);
   const chartAbortController = useRef<AbortController | null>(null);
+  const legChainsAbortController = useRef<AbortController | null>(null);
+
+  // Chains for all off-expiry strategy legs (keyed by expiry string)
+  const [legChains, setLegChains] = useState<Map<string, HistoricalChainRow[]>>(new Map());
 
   // Computed simulation timestamp (IST) — as reactive value for margin engine
   const currentSimTimestamp = useMemo(() => {
@@ -204,6 +208,42 @@ export const HistoricalDashboard: React.FC = () => {
     return () => { clearTimeout(timer); if (chainAbortController.current) chainAbortController.current.abort(); };
   }, [selectedExpiry, simulationDate, simulationTime, expiries, strategyLegs]);
 
+  // 3b. Fetch chains for off-expiry strategy legs so multi-expiry P&L stays live
+  useEffect(() => {
+    if (!strategyMode || !simulationDate || !simulationTime || !strategyLegs.length) return;
+
+    const otherExpiries = [...new Set(strategyLegs.map(l => l.expiry).filter(e => e !== selectedExpiry))];
+    if (!otherExpiries.length) return;
+
+    const timer = setTimeout(() => {
+      if (legChainsAbortController.current) legChainsAbortController.current.abort();
+      legChainsAbortController.current = new AbortController();
+      const signal = legChainsAbortController.current.signal;
+
+      const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
+
+      Promise.all(
+        otherExpiries.map(expiry => {
+          const pinStrikes = strategyLegs.filter(l => l.expiry === expiry).map(l => l.strike);
+          return historicalApi.getOptionChain(expiry, timestamp, signal, pinStrikes)
+            .then(res => ({ expiry, chain: res.chain }));
+        })
+      ).then(results => {
+        if (signal.aborted) return;
+        setLegChains(prev => {
+          const next = new Map(prev);
+          // Remove expiries that no longer have legs
+          const activeExpiries = new Set(strategyLegs.map(l => l.expiry));
+          for (const key of next.keys()) if (!activeExpiries.has(key)) next.delete(key);
+          results.forEach(({ expiry, chain }) => next.set(expiry, chain));
+          return next;
+        });
+      }).catch(err => { if (err.name !== 'AbortError') console.error('leg-chain fetch failed', err); });
+    }, 300);
+
+    return () => { clearTimeout(timer); if (legChainsAbortController.current) legChainsAbortController.current.abort(); };
+  }, [simulationDate, simulationTime, strategyLegs, selectedExpiry, strategyMode]);
+
   // 4. Fetch Chart Data with AbortController
   useEffect(() => {
     if (selectedExpiry && selectedOption && simulationDate && !strategyMode) {
@@ -320,6 +360,7 @@ export const HistoricalDashboard: React.FC = () => {
             <StrategyPanel
               legs={strategyLegs}
               chain={chain}
+              legChains={legChains}
               spot={spot}
               selectedExpiry={selectedExpiry}
               simulationTimestamp={currentSimTimestamp}

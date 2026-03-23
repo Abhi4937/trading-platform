@@ -9,6 +9,7 @@ import type { HistoricalChainRow } from '../../types/historical';
 interface Props {
   legs: StrategyLeg[];
   chain: HistoricalChainRow[];
+  legChains: Map<string, HistoricalChainRow[]>;
   spot: number;
   selectedExpiry: string;
   simulationTimestamp: number;
@@ -50,7 +51,7 @@ function leverageColor(lev: number): string {
 }
 
 export const StrategyPanel: React.FC<Props> = ({
-  legs, chain, spot, selectedExpiry, simulationTimestamp,
+  legs, chain, legChains, spot, selectedExpiry, simulationTimestamp,
   onRemoveLeg, onUpdateQty, onClearAll
 }) => {
   const [mtmData, setMtmData] = useState<MtmPoint[]>([]);
@@ -115,19 +116,20 @@ export const StrategyPanel: React.FC<Props> = ({
   };
 
   // ─── Live P&L helpers ─────────────────────────────────────────────────────
-  // Only use live chain data when the chain's expiry matches the leg's expiry.
-  // Otherwise fall back to entryPremium so switching the expiry dropdown doesn't
-  // corrupt prices of legs that belong to a different expiry.
+  // Resolve the correct chain for a leg's expiry:
+  //   - selectedExpiry → use the main `chain` prop (already fetched)
+  //   - any other expiry → use legChains map (fetched in parallel by HistoricalDashboard)
+  const getChainForLeg = (leg: StrategyLeg): HistoricalChainRow[] =>
+    leg.expiry === selectedExpiry ? chain : (legChains.get(leg.expiry) ?? []);
+
   const getCurrentPrice = (leg: StrategyLeg) => {
-    if (leg.expiry !== selectedExpiry) return leg.entryPremium;
-    const row = chain.find(r => r.strike === leg.strike);
+    const row = getChainForLeg(leg).find(r => r.strike === leg.strike);
     if (!row) return leg.entryPremium;
     return leg.type === 'CE' ? row.call.last_price : row.put.last_price;
   };
 
   const getLegGreeks = (leg: StrategyLeg) => {
-    if (leg.expiry !== selectedExpiry) return null;
-    const row = chain.find(r => r.strike === leg.strike);
+    const row = getChainForLeg(leg).find(r => r.strike === leg.strike);
     if (!row) return null;
     const opt = leg.type === 'CE' ? row.call : row.put;
     const dir = leg.action === 'BUY' ? 1 : -1;
