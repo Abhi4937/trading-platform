@@ -130,3 +130,34 @@ a6059e6 feat: responsive UI, lot stepper, B/S fixes, date picker max fix
  M frontend/src/types/strategy.ts
 ?? "UI ss/"
 ```
+
+---
+## Snapshot — 2026-03-25 04:55 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+d646676 feat: MTM statistics panel — max/min P&L, max drawdown, all drawdown periods
+c9d67bf feat: fix Greeks scaling + add Gamma to strategy table and net portfolio summary
+8e8ba0f refactor: separate build and compare modes — clean single-strategy builder + dedicated compare view
+5571411 feat: multi-strategy compare — add/switch strategies, MTM curves per strategy on shared chart
+da644eb feat: Compare button — per-leg MTM curves on shared chart
+499fa12 docs: add RULE #2 — commit and push before starting new work
+1d4965b feat: multi-expiry strategy support — live P&L for all legs across expiries
+110bfde style: tighten fonts/spacing + fix multi-expiry current price bug + add expiry column
+6bf6ce3 style: increase chart/strategy builder panel width, shrink chain panel
+5d5ffcd feat: add Greeks columns to strategy table + wider panel
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../src/components/historical/StrategyPanel.tsx    | 23 ++++++++++++++++++++-
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 24 ++++++++++++++--------
+ 2 files changed, 38 insertions(+), 9 deletions(-)
+```
+
+### Git Status
+```
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/pages/HistoricalDashboard.tsx
+?? "UI ss/"
+```

@@ -338,7 +338,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   return (
     <div className="historical-container">
-      {!maximized && <div className="replay-wrapper">
+      <div className="replay-wrapper">
         <ReplayController
           simulationDate={simulationDate}
           simulationTime={simulationTime}
@@ -354,7 +354,7 @@ export const HistoricalDashboard: React.FC = () => {
           onStep={adjustSimulationTime}
           onStrikeFilterChange={setStrikeFilter}
         />
-      </div>}
+      </div>
 
       <div className="historical-main">
         {!maximized && <div className="historical-chain-panel">

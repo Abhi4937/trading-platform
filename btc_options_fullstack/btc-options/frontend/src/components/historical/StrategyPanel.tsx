@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
 import { MtmChart } from './MtmChart';
@@ -48,7 +48,7 @@ function computeMtmStats(data: MtmPoint[]): MtmStats | null {
     }
   }
   if (inDd) drawdowns.push({ peakTime: ddPeakTime, peakPnl: ddPeakPnl, troughTime, troughPnl, drawdown: troughPnl - ddPeakPnl });
-  drawdowns.sort((a, b) => a.drawdown - b.drawdown); // worst first
+  drawdowns.sort((a, b) => a.peakTime - b.peakTime); // chronological
 
   const worst = drawdowns[0];
   return {
@@ -207,11 +207,56 @@ export const StrategyPanel: React.FC<Props> = ({
   const [compareError, setCompareError] = useState('');
 
   const [marginExpanded, setMarginExpanded] = useState(false);
+  const [legsExpanded, setLegsExpanded] = useState(true);
+  const [compareLegsExpanded, setCompareLegsExpanded] = useState(true);
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
 
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
+
+  // Collapse legs + margin when maximizing, restore when restoring
+  useEffect(() => {
+    if (maximized) { setLegsExpanded(false); setMarginExpanded(false); setCompareLegsExpanded(false); }
+    else { setLegsExpanded(true); setCompareLegsExpanded(true); }
+  }, [maximized]);
+
+  // ── Chart / stats resize ───────────────────────────────────────────────────
+  const [chartHeightPx, setChartHeightPx] = useState(220);
+  const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const onDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragRef.current = { startY: e.clientY, startH: chartHeightPx };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      setChartHeightPx(Math.max(80, dragRef.current.startH + ev.clientY - dragRef.current.startY));
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [chartHeightPx]);
+
+  const [compareChartHeightPx, setCompareChartHeightPx] = useState(220);
+  const compareDragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const onCompareDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    compareDragRef.current = { startY: e.clientY, startH: compareChartHeightPx };
+    const onMove = (ev: MouseEvent) => {
+      if (!compareDragRef.current) return;
+      setCompareChartHeightPx(Math.max(80, compareDragRef.current.startH + ev.clientY - compareDragRef.current.startY));
+    };
+    const onUp = () => {
+      compareDragRef.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [compareChartHeightPx]);
 
   // Clear MTM when legs or compare strategies change
   useEffect(() => { setBuildMtmData([]); setBuildError(''); }, [legs]);
@@ -513,6 +558,14 @@ export const StrategyPanel: React.FC<Props> = ({
             >
               {maximized ? '⊡' : '⊞'}
             </button>
+            <span
+              className="mtm-stats-toggle"
+              onClick={() => setCompareLegsExpanded(e => !e)}
+              style={{ cursor: 'pointer' }}
+              title={compareLegsExpanded ? 'Collapse legs' : 'Expand legs'}
+            >
+              {compareLegsExpanded ? '▲' : '▼'} {activeLegs.length} leg{activeLegs.length !== 1 ? 's' : ''}
+            </span>
           </div>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
             <button
@@ -548,31 +601,33 @@ export const StrategyPanel: React.FC<Props> = ({
         </div>
 
         {/* ── Active strategy legs ── */}
-        <div className="strategy-legs-card">
-          <div className="strategy-header">
-            <span className="strategy-title" style={{ color: STRAT_COLORS[(compareStrategies.findIndex(s => s.id === activeCompareStratId)) % STRAT_COLORS.length] }}>
-              {activeCompareStrat?.label}
-            </span>
-            {activeLegs.length > 0 && (
-              <button className="strategy-btn-secondary" onClick={() => onClearCompareLegs(activeCompareStratId)}>Clear</button>
-            )}
-          </div>
-          {activeLegs.length === 0 ? (
-            <div className="strategy-empty">
-              Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg to {activeCompareStrat?.label}
+        {compareLegsExpanded && (
+          <div className="strategy-legs-card">
+            <div className="strategy-header">
+              <span className="strategy-title" style={{ color: STRAT_COLORS[(compareStrategies.findIndex(s => s.id === activeCompareStratId)) % STRAT_COLORS.length] }}>
+                {activeCompareStrat?.label}
+              </span>
+              {activeLegs.length > 0 && (
+                <button className="strategy-btn-secondary" onClick={() => onClearCompareLegs(activeCompareStratId)}>Clear</button>
+              )}
             </div>
-          ) : (
-            renderLegsTable(
-              activeLegs,
-              legId => onRemoveCompareLeg(activeCompareStratId, legId),
-              (legId, qty) => onUpdateCompareLegQty(activeCompareStratId, legId, qty),
-            )
-          )}
-          {compareError && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{compareError}</div>}
-        </div>
+            {activeLegs.length === 0 ? (
+              <div className="strategy-empty">
+                Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg to {activeCompareStrat?.label}
+              </div>
+            ) : (
+              renderLegsTable(
+                activeLegs,
+                legId => onRemoveCompareLeg(activeCompareStratId, legId),
+                (legId, qty) => onUpdateCompareLegQty(activeCompareStratId, legId, qty),
+              )
+            )}
+            {compareError && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{compareError}</div>}
+          </div>
+        )}
 
         {/* ── Compare MTM chart ── */}
-        <div className="strategy-chart-card">
+        <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0 }}>
           <div className="strategy-chart-header">
             <span className="strategy-chart-label">Strategy Comparison</span>
             {chartControls}
@@ -589,18 +644,22 @@ export const StrategyPanel: React.FC<Props> = ({
                   </span>
                 ))}
               </div>
-              <CompareChart series={compareChartSeries} />
-              {/* Per-strategy stats */}
-              <div className="compare-stats-section">
-                {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
-                  const pts = compareMtmData.get(s.id);
-                  if (!pts?.length) return null;
-                  const stats = computeMtmStats(pts);
-                  if (!stats) return null;
-                  return (
-                    <MtmStatsPanel key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]} />
-                  );
-                })}
+              <div style={{ height: compareChartHeightPx, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+                <CompareChart series={compareChartSeries} />
+              </div>
+              <div className="chart-resize-handle" onMouseDown={onCompareDragHandleMouseDown} />
+              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+                <div className="compare-stats-section">
+                  {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
+                    const pts = compareMtmData.get(s.id);
+                    if (!pts?.length) return null;
+                    const stats = computeMtmStats(pts);
+                    if (!stats) return null;
+                    return (
+                      <MtmStatsPanel key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]} />
+                    );
+                  })}
+                </div>
               </div>
             </>
           ) : (
@@ -634,6 +693,14 @@ export const StrategyPanel: React.FC<Props> = ({
             >
               {maximized ? '⊡' : '⊞'}
             </button>
+            <span
+              className="mtm-stats-toggle"
+              onClick={() => setLegsExpanded(e => !e)}
+              style={{ cursor: 'pointer' }}
+              title={legsExpanded ? 'Collapse legs' : 'Expand legs'}
+            >
+              {legsExpanded ? '▲' : '▼'} {legs.length} leg{legs.length !== 1 ? 's' : ''}
+            </span>
           </div>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
             {legs.length > 0 && (
@@ -664,16 +731,16 @@ export const StrategyPanel: React.FC<Props> = ({
           </div>
         </div>
 
-        {legs.length === 0 ? (
+        {legsExpanded && (legs.length === 0 ? (
           <div className="strategy-empty">
             Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg
           </div>
         ) : (
           renderLegsTable(legs, onRemoveLeg, onUpdateQty)
-        )}
+        ))}
 
         {/* ── Net portfolio Greeks summary ── */}
-        {legs.length > 0 && netGreeks && (
+        {legsExpanded && legs.length > 0 && netGreeks && (
           <div className="strategy-net-greeks">
             <span className="net-greeks-label">Portfolio</span>
             <div className="net-greeks-stat">
@@ -714,36 +781,42 @@ export const StrategyPanel: React.FC<Props> = ({
       </div>
 
       {/* ── Portfolio Margin ── */}
-      {marginResult && legs.length > 0 && (
+      {legs.length > 0 && (
         <div className="margin-card">
-          <div className="margin-compact-row" onClick={() => setMarginExpanded(e => !e)}>
-            <div className="margin-kv">
-              <span className="margin-label">Margin Req.</span>
-              <span className="margin-val">{fmt(marginResult.portfolioMargin)} USDT</span>
-            </div>
-            <div className="margin-kv">
-              <span className="margin-label">Leverage</span>
-              <span className="margin-val" style={{ color: leverageColor(marginResult.effectiveLeverage) }}>
-                {marginResult.effectiveLeverage.toFixed(1)}×
-              </span>
-            </div>
-            <div className="margin-kv">
-              <span className="margin-label">Net Δ</span>
-              <span className="margin-val" style={{ color: marginResult.netDeltaBtc >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                {marginResult.netDeltaBtc >= 0 ? '+' : ''}{marginResult.netDeltaBtc.toFixed(4)} BTC
-              </span>
-            </div>
-            <span className={`margin-binding-badge ${marginResult.bindingConstraint}`}>
-              {marginResult.bindingConstraint === 'risk_margin' ? 'Risk Margin' : 'Margin Floor'}
-            </span>
-            <span className="margin-expand-toggle">{marginExpanded ? '▲' : '▼'}</span>
+          <div className="margin-compact-row" onClick={() => marginResult && setMarginExpanded(e => !e)}>
+            {marginResult ? (
+              <>
+                <div className="margin-kv">
+                  <span className="margin-label">Margin Req.</span>
+                  <span className="margin-val">{fmt(marginResult.portfolioMargin)} USDT</span>
+                </div>
+                <div className="margin-kv">
+                  <span className="margin-label">Leverage</span>
+                  <span className="margin-val" style={{ color: leverageColor(marginResult.effectiveLeverage) }}>
+                    {marginResult.effectiveLeverage.toFixed(1)}×
+                  </span>
+                </div>
+                <div className="margin-kv">
+                  <span className="margin-label">Net Δ</span>
+                  <span className="margin-val" style={{ color: marginResult.netDeltaBtc >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                    {marginResult.netDeltaBtc >= 0 ? '+' : ''}{marginResult.netDeltaBtc.toFixed(4)} BTC
+                  </span>
+                </div>
+                <span className={`margin-binding-badge ${marginResult.bindingConstraint}`}>
+                  {marginResult.bindingConstraint === 'risk_margin' ? 'Risk Margin' : 'Margin Floor'}
+                </span>
+                <span className="margin-expand-toggle">{marginExpanded ? '▲' : '▼'}</span>
+              </>
+            ) : (
+              <span style={{ fontSize: '11px', color: 'var(--text3)' }}>Margin: N/A — mark price unavailable at this timestamp</span>
+            )}
           </div>
-          {marginResult.skippedLegs > 0 && (
+          {marginResult && marginResult.skippedLegs > 0 && (
             <div className="margin-skip-warning">
               ⚠ {marginResult.skippedLegs} leg{marginResult.skippedLegs > 1 ? 's' : ''} excluded — mark price is 0 at this timestamp
             </div>
           )}
-          {marginExpanded && (
+          {marginResult && marginExpanded && (
             <div className="margin-detail">
               <div className="margin-detail-grid">
                 <div className="margin-detail-row"><span className="margin-detail-label">Risk Margin</span><span className="margin-detail-val">{fmt(marginResult.riskMargin)} USDT</span></div>
@@ -778,7 +851,7 @@ export const StrategyPanel: React.FC<Props> = ({
       )}
 
       {/* ── MTM chart ── */}
-      <div className="strategy-chart-card">
+      <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0 }}>
         <div className="strategy-chart-header">
           <span className="strategy-chart-label">MTM P&amp;L</span>
           {chartControls}
@@ -787,8 +860,13 @@ export const StrategyPanel: React.FC<Props> = ({
 
         {buildMtmData.length > 0 ? (
           <>
-            <MtmChart data={buildMtmData} />
-            {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
+            <div style={{ height: chartHeightPx, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+              <MtmChart data={buildMtmData} />
+            </div>
+            <div className="chart-resize-handle" onMouseDown={onDragHandleMouseDown} />
+            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+              {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
+            </div>
           </>
         ) : (
           <div className="strategy-chart-empty">
