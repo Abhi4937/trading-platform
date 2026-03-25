@@ -154,6 +154,8 @@ interface Props {
   spot: number;
   selectedExpiry: string;
   simulationTimestamp: number;
+  maximized: boolean;
+  onToggleMaximize: () => void;
 }
 
 const fmt = (n: number, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -192,6 +194,7 @@ export const StrategyPanel: React.FC<Props> = ({
   onAddCompareStrategy, onRemoveCompareStrategy,
   onRemoveCompareLeg, onUpdateCompareLegQty, onClearCompareLegs,
   chain, legChains, spot, selectedExpiry, simulationTimestamp,
+  maximized, onToggleMaximize,
 }) => {
   // Build mode MTM
   const [buildMtmData, setBuildMtmData] = useState<MtmPoint[]>([]);
@@ -502,6 +505,14 @@ export const StrategyPanel: React.FC<Props> = ({
               ← Back
             </button>
             <span className="strategy-title" style={{ color: 'var(--accent)' }}>Strategy Compare</span>
+            <button
+              className="strategy-btn-secondary"
+              onClick={onToggleMaximize}
+              title={maximized ? 'Restore' : 'Maximise'}
+              style={{ fontSize: '13px', padding: '1px 6px', lineHeight: 1 }}
+            >
+              {maximized ? '⊡' : '⊞'}
+            </button>
           </div>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
             <button
@@ -613,7 +624,17 @@ export const StrategyPanel: React.FC<Props> = ({
       {/* ── Legs card ── */}
       <div className="strategy-legs-card">
         <div className="strategy-header">
-          <span className="strategy-title">Strategy Builder</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span className="strategy-title">Strategy Builder</span>
+            <button
+              className="strategy-btn-secondary"
+              onClick={onToggleMaximize}
+              title={maximized ? 'Restore' : 'Maximise'}
+              style={{ fontSize: '13px', padding: '1px 6px', lineHeight: 1 }}
+            >
+              {maximized ? '⊡' : '⊞'}
+            </button>
+          </div>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
             {legs.length > 0 && (
               <span style={{ fontSize: '12px', fontWeight: 700, color: totalPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>

@@ -24,6 +24,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   // Panel mode
   const [strategyMode, setStrategyMode] = useState(false);
+  const [maximized, setMaximized] = useState(false);
 
   // Build mode — single strategy legs
   const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
@@ -60,11 +61,16 @@ export const HistoricalDashboard: React.FC = () => {
 
   const simTimestamp = useCallback(() => currentSimTimestamp, [currentSimTimestamp]);
 
-  const generateExpiries = useCallback((simDate: string) => {
+  const generateExpiries = useCallback((simDate: string, simTime: string) => {
     if (!simDate || !dataRange) return [];
 
     const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    // After 17:30 IST (settlement), today's contracts have expired — advance base to next day
     const base = new Date(simDate + 'T00:00:00Z');
+    if (simTime) {
+      const [h, m] = simTime.split(':').map(Number);
+      if (h * 60 + m >= 17 * 60 + 30) base.setUTCDate(base.getUTCDate() + 1);
+    }
     const dateStr = (d: Date) => d.toISOString().split('T')[0];
     const addedDates = new Set<string>();
     const expList: {date: string, label: string}[] = [];
@@ -133,7 +139,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   useEffect(() => {
     if (simulationDate) {
-      const newList = generateExpiries(simulationDate);
+      const newList = generateExpiries(simulationDate, simulationTime);
       setExpiries(newList);
       if (newList.length > 0 && !newList.find(e => e.date === selectedExpiry)) {
         setSelectedExpiry(newList[0].date);
@@ -141,7 +147,7 @@ export const HistoricalDashboard: React.FC = () => {
     } else {
       setExpiries([]);
     }
-  }, [simulationDate, generateExpiries]);
+  }, [simulationDate, simulationTime, generateExpiries]);
 
   const adjustSimulationTime = useCallback((minutesToAdd: number) => {
     if (!simulationDate || !simulationTime) return;
@@ -332,7 +338,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   return (
     <div className="historical-container">
-      <div className="replay-wrapper">
+      {!maximized && <div className="replay-wrapper">
         <ReplayController
           simulationDate={simulationDate}
           simulationTime={simulationTime}
@@ -348,10 +354,10 @@ export const HistoricalDashboard: React.FC = () => {
           onStep={adjustSimulationTime}
           onStrikeFilterChange={setStrikeFilter}
         />
-      </div>
+      </div>}
 
       <div className="historical-main">
-        <div className="historical-chain-panel">
+        {!maximized && <div className="historical-chain-panel">
           <HistoricalOptionChain
             chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain}
             strategyMode={strategyMode}
@@ -368,9 +374,9 @@ export const HistoricalDashboard: React.FC = () => {
             onSelectOption={(s, t) => setSelectedOption({ strike: s, type: t })}
             onAddLeg={addLeg}
           />
-        </div>
+        </div>}
 
-        <div className="historical-chart-panel" style={{ width: strategyMode ? 'clamp(500px, 55vw, 900px)' : 'clamp(360px, 44vw, 640px)' }}>
+        <div className="historical-chart-panel" style={{ width: maximized ? '100%' : strategyMode ? 'clamp(500px, 55vw, 900px)' : 'clamp(360px, 44vw, 640px)' }}>
           <div className="chart-mode-bar">
             <button
               className={`chart-mode-tab${!strategyMode ? ' active' : ''}`}
@@ -413,6 +419,8 @@ export const HistoricalDashboard: React.FC = () => {
               spot={spot}
               selectedExpiry={selectedExpiry}
               simulationTimestamp={currentSimTimestamp}
+              maximized={maximized}
+              onToggleMaximize={() => setMaximized(m => !m)}
             />
           ) : (
             <>
