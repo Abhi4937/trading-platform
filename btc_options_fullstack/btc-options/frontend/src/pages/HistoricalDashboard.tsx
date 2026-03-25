@@ -26,6 +26,28 @@ export const HistoricalDashboard: React.FC = () => {
   const [strategyMode, setStrategyMode] = useState(false);
   const [maximized, setMaximized] = useState(false);
 
+  // Horizontal panel resize
+  const [chartPanelWidth, setChartPanelWidth] = useState<number | null>(null);
+  const panelDragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const chartPanelRef = useRef<HTMLDivElement>(null);
+  const onPanelDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const currentW = chartPanelRef.current?.offsetWidth ?? chartPanelWidth ?? 500;
+    panelDragRef.current = { startX: e.clientX, startW: currentW };
+    const onMove = (ev: MouseEvent) => {
+      if (!panelDragRef.current) return;
+      const delta = panelDragRef.current.startX - ev.clientX;
+      setChartPanelWidth(Math.max(320, panelDragRef.current.startW + delta));
+    };
+    const onUp = () => {
+      panelDragRef.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [chartPanelWidth]);
+
   // Build mode — single strategy legs
   const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
 
@@ -357,7 +379,7 @@ export const HistoricalDashboard: React.FC = () => {
       </div>
 
       <div className="historical-main">
-        {!maximized && <div className="historical-chain-panel">
+        {!maximized && <div className="historical-chain-panel" style={{ flex: 1, minWidth: 0 }}>
           <HistoricalOptionChain
             chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain}
             strategyMode={strategyMode}
@@ -376,7 +398,11 @@ export const HistoricalDashboard: React.FC = () => {
           />
         </div>}
 
-        <div className="historical-chart-panel" style={{ width: maximized ? '100%' : strategyMode ? 'clamp(500px, 55vw, 900px)' : 'clamp(360px, 44vw, 640px)' }}>
+        {!maximized && (
+          <div className="panel-divider" onMouseDown={onPanelDividerMouseDown} />
+        )}
+
+        <div ref={chartPanelRef} className="historical-chart-panel" style={{ width: maximized ? '100%' : chartPanelWidth ? `${chartPanelWidth}px` : strategyMode ? 'clamp(500px, 55vw, 900px)' : 'clamp(360px, 44vw, 640px)', flexShrink: 0 }}>
           <div className="chart-mode-bar">
             <button
               className={`chart-mode-tab${!strategyMode ? ' active' : ''}`}

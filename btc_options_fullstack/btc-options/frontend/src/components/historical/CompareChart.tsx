@@ -85,6 +85,19 @@ export const CompareChart: React.FC<Props> = ({ series }) => {
       }
     });
 
+    // Zero reference line
+    const firstSr = seriesRefs.current.values().next().value;
+    if (firstSr) {
+      firstSr.createPriceLine({
+        price: 0,
+        color: 'rgba(180,180,180,0.35)',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: '',
+      });
+    }
+
     // fitContent after DOM has fully laid out
     rafRef.current = requestAnimationFrame(() => {
       chart.timeScale().fitContent();

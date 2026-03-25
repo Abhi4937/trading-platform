@@ -385,6 +385,27 @@ tr[data-itm-put='true']  td.put-cell  { background: rgba(248,113,113,0.06); }
   min-width: 0;
 }
 
+.panel-divider {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: ew-resize;
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.panel-divider::after {
+  content: '';
+  height: 32px;
+  width: 2px;
+  background: var(--border);
+  border-radius: 1px;
+}
+.panel-divider:hover { background: var(--bg3); }
+
 .historical-chart-panel {
   width: 500px;
   display: flex;
