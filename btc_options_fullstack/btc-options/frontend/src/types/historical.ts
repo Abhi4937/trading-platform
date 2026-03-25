@@ -38,3 +38,16 @@ export interface OHLCData {
 export interface HistoricalChartResponse {
   data: OHLCData[];
 }
+
+export interface OHLCWithGreeks extends OHLCData {
+  spot: number;
+  iv: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+}
+
+export interface ChartDataWithGreeksResponse {
+  data: OHLCWithGreeks[];
+}

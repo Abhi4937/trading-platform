@@ -7,6 +7,8 @@ import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngin
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
+interface LegGreeksPoint { time: number; spot: number; iv: number; delta: number; gamma: number; theta: number; vega: number; }
+
 // ── MTM statistics ────────────────────────────────────────────────────────────
 interface DrawdownPeriod {
   peakTime: number; peakPnl: number;
@@ -200,11 +202,14 @@ export const StrategyPanel: React.FC<Props> = ({
   const [buildMtmData, setBuildMtmData] = useState<MtmPoint[]>([]);
   const [buildLoading, setBuildLoading] = useState(false);
   const [buildError, setBuildError] = useState('');
+  const [buildLegGreeks, setBuildLegGreeks] = useState<Map<string, LegGreeksPoint[]>>(new Map());
 
   // Compare mode MTM
   const [compareMtmData, setCompareMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
   const [compareLoading, setCompareLoading] = useState(false);
   const [compareError, setCompareError] = useState('');
+  // stratId → legId → points
+  const [compareLegGreeks, setCompareLegGreeks] = useState<Map<string, Map<string, LegGreeksPoint[]>>>(new Map());
 
   const [marginExpanded, setMarginExpanded] = useState(false);
   const [legsExpanded, setLegsExpanded] = useState(true);
@@ -223,44 +228,53 @@ export const StrategyPanel: React.FC<Props> = ({
 
   // ── Chart / stats resize ───────────────────────────────────────────────────
   const [chartHeightPx, setChartHeightPx] = useState(220);
-  const dragRef = useRef<{ startY: number; startH: number } | null>(null);
-  const onDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    dragRef.current = { startY: e.clientY, startH: chartHeightPx };
-    const onMove = (ev: MouseEvent) => {
-      if (!dragRef.current) return;
-      setChartHeightPx(Math.max(80, dragRef.current.startH + ev.clientY - dragRef.current.startY));
-    };
-    const onUp = () => {
-      dragRef.current = null;
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [chartHeightPx]);
-
   const [compareChartHeightPx, setCompareChartHeightPx] = useState(220);
-  const compareDragRef = useRef<{ startY: number; startH: number } | null>(null);
-  const onCompareDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
+
+  // Bottom handle: drag DOWN = stats grow (independent of chart), drag UP = stats shrink
+  const [statsHeightPx, setStatsHeightPx] = useState(140);
+  const [compareStatsHeightPx, setCompareStatsHeightPx] = useState(140);
+
+  const buildBottomDragRef = useRef<{ startY: number; startChartH: number; startStatsH: number } | null>(null);
+  const onBottomDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    compareDragRef.current = { startY: e.clientY, startH: compareChartHeightPx };
+    buildBottomDragRef.current = { startY: e.clientY, startChartH: chartHeightPx, startStatsH: statsHeightPx };
     const onMove = (ev: MouseEvent) => {
-      if (!compareDragRef.current) return;
-      setCompareChartHeightPx(Math.max(80, compareDragRef.current.startH + ev.clientY - compareDragRef.current.startY));
+      if (!buildBottomDragRef.current) return;
+      const delta = ev.clientY - buildBottomDragRef.current.startY;
+      setChartHeightPx(Math.max(60, buildBottomDragRef.current.startChartH + delta));
+      setStatsHeightPx(Math.max(40, buildBottomDragRef.current.startStatsH - delta));
     };
     const onUp = () => {
-      compareDragRef.current = null;
+      buildBottomDragRef.current = null;
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-  }, [compareChartHeightPx]);
+  }, [chartHeightPx, statsHeightPx]);
+
+  const compareBottomDragRef = useRef<{ startY: number; startChartH: number; startStatsH: number } | null>(null);
+  const onCompareBottomDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    compareBottomDragRef.current = { startY: e.clientY, startChartH: compareChartHeightPx, startStatsH: compareStatsHeightPx };
+    const onMove = (ev: MouseEvent) => {
+      if (!compareBottomDragRef.current) return;
+      const delta = ev.clientY - compareBottomDragRef.current.startY;
+      setCompareChartHeightPx(Math.max(60, compareBottomDragRef.current.startChartH + delta));
+      setCompareStatsHeightPx(Math.max(40, compareBottomDragRef.current.startStatsH - delta));
+    };
+    const onUp = () => {
+      compareBottomDragRef.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [compareChartHeightPx, compareStatsHeightPx]);
 
   // Clear MTM when legs or compare strategies change
-  useEffect(() => { setBuildMtmData([]); setBuildError(''); }, [legs]);
-  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); }, [compareStrategies]);
+  useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); }, [legs]);
+  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); }, [compareStrategies]);
 
   // ── Chain helpers ──────────────────────────────────────────────────────────
   const getChainForLeg = (leg: StrategyLeg): HistoricalChainRow[] =>
@@ -320,6 +334,30 @@ export const StrategyPanel: React.FC<Props> = ({
     return d.toISOString().replace('T', ' ').slice(0, 19) + ' IST';
   };
 
+  // Convert MtmStats to flat rows for Excel
+  const statsToRows = (stats: MtmStats, label?: string): Record<string, unknown>[] => {
+    const prefix = label ? `[${label}] ` : '';
+    const summary: Record<string, unknown>[] = [
+      { Metric: `${prefix}Max P&L`,     Value: +stats.maxPnl.toFixed(4),      Time: fmtTs(stats.maxPnlTime) },
+      { Metric: `${prefix}Min P&L`,     Value: +stats.minPnl.toFixed(4),      Time: fmtTs(stats.minPnlTime) },
+      { Metric: `${prefix}Final P&L`,   Value: +stats.finalPnl.toFixed(4),    Time: '' },
+      { Metric: `${prefix}Max Drawdown`,Value: +stats.maxDrawdown.toFixed(4),
+        Time: `${fmtTs(stats.maxDdPeakTime)} → ${fmtTs(stats.maxDdTroughTime)}` },
+      {},
+      { Metric: `${prefix}# Drawdown`, 'DD Value': 'Peak P&L', 'Peak Time': 'Trough P&L', 'Trough Time': '' },
+      ...stats.drawdowns.map((dd, i) => ({
+        Metric: `${prefix}DD ${i + 1}`,
+        'DD Value': +dd.drawdown.toFixed(4),
+        'Peak P&L': +dd.peakPnl.toFixed(4),
+        'Peak Time': fmtTs(dd.peakTime),
+        'Trough P&L': +dd.troughPnl.toFixed(4),
+        'Trough Time': fmtTs(dd.troughTime),
+      })),
+      {},
+    ];
+    return summary;
+  };
+
   const downloadExcel = () => {
     const wb = XLSX.utils.book_new();
     const legsRows = legs.map(leg => ({
@@ -330,9 +368,59 @@ export const StrategyPanel: React.FC<Props> = ({
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(legsRows), 'Strategy');
     if (buildMtmData.length) {
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
-        buildMtmData.map(d => ({ 'Time (IST)': toIst(d.time), 'P&L (USD)': +d.pnl.toFixed(2) }))
-      ), 'MTM P&L');
+      // Build per-leg lookup: legId → Map<time, LegGreeksPoint>
+      const legLabel = (leg: StrategyLeg) => `${leg.action} ${leg.strike}${leg.type}`;
+      const legLookup = new Map<string, Map<number, LegGreeksPoint>>();
+      legs.forEach(leg => {
+        const pts = buildLegGreeks.get(leg.id) ?? [];
+        const m = new Map<number, LegGreeksPoint>();
+        pts.forEach(p => m.set(p.time, p));
+        legLookup.set(leg.id, m);
+      });
+
+      const mtmRows = buildMtmData.map(d => {
+        const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
+        // spot from first leg that has data at this time
+        let spot = 0;
+        for (const leg of legs) {
+          const pt = legLookup.get(leg.id)?.get(d.time);
+          if (pt && pt.spot > 0) { spot = pt.spot; break; }
+        }
+        row['BTC Spot'] = spot > 0 ? +spot.toFixed(2) : '';
+        // per-leg Greeks
+        let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
+        legs.forEach(leg => {
+          const label = legLabel(leg);
+          const pt = legLookup.get(leg.id)?.get(d.time);
+          const dir = leg.action === 'BUY' ? 1 : -1;
+          const scale = leg.qty * 0.001 * dir;
+          if (pt) {
+            row[`${label} IV%`]   = +pt.iv.toFixed(2);
+            row[`${label} Delta`] = +(pt.delta * scale).toFixed(4);
+            row[`${label} Gamma`] = +(pt.gamma * scale).toFixed(6);
+            row[`${label} Theta`] = +(pt.theta * scale).toFixed(4);
+            row[`${label} Vega`]  = +(pt.vega  * scale).toFixed(4);
+            netDelta += pt.delta * scale;
+            netGamma += pt.gamma * scale;
+            netTheta += pt.theta * scale;
+            netVega  += pt.vega  * scale;
+          } else {
+            row[`${label} IV%`] = ''; row[`${label} Delta`] = '';
+            row[`${label} Gamma`] = ''; row[`${label} Theta`] = ''; row[`${label} Vega`] = '';
+          }
+        });
+        row['Net Delta'] = +netDelta.toFixed(4);
+        row['Net Gamma'] = +netGamma.toFixed(6);
+        row['Net Theta'] = +netTheta.toFixed(4);
+        row['Net Vega']  = +netVega.toFixed(4);
+        row['P&L (USD)'] = +d.pnl.toFixed(4);
+        return row;
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mtmRows), 'MTM P&L');
+      const s = computeMtmStats(buildMtmData);
+      if (s) {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statsToRows(s)), 'MTM Stats');
+      }
     }
     XLSX.writeFile(wb, `strategy_${selectedExpiry}.xlsx`);
   };
@@ -348,7 +436,7 @@ export const StrategyPanel: React.FC<Props> = ({
 
       const seriesResults = await Promise.all(
         legs.map(leg =>
-          historicalApi.getChartData(leg.expiry, leg.strike, leg.type, startTs, timeframe)
+          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, startTs, timeframe)
             .then(res => ({ leg, data: res.data.filter(d => d.time >= startTs && d.time <= endTs) }))
         )
       );
@@ -369,7 +457,16 @@ export const StrategyPanel: React.FC<Props> = ({
         return { time: t, pnl: total };
       });
 
+      const greeksMap = new Map<string, LegGreeksPoint[]>();
+      seriesResults.forEach(({ leg, data }) => {
+        greeksMap.set(leg.id, data.map(d => ({
+          time: d.time, spot: d.spot, iv: d.iv,
+          delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
+        })));
+      });
+
       setBuildMtmData(points);
+      setBuildLegGreeks(greeksMap);
     } catch {
       setBuildError('Failed to calculate MTM. Check console.');
     } finally {
@@ -387,11 +484,12 @@ export const StrategyPanel: React.FC<Props> = ({
       const startTs = simulationTimestamp;
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
       const map = new Map<string, MtmPoint[]>();
+      const greeksMapOuter = new Map<string, Map<string, LegGreeksPoint[]>>();
 
       await Promise.all(nonEmpty.map(async strat => {
         const seriesResults = await Promise.all(
           strat.legs.map(leg =>
-            historicalApi.getChartData(leg.expiry, leg.strike, leg.type, startTs, timeframe)
+            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, startTs, timeframe)
               .then(res => ({ leg, data: res.data.filter(d => d.time >= startTs && d.time <= endTs) }))
           )
         );
@@ -412,10 +510,20 @@ export const StrategyPanel: React.FC<Props> = ({
           return { time: t, pnl: total };
         });
 
+        const legGreeksMap = new Map<string, LegGreeksPoint[]>();
+        seriesResults.forEach(({ leg, data }) => {
+          legGreeksMap.set(leg.id, data.map(d => ({
+            time: d.time, spot: d.spot, iv: d.iv,
+            delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
+          })));
+        });
+
         map.set(strat.id, points);
+        greeksMapOuter.set(strat.id, legGreeksMap);
       }));
 
       setCompareMtmData(map);
+      setCompareLegGreeks(greeksMapOuter);
     } catch {
       setCompareError('Failed to calculate MTM. Check console.');
     } finally {
@@ -529,6 +637,139 @@ export const StrategyPanel: React.FC<Props> = ({
     </div>
   );
 
+  // ── Download (compare mode) ────────────────────────────────────────────────
+  const downloadCompareExcel = () => {
+    const wb = XLSX.utils.book_new();
+
+    // Sheet 1: Strategy Legs — all strategies, entry details + current Greeks
+    const legsRows: Record<string, unknown>[] = [];
+    compareStrategies.forEach(strat => {
+      strat.legs.forEach(leg => {
+        const g = getLegGreeks(leg);
+        legsRows.push({
+          'Strategy':      strat.label,
+          'Action':        leg.action,
+          'Expiry':        leg.expiry,
+          'Strike':        leg.strike,
+          'Type':          leg.type,
+          'Lots':          leg.qty,
+          'BTC Size':      +(leg.qty * 0.001).toFixed(3),
+          'Entry Time (IST)': toIst(leg.entryTimestamp),
+          'Entry Price':   +leg.entryPremium.toFixed(4),
+          'IV%':           g ? +g.iv_pct.toFixed(2)  : '',
+          'Delta':         g ? +g.delta.toFixed(4)   : '',
+          'Gamma':         g ? +g.gamma.toFixed(5)   : '',
+          'Theta':         g ? +g.theta.toFixed(2)   : '',
+          'Vega':          g ? +g.vega.toFixed(2)    : '',
+        });
+      });
+      legsRows.push({} as Record<string, unknown>); // blank row between strategies
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(legsRows), 'Strategy Legs');
+
+    // Sheet 2: MTM Comparison — all timestamps as rows, each strategy as a column
+    if (compareMtmData.size > 0) {
+      const timeSet = new Set<number>();
+      compareMtmData.forEach(pts => pts.forEach(p => timeSet.add(p.time)));
+      const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+      const stratsWithData = compareStrategies.filter(s => (compareMtmData.get(s.id) ?? []).length > 0);
+
+      // Build a quick lookup Map per strategy for O(1) access
+      const lookup = new Map<string, Map<number, number>>();
+      stratsWithData.forEach(s => {
+        const m = new Map<number, number>();
+        (compareMtmData.get(s.id) ?? []).forEach(p => m.set(p.time, p.pnl));
+        lookup.set(s.id, m);
+      });
+
+      const mtmRows = sortedTimes.map(t => {
+        const row: Record<string, unknown> = { 'Time (IST)': toIst(t) };
+        stratsWithData.forEach(s => {
+          const val = lookup.get(s.id)?.get(t);
+          row[`${s.label} P&L (USD)`] = val !== undefined ? +val.toFixed(4) : '';
+        });
+        return row;
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mtmRows), 'MTM Comparison');
+    }
+
+    // Sheet 3: MTM Stats — per strategy summary + drawdown table
+    if (compareMtmData.size > 0) {
+      const statsRows: Record<string, unknown>[] = [];
+      compareStrategies.forEach(s => {
+        const pts = compareMtmData.get(s.id);
+        if (!pts?.length) return;
+        const st = computeMtmStats(pts);
+        if (!st) return;
+        statsRows.push(...statsToRows(st, s.label));
+      });
+      if (statsRows.length) {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statsRows), 'MTM Stats');
+      }
+    }
+
+    // Sheets 4+: per-strategy MTM + per-leg Greeks
+    if (compareLegGreeks.size > 0) {
+      const legLabel = (leg: StrategyLeg) => `${leg.action} ${leg.strike}${leg.type}`;
+      compareStrategies.forEach(strat => {
+        const pts = compareMtmData.get(strat.id);
+        const legGreeksMap = compareLegGreeks.get(strat.id);
+        if (!pts?.length || !legGreeksMap) return;
+
+        // Build per-leg lookup
+        const legLookup = new Map<string, Map<number, LegGreeksPoint>>();
+        strat.legs.forEach(leg => {
+          const legPts = legGreeksMap.get(leg.id) ?? [];
+          const m = new Map<number, LegGreeksPoint>();
+          legPts.forEach(p => m.set(p.time, p));
+          legLookup.set(leg.id, m);
+        });
+
+        const mtmRows = pts.map(d => {
+          const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
+          let spot = 0;
+          for (const leg of strat.legs) {
+            const pt = legLookup.get(leg.id)?.get(d.time);
+            if (pt && pt.spot > 0) { spot = pt.spot; break; }
+          }
+          row['BTC Spot'] = spot > 0 ? +spot.toFixed(2) : '';
+          let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
+          strat.legs.forEach(leg => {
+            const label = legLabel(leg);
+            const pt = legLookup.get(leg.id)?.get(d.time);
+            const dir = leg.action === 'BUY' ? 1 : -1;
+            const scale = leg.qty * 0.001 * dir;
+            if (pt) {
+              row[`${label} IV%`]   = +pt.iv.toFixed(2);
+              row[`${label} Delta`] = +(pt.delta * scale).toFixed(4);
+              row[`${label} Gamma`] = +(pt.gamma * scale).toFixed(6);
+              row[`${label} Theta`] = +(pt.theta * scale).toFixed(4);
+              row[`${label} Vega`]  = +(pt.vega  * scale).toFixed(4);
+              netDelta += pt.delta * scale;
+              netGamma += pt.gamma * scale;
+              netTheta += pt.theta * scale;
+              netVega  += pt.vega  * scale;
+            } else {
+              row[`${label} IV%`] = ''; row[`${label} Delta`] = '';
+              row[`${label} Gamma`] = ''; row[`${label} Theta`] = ''; row[`${label} Vega`] = '';
+            }
+          });
+          row['Net Delta'] = +netDelta.toFixed(4);
+          row['Net Gamma'] = +netGamma.toFixed(6);
+          row['Net Theta'] = +netTheta.toFixed(4);
+          row['Net Vega']  = +netVega.toFixed(4);
+          row['P&L (USD)'] = +d.pnl.toFixed(4);
+          return row;
+        });
+        // Sheet name max 31 chars
+        const sheetName = `${strat.label} MTM`.slice(0, 31);
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mtmRows), sheetName);
+      });
+    }
+
+    XLSX.writeFile(wb, `compare_mtm_${selectedExpiry}.xlsx`);
+  };
+
   // ═══════════════════════════════════════════════════════════════════════════
   // COMPARE MODE
   // ═══════════════════════════════════════════════════════════════════════════
@@ -574,6 +815,14 @@ export const StrategyPanel: React.FC<Props> = ({
               disabled={compareLoading || !hasAnyLegs}
             >
               {compareLoading ? 'Calculating…' : 'Run MTM ▶'}
+            </button>
+            <button
+              className="strategy-btn-secondary"
+              disabled={!hasAnyLegs}
+              onClick={downloadCompareExcel}
+              title="Download strategy legs + MTM comparison"
+            >
+              Download ↓
             </button>
           </div>
         </div>
@@ -647,8 +896,8 @@ export const StrategyPanel: React.FC<Props> = ({
               <div style={{ height: compareChartHeightPx, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
                 <CompareChart series={compareChartSeries} />
               </div>
-              <div className="chart-resize-handle" onMouseDown={onCompareDragHandleMouseDown} />
-              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+              <div className="chart-resize-handle" onMouseDown={onCompareBottomDragHandleMouseDown} />
+              <div style={{ height: compareStatsHeightPx, flexShrink: 0, overflowY: 'auto' }}>
                 <div className="compare-stats-section">
                   {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
                     const pts = compareMtmData.get(s.id);
@@ -863,8 +1112,8 @@ export const StrategyPanel: React.FC<Props> = ({
             <div style={{ height: chartHeightPx, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
               <MtmChart data={buildMtmData} />
             </div>
-            <div className="chart-resize-handle" onMouseDown={onDragHandleMouseDown} />
-            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            <div className="chart-resize-handle" onMouseDown={onBottomDragHandleMouseDown} />
+            <div style={{ height: statsHeightPx, flexShrink: 0, overflowY: 'auto' }}>
               {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
             </div>
           </>

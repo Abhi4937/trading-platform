@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart, ColorType, LineSeries, UTCTimestamp } from 'lightweight-charts';
+import { createChart, ColorType, BaselineSeries, UTCTimestamp } from 'lightweight-charts';
 import type { MtmPoint } from '../../types/strategy';
 
 export interface CompareSeries {
@@ -14,6 +14,7 @@ interface Props {
 }
 
 const IST_OFFSET = 5.5 * 3600;
+
 
 export const CompareChart: React.FC<Props> = ({ series }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -71,8 +72,14 @@ export const CompareChart: React.FC<Props> = ({ series }) => {
 
     // Add all series with data
     series.forEach(s => {
-      const sr = chart.addSeries(LineSeries, {
-        color: s.color,
+      const sr = chart.addSeries(BaselineSeries, {
+        baseValue: { type: 'price', price: 0 },
+        topLineColor: s.color,
+        bottomLineColor: s.color,
+        topFillColor1: 'rgba(0,229,160,0.18)',
+        topFillColor2: 'rgba(0,229,160,0.04)',
+        bottomFillColor1: 'rgba(255,77,106,0.04)',
+        bottomFillColor2: 'rgba(255,77,106,0.18)',
         lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: true,
@@ -90,9 +97,9 @@ export const CompareChart: React.FC<Props> = ({ series }) => {
     if (firstSr) {
       firstSr.createPriceLine({
         price: 0,
-        color: 'rgba(180,180,180,0.35)',
+        color: 'rgba(200,200,200,0.4)',
         lineWidth: 1,
-        lineStyle: 2,
+        lineStyle: 0,
         axisLabelVisible: true,
         title: '',
       });

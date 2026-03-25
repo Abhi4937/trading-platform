@@ -335,6 +335,89 @@ async def get_historical_chain(
     }
 
 
+@router.get("/chart-data-with-greeks")
+async def get_chart_data_with_greeks(
+    expiry: str = Query(...),
+    strike: float = Query(...),
+    opt_type: str = Query(..., alias="type"),
+    start_time: int = Query(...),
+    timeframe: str = Query(...),
+):
+    conn = get_conn()
+    interval_map = {
+        '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes',
+        '30m': '30 minutes', '1h': '1 hour', '4h': '4 hours', '1d': '1 day'
+    }
+    interval = interval_map.get(timeframe, '1 minute')
+    filename = 'CE.parquet' if opt_type.upper() == 'CE' else 'PE.parquet'
+    exact_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={int(strike)}/{filename}"
+    if not os.path.exists(exact_path):
+        return {"data": []}
+
+    where_clause = f"WHERE timestamp_unix >= {start_time}" if start_time > 0 else ""
+    opt_query = f"""
+    SELECT
+        time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+        first(mark_open ORDER BY timestamp_unix) AS open,
+        max(mark_high) AS high,
+        min(mark_low) AS low,
+        last(mark_close ORDER BY timestamp_unix) AS close
+    FROM read_parquet('{exact_path}')
+    {where_clause}
+    GROUP BY bucket ORDER BY bucket ASC
+    """
+    spot_query = f"""
+    SELECT
+        time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+        last(mark_close ORDER BY timestamp_unix) AS spot_close
+    FROM read_parquet('{SPOT_DATA_PATH}')
+    {where_clause}
+    GROUP BY bucket ORDER BY bucket ASC
+    """
+    try:
+        opt_df = conn.execute(opt_query).df()
+        spot_df = conn.execute(spot_query).df()
+        if opt_df.empty:
+            return {"data": []}
+        opt_df['time'] = opt_df['bucket'].apply(lambda x: int(x.timestamp()))
+        spot_df['time'] = spot_df['bucket'].apply(lambda x: int(x.timestamp()))
+        merged = opt_df.merge(spot_df[['time', 'spot_close']], on='time', how='left')
+        merged = merged.drop_duplicates(subset=['time']).sort_values('time').fillna(0)
+
+        from app.core.greeks import implied_vol as _iv
+        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
+        r = 0.0
+        opt_type_str = "call" if opt_type.upper() == "CE" else "put"
+        K = int(strike)
+
+        records = []
+        for _, row in merged.iterrows():
+            t = int(row['time'])
+            close = float(row['close'])
+            spot = float(row['spot_close'])
+            current_dt = datetime.fromtimestamp(t, tz=timezone.utc)
+            T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
+            if close > 0 and spot > 0:
+                iv = _iv(close, spot, K, T, r, opt_type_str)
+                g = compute_greeks(spot, K, T, r, iv if iv > 0 else 0.5, opt_type_str)
+                records.append({
+                    'time': t, 'open': float(row['open']), 'high': float(row['high']),
+                    'low': float(row['low']), 'close': close, 'spot': round(spot, 2),
+                    'iv': round(iv * 100, 2), 'delta': g.delta, 'gamma': g.gamma,
+                    'theta': g.theta, 'vega': g.vega,
+                })
+            else:
+                records.append({
+                    'time': t, 'open': float(row['open']), 'high': float(row['high']),
+                    'low': float(row['low']), 'close': close, 'spot': round(spot, 2),
+                    'iv': 0.0, 'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0,
+                })
+        return {"data": records}
+    except Exception as e:
+        logger.error(f"Error fetching chart data with greeks for {exact_path}: {e}")
+        return {"data": []}
+
+
 @router.get("/chart-data")
 async def get_chart_data(
     expiry: str = Query(...),
