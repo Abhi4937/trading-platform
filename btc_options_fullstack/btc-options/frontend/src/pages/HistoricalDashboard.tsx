@@ -361,7 +361,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   return (
     <div className="historical-container">
-      {!chartsOnly && <div className="replay-wrapper">
+      {!chartsOnly && !maximized && <div className="replay-wrapper">
         <ReplayController
           simulationDate={simulationDate}
           simulationTime={simulationTime}

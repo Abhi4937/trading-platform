@@ -170,12 +170,9 @@ export const MultiPaneChart: React.FC<Props> = ({
       });
     }
 
-    // Set pane heights after layout; fit time scale
+    // Fit time scale only — pane heights are set by the height update effect
+    // after one layout frame, avoiding redistribution from addPane() calls.
     requestAnimationFrame(() => {
-      let p = 0;
-      if (hasMtm)      { chart.panes()[p]?.setHeight(mtmH);   p++; }
-      if (visibleIv)   { chart.panes()[p]?.setHeight(ivH);    p++; }
-      if (visibleDelta){ chart.panes()[p]?.setHeight(deltaH); }
       chart.timeScale().fitContent();
     });
 
@@ -318,11 +315,20 @@ export const MultiPaneChart: React.FC<Props> = ({
     const visibleIv    = showIv    && nIv    > 0;
     const visibleDelta = showDelta && nDelta > 0;
     const total = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleDelta ? deltaH : 0);
-    if (total > 0) chart.applyOptions({ height: total });
-    let p = 0;
-    if (hasMtm)      { chart.panes()[p]?.setHeight(mtmH);   p++; }
-    if (visibleIv)   { chart.panes()[p]?.setHeight(ivH);    p++; }
-    if (visibleDelta){ chart.panes()[p]?.setHeight(deltaH); }
+    if (total <= 0) return;
+    // Apply total height synchronously so the container div matches the chart.
+    // Defer individual pane setHeight to a RAF so the chart has had one layout
+    // frame to settle internal pane distribution after addPane() calls — prevents
+    // lightweight-charts from redistributing IV height when Delta pane is added.
+    chart.applyOptions({ height: total });
+    requestAnimationFrame(() => {
+      const c = chartRef.current;
+      if (!c) return;
+      let p = 0;
+      if (hasMtm)      { c.panes()[p]?.setHeight(mtmH);   p++; }
+      if (visibleIv)   { c.panes()[p]?.setHeight(ivH);    p++; }
+      if (visibleDelta){ c.panes()[p]?.setHeight(deltaH); }
+    });
   }, [mtmH, ivH, deltaH, showIv, showDelta, hasMtm, nIv, nDelta]);
 
   // ── Drag handle ────────────────────────────────────────────────────────────
