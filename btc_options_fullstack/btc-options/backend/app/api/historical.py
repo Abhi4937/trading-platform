@@ -348,7 +348,12 @@ async def get_chart_data_with_greeks(
         '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes',
         '30m': '30 minutes', '1h': '1 hour', '4h': '4 hours', '1d': '1 day'
     }
+    interval_secs = {
+        '1m': 60, '5m': 300, '15m': 900,
+        '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400
+    }
     interval = interval_map.get(timeframe, '1 minute')
+    bucket_secs = interval_secs.get(timeframe, 60)
     filename = 'CE.parquet' if opt_type.upper() == 'CE' else 'PE.parquet'
     exact_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={int(strike)}/{filename}"
     if not os.path.exists(exact_path):
@@ -395,7 +400,7 @@ async def get_chart_data_with_greeks(
             t = int(row['time'])
             close = float(row['close'])
             spot = float(row['spot_close'])
-            current_dt = datetime.fromtimestamp(t, tz=timezone.utc)
+            current_dt = datetime.fromtimestamp(t + bucket_secs, tz=timezone.utc)
             T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
             if close > 0 and spot > 0:
                 iv = _iv(close, spot, K, T, r, opt_type_str)
