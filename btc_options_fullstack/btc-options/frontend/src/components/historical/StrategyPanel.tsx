@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
-import { MtmChart } from './MtmChart';
-import { CompareChart } from './CompareChart';
+import { MultiPaneChart } from './MultiPaneChart';
+import type { PaneSeries } from './MultiPaneChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
@@ -158,6 +158,8 @@ interface Props {
   simulationTimestamp: number;
   maximized: boolean;
   onToggleMaximize: () => void;
+  chartsOnly: boolean;
+  onToggleChartsOnly: () => void;
 }
 
 const fmt = (n: number, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -197,6 +199,7 @@ export const StrategyPanel: React.FC<Props> = ({
   onRemoveCompareLeg, onUpdateCompareLegQty, onClearCompareLegs,
   chain, legChains, spot, selectedExpiry, simulationTimestamp,
   maximized, onToggleMaximize,
+  chartsOnly, onToggleChartsOnly,
 }) => {
   // Build mode MTM
   const [buildMtmData, setBuildMtmData] = useState<MtmPoint[]>([]);
@@ -228,11 +231,8 @@ export const StrategyPanel: React.FC<Props> = ({
 
   // ── Chart / stats resize ───────────────────────────────────────────────────
   const [chartHeightPx, setChartHeightPx] = useState(220);
-  const [compareChartHeightPx, setCompareChartHeightPx] = useState(220);
-
   // Bottom handle: drag DOWN = stats grow (independent of chart), drag UP = stats shrink
   const [statsHeightPx, setStatsHeightPx] = useState(140);
-  const [compareStatsHeightPx, setCompareStatsHeightPx] = useState(140);
 
   const buildBottomDragRef = useRef<{ startY: number; startChartH: number; startStatsH: number } | null>(null);
   const onBottomDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -253,24 +253,6 @@ export const StrategyPanel: React.FC<Props> = ({
     document.addEventListener('mouseup', onUp);
   }, [chartHeightPx, statsHeightPx]);
 
-  const compareBottomDragRef = useRef<{ startY: number; startChartH: number; startStatsH: number } | null>(null);
-  const onCompareBottomDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    compareBottomDragRef.current = { startY: e.clientY, startChartH: compareChartHeightPx, startStatsH: compareStatsHeightPx };
-    const onMove = (ev: MouseEvent) => {
-      if (!compareBottomDragRef.current) return;
-      const delta = ev.clientY - compareBottomDragRef.current.startY;
-      setCompareChartHeightPx(Math.max(60, compareBottomDragRef.current.startChartH + delta));
-      setCompareStatsHeightPx(Math.max(40, compareBottomDragRef.current.startStatsH - delta));
-    };
-    const onUp = () => {
-      compareBottomDragRef.current = null;
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [compareChartHeightPx, compareStatsHeightPx]);
 
   // Clear MTM when legs or compare strategies change
   useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); }, [legs]);
@@ -531,13 +513,13 @@ export const StrategyPanel: React.FC<Props> = ({
     }
   }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe]);
 
-  // Memoized compare chart series
-  const compareChartSeries = useMemo(() =>
+  // Memoized compare MTM series — PaneSeries format (value = pnl)
+  const compareMtmSeries = useMemo((): PaneSeries[] =>
     compareStrategies.filter(s => s.legs.length > 0).map((s, i) => ({
       id: s.id,
       label: s.label,
       color: STRAT_COLORS[i % STRAT_COLORS.length],
-      data: compareMtmData.get(s.id) ?? [],
+      data: (compareMtmData.get(s.id) ?? []).map(p => ({ time: p.time, value: p.pnl })),
     })),
   [compareStrategies, compareMtmData]);
 
@@ -545,6 +527,73 @@ export const StrategyPanel: React.FC<Props> = ({
   const activeCompareStrat = useMemo(() =>
     compareStrategies.find(s => s.id === activeCompareStratId) ?? compareStrategies[0],
   [compareStrategies, activeCompareStratId]);
+
+  // ── Greeks chart series ────────────────────────────────────────────────────
+  const buildIvSeries = useMemo((): PaneSeries[] =>
+    buildLegGreeks.size === 0 ? [] : legs.map((leg, i) => ({
+      id: leg.id,
+      label: `${leg.action} ${leg.strike}${leg.type}`,
+      color: STRAT_COLORS[i % STRAT_COLORS.length],
+      data: (buildLegGreeks.get(leg.id) ?? []).map(p => ({ time: p.time, value: p.iv })),
+    })).filter(s => s.data.length > 0),
+  [legs, buildLegGreeks]);
+
+  const buildDeltaSeries = useMemo((): PaneSeries[] =>
+    buildLegGreeks.size === 0 ? [] : legs.map((leg, i) => {
+      const dir = leg.action === 'BUY' ? 1 : -1;
+      const scale = leg.qty * 0.001 * dir;
+      return {
+        id: leg.id,
+        label: `${leg.action} ${leg.strike}${leg.type}`,
+        color: STRAT_COLORS[i % STRAT_COLORS.length],
+        data: (buildLegGreeks.get(leg.id) ?? []).map(p => ({ time: p.time, value: p.delta * scale })),
+      };
+    }).filter(s => s.data.length > 0),
+  [legs, buildLegGreeks]);
+
+  const compareIvSeries = useMemo((): PaneSeries[] => {
+    if (compareLegGreeks.size === 0) return [];
+    const result: PaneSeries[] = [];
+    let ci = 0;
+    compareStrategies.forEach(strat => {
+      const legGreeksMap = compareLegGreeks.get(strat.id);
+      if (!legGreeksMap) return;
+      strat.legs.forEach(leg => {
+        const pts = legGreeksMap.get(leg.id) ?? [];
+        if (!pts.length) return;
+        result.push({
+          id: `${strat.id}-${leg.id}`,
+          label: `${strat.label}: ${leg.action} ${leg.strike}${leg.type}`,
+          color: STRAT_COLORS[ci++ % STRAT_COLORS.length],
+          data: pts.map(p => ({ time: p.time, value: p.iv })),
+        });
+      });
+    });
+    return result;
+  }, [compareStrategies, compareLegGreeks]);
+
+  const compareDeltaSeries = useMemo((): PaneSeries[] => {
+    if (compareLegGreeks.size === 0) return [];
+    const result: PaneSeries[] = [];
+    let ci = 0;
+    compareStrategies.forEach(strat => {
+      const legGreeksMap = compareLegGreeks.get(strat.id);
+      if (!legGreeksMap) return;
+      strat.legs.forEach(leg => {
+        const pts = legGreeksMap.get(leg.id) ?? [];
+        if (!pts.length) return;
+        const dir = leg.action === 'BUY' ? 1 : -1;
+        const scale = leg.qty * 0.001 * dir;
+        result.push({
+          id: `${strat.id}-${leg.id}`,
+          label: `${strat.label}: ${leg.action} ${leg.strike}${leg.type}`,
+          color: STRAT_COLORS[ci++ % STRAT_COLORS.length],
+          data: pts.map(p => ({ time: p.time, value: p.delta * scale })),
+        });
+      });
+    });
+    return result;
+  }, [compareStrategies, compareLegGreeks]);
 
   // ── Shared chart controls ──────────────────────────────────────────────────
   const chartControls = (
@@ -778,7 +827,7 @@ export const StrategyPanel: React.FC<Props> = ({
     const activeLegs = activeCompareStrat?.legs ?? [];
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflowY: 'auto' }}>
 
         {/* ── Compare header ── */}
         <div className="strategy-header" style={{ borderBottom: '1px solid var(--border)' }}>
@@ -828,7 +877,7 @@ export const StrategyPanel: React.FC<Props> = ({
         </div>
 
         {/* ── Strategy tabs ── */}
-        <div className="strat-tabs">
+        {!chartsOnly && <div className="strat-tabs">
           {compareStrategies.map((s, i) => (
             <button
               key={s.id}
@@ -847,10 +896,10 @@ export const StrategyPanel: React.FC<Props> = ({
             </button>
           ))}
           <button className="strat-tab-add" onClick={onAddCompareStrategy}>＋</button>
-        </div>
+        </div>}
 
         {/* ── Active strategy legs ── */}
-        {compareLegsExpanded && (
+        {!chartsOnly && compareLegsExpanded && (
           <div className="strategy-legs-card">
             <div className="strategy-header">
               <span className="strategy-title" style={{ color: STRAT_COLORS[(compareStrategies.findIndex(s => s.id === activeCompareStratId)) % STRAT_COLORS.length] }}>
@@ -875,41 +924,54 @@ export const StrategyPanel: React.FC<Props> = ({
           </div>
         )}
 
-        {/* ── Compare MTM chart ── */}
-        <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0 }}>
-          <div className="strategy-chart-header">
-            <span className="strategy-chart-label">Strategy Comparison</span>
-            {chartControls}
-          </div>
-          {endPicker}
-
-          {compareMtmData.size > 0 && compareChartSeries.some(s => s.data.length > 0) ? (
+        {/* ── Compare MTM + Greeks chart (multi-pane) ── */}
+        <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+          {!chartsOnly && (
             <>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 10px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-                {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => (
-                  <span key={s.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
-                    <span style={{ width: '10px', height: '2px', background: STRAT_COLORS[i % STRAT_COLORS.length], display: 'inline-block', borderRadius: '1px' }} />
-                    <span style={{ color: 'var(--text2)' }}>{s.label} ({s.legs.length} legs)</span>
-                  </span>
-                ))}
+              <div className="strategy-chart-header">
+                <span className="strategy-chart-label">Strategy Comparison</span>
+                {chartControls}
               </div>
-              <div style={{ height: compareChartHeightPx, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-                <CompareChart series={compareChartSeries} />
-              </div>
-              <div className="chart-resize-handle" onMouseDown={onCompareBottomDragHandleMouseDown} />
-              <div style={{ height: compareStatsHeightPx, flexShrink: 0, overflowY: 'auto' }}>
-                <div className="compare-stats-section">
-                  {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
-                    const pts = compareMtmData.get(s.id);
-                    if (!pts?.length) return null;
-                    const stats = computeMtmStats(pts);
-                    if (!stats) return null;
-                    return (
-                      <MtmStatsPanel key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]} />
-                    );
-                  })}
+              {endPicker}
+            </>
+          )}
+
+          {compareMtmData.size > 0 && compareMtmSeries.some(s => s.data.length > 0) ? (
+            <>
+              {/* Strategy colour legend */}
+              {!chartsOnly && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 10px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                  {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => (
+                    <span key={s.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
+                      <span style={{ width: '10px', height: '2px', background: STRAT_COLORS[i % STRAT_COLORS.length], display: 'inline-block', borderRadius: '1px' }} />
+                      <span style={{ color: 'var(--text2)' }}>{s.label} ({s.legs.length} legs)</span>
+                    </span>
+                  ))}
                 </div>
-              </div>
+              )}
+              {/* Single chart: MTM (multi-line) + IV + Delta — all time-scale synced */}
+              <MultiPaneChart
+                mtmSeries={compareMtmSeries}
+                ivSeries={compareIvSeries}
+                deltaSeries={compareDeltaSeries}
+                chartsOnly={chartsOnly}
+                onToggleChartsOnly={onToggleChartsOnly}
+              />
+              {!chartsOnly && (
+                <div style={{ flexShrink: 0, overflowY: 'auto' }}>
+                  <div className="compare-stats-section">
+                    {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
+                      const pts = compareMtmData.get(s.id);
+                      if (!pts?.length) return null;
+                      const stats = computeMtmStats(pts);
+                      if (!stats) return null;
+                      return (
+                        <MtmStatsPanel key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]} />
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <div className="strategy-chart-empty">
@@ -927,10 +989,10 @@ export const StrategyPanel: React.FC<Props> = ({
   // BUILD MODE
   // ═══════════════════════════════════════════════════════════════════════════
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: 0, overflowY: 'auto' }}>
 
       {/* ── Legs card ── */}
-      <div className="strategy-legs-card">
+      {!chartsOnly && <div className="strategy-legs-card">
         <div className="strategy-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span className="strategy-title">Strategy Builder</span>
@@ -1027,10 +1089,10 @@ export const StrategyPanel: React.FC<Props> = ({
         )}
 
         {buildError && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{buildError}</div>}
-      </div>
+      </div>}
 
       {/* ── Portfolio Margin ── */}
-      {legs.length > 0 && (
+      {!chartsOnly && legs.length > 0 && (
         <div className="margin-card">
           <div className="margin-compact-row" onClick={() => marginResult && setMarginExpanded(e => !e)}>
             {marginResult ? (
@@ -1099,23 +1161,32 @@ export const StrategyPanel: React.FC<Props> = ({
         </div>
       )}
 
-      {/* ── MTM chart ── */}
-      <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0 }}>
-        <div className="strategy-chart-header">
-          <span className="strategy-chart-label">MTM P&amp;L</span>
-          {chartControls}
-        </div>
-        {endPicker}
+      {/* ── MTM + Greeks chart (multi-pane) ── */}
+      <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {!chartsOnly && (
+          <>
+            <div className="strategy-chart-header">
+              <span className="strategy-chart-label">MTM P&amp;L</span>
+              {chartControls}
+            </div>
+            {endPicker}
+          </>
+        )}
 
         {buildMtmData.length > 0 ? (
           <>
-            <div style={{ height: chartHeightPx, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-              <MtmChart data={buildMtmData} />
-            </div>
-            <div className="chart-resize-handle" onMouseDown={onBottomDragHandleMouseDown} />
-            <div style={{ height: statsHeightPx, flexShrink: 0, overflowY: 'auto' }}>
-              {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
-            </div>
+            <MultiPaneChart
+              mtmData={buildMtmData}
+              ivSeries={buildIvSeries}
+              deltaSeries={buildDeltaSeries}
+              chartsOnly={chartsOnly}
+              onToggleChartsOnly={onToggleChartsOnly}
+            />
+            {!chartsOnly && (
+              <div style={{ flexShrink: 0, overflowY: 'auto' }}>
+                {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
+              </div>
+            )}
           </>
         ) : (
           <div className="strategy-chart-empty">

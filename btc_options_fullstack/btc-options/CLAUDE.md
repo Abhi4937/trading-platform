@@ -56,3 +56,40 @@ Do NOT start new work on top of uncommitted changes.
 - WS product list refreshed every 1 hour (new expiries added weekly)
 - Settlement time: 5:30 PM IST = 12:00 UTC
 - Contract size: 0.001 BTC per contract
+
+## Historical Dashboard — Features Built
+
+### Architecture
+- `frontend/src/pages/HistoricalDashboard.tsx` — main page, date/time/expiry pickers, option chain table
+- `frontend/src/components/historical/StrategyPanel.tsx` — strategy builder + compare mode + MTM + Greeks
+- `frontend/src/components/historical/MultiPaneChart.tsx` — single lightweight-charts instance, multi-pane
+- `frontend/src/components/historical/CompareChart.tsx` — multi-strategy P&L overlay (separate chart)
+- `backend/app/api/historical.py` — FastAPI router with DuckDB parquet queries
+
+### MultiPaneChart (lightweight-charts v5)
+- Single chart instance: all panes share one time scale → crosshair syncs automatically
+- Pane 0: MTM P&L (BaselineSeries, green above / red below zero)
+- Pane 1: IV% per leg (LineSeries, toggleable, collapsed by default)
+- Pane 2: Delta per leg (LineSeries, toggleable, collapsed by default)
+- Each pane resizable via drag handle using `IPaneApi.setHeight()`
+- `hideMtm` prop for compare mode — skips MTM pane, renders IV/Delta only
+- Toggle headers rendered OUTSIDE the chart canvas div to prevent overlap
+- `PANE_MIN = 60px` prevents panes collapsing to 0
+
+### Backend Endpoint
+- `GET /historical/chart-data-with-greeks` — bucketed OHLC joined with spot, returns `{time, open, high, low, close, spot, iv, delta, gamma, theta, vega}` per bar
+- Reuses existing `implied_vol` + `compute_greeks` from `app/core/greeks.py`
+- Greeks NOT recomputed for option chain — chain uses server-side BS at snapshot time
+
+### Excel Download
+- Build mode: MTM sheet has `Time | BTC Spot | [leg IV% | Delta | Gamma | Theta | Vega] per leg | Net Delta/Gamma/Theta/Vega | P&L`
+- Compare mode: per-strategy sheets with same columns + MTM Comparison sheet + MTM Stats sheet
+
+### MTM Stats Panel
+- Max/Min P&L with timestamps, Final P&L, Max Drawdown
+- Expandable drawdown table — all drawdown periods chronological
+
+### Compare Mode
+- Multiple named strategies (Strategy 1, 2, …), tabs to switch active strategy
+- CompareChart: P&L lines per strategy on shared chart
+- MultiPaneChart below with `hideMtm` — IV% and Delta for all legs across all strategies

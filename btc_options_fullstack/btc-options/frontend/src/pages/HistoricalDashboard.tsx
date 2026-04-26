@@ -25,6 +25,7 @@ export const HistoricalDashboard: React.FC = () => {
   // Panel mode
   const [strategyMode, setStrategyMode] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const [chartsOnly, setChartsOnly] = useState(false);
 
   // Horizontal panel resize
   const [chartPanelWidth, setChartPanelWidth] = useState<number | null>(null);
@@ -360,7 +361,7 @@ export const HistoricalDashboard: React.FC = () => {
 
   return (
     <div className="historical-container">
-      <div className="replay-wrapper">
+      {!chartsOnly && <div className="replay-wrapper">
         <ReplayController
           simulationDate={simulationDate}
           simulationTime={simulationTime}
@@ -376,10 +377,10 @@ export const HistoricalDashboard: React.FC = () => {
           onStep={adjustSimulationTime}
           onStrikeFilterChange={setStrikeFilter}
         />
-      </div>
+      </div>}
 
       <div className="historical-main">
-        {!maximized && <div className="historical-chain-panel" style={{ flex: 1, minWidth: 0 }}>
+        {!maximized && !chartsOnly && <div className="historical-chain-panel" style={{ flex: 1, minWidth: 0 }}>
           <HistoricalOptionChain
             chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain}
             strategyMode={strategyMode}
