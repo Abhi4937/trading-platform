@@ -40,8 +40,14 @@ Do NOT assume a question about behavior is a request to fix it.
 - `feature/chain-only-no-charts` — clean chain-only for testing/new development
 
 ## After Any Code Change
-- **Frontend change:** `fuser -k 3000/tcp && cd frontend && npm run dev`
-- **Backend change:** `cd docker && docker compose up --build -d backend` then restart frontend
+
+### Frontend change
+1. Kill and restart frontend: `fuser -k 3000/tcp && cd frontend && npm run dev`
+
+### Backend change
+1. Rebuild and restart backend: `cd docker && docker compose up --build -d backend`
+2. Then kill and restart frontend: `fuser -k 3000/tcp && cd frontend && npm run dev`
+
 - Always restart/rebuild immediately after making changes — do not wait for user to ask
 - Once the user confirms the change works, commit and push to current branch immediately
 
