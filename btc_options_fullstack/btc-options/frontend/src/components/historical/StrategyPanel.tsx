@@ -6,6 +6,8 @@ import type { PaneSeries } from './MultiPaneChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
 import { computeSlippagePerSide, dteFromEntry, istHour, isWeekendIst } from '../../utils/slippage';
 import type { SlippageMode, SlippageInputs } from '../../utils/slippage';
+import { computeBrokerage, BROKERAGE_RATE_LABELS } from '../../utils/brokerage';
+import type { BrokerageRate } from '../../utils/brokerage';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
@@ -87,11 +89,15 @@ interface SensitivityRow { mult: number; finalPnl: number }
 const MtmStatsPanel: React.FC<{
   stats: MtmStats;
   color?: string;
-  slipExitUsd?: number;          // exit-leg slippage to subtract from Final P&L (display only)
+  slipEntryUsd?: number;
+  slipExitUsd?: number;
+  brokerageEntryUsd?: number;
+  brokerageExitUsd?: number;
   sensitivity?: SensitivityRow[];
-}> = ({ stats, color = 'var(--accent)', slipExitUsd = 0, sensitivity }) => {
+}> = ({ stats, color = 'var(--accent)', slipEntryUsd = 0, slipExitUsd = 0,
+        brokerageEntryUsd = 0, brokerageExitUsd = 0, sensitivity }) => {
   const [expanded, setExpanded] = useState(false);
-  const displayFinal = stats.finalPnl - slipExitUsd;
+  const displayFinal = stats.finalPnl - slipExitUsd - brokerageExitUsd;
   return (
     <div className="mtm-stats-panel">
       <div className="mtm-stats-row" onClick={() => setExpanded(e => !e)} style={{ cursor: 'pointer' }}>
@@ -112,16 +118,40 @@ const MtmStatsPanel: React.FC<{
           <span className="mtm-stat-time">{fmtTs(stats.maxDdPeakTime)} → {fmtTs(stats.maxDdTroughTime)}</span>
         </div>
         <div className="mtm-stat">
-          <span className="mtm-stat-key">Final P&L{slipExitUsd > 0 ? ' (round-trip)' : ''}</span>
+          <span className="mtm-stat-key">Final P&L</span>
           <span className="mtm-stat-val" style={{ color: displayFinal >= 0 ? 'var(--green)' : 'var(--red)' }}>
             {displayFinal >= 0 ? '+' : ''}{displayFinal.toFixed(2)}
           </span>
         </div>
-        {slipExitUsd > 0 && (
-          <div className="mtm-stat" title="Round-trip slippage cost (entry + exit) deducted from Final P&L">
-            <span className="mtm-stat-key">Slippage</span>
+        {slipEntryUsd > 0 && (
+          <div className="mtm-stat" title="Entry slippage — already deducted in chart curve">
+            <span className="mtm-stat-key">Entry slip</span>
             <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
-              −{(2 * slipExitUsd).toFixed(2)}
+              −{slipEntryUsd.toFixed(2)}
+            </span>
+          </div>
+        )}
+        {slipExitUsd > 0 && (
+          <div className="mtm-stat" title="Exit slippage computed at exit time (hour + mark at close)">
+            <span className="mtm-stat-key">Exit slip</span>
+            <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
+              −{slipExitUsd.toFixed(2)}
+            </span>
+          </div>
+        )}
+        {brokerageEntryUsd > 0 && (
+          <div className="mtm-stat" title="Entry brokerage — taker fee + 18% GST (Delta Exchange India)">
+            <span className="mtm-stat-key">Entry fee</span>
+            <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
+              −{brokerageEntryUsd.toFixed(2)}
+            </span>
+          </div>
+        )}
+        {brokerageExitUsd > 0 && (
+          <div className="mtm-stat" title="Exit brokerage — taker fee + 18% GST at exit mark price">
+            <span className="mtm-stat-key">Exit fee</span>
+            <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
+              −{brokerageExitUsd.toFixed(2)}
             </span>
           </div>
         )}
@@ -269,6 +299,7 @@ export const StrategyPanel: React.FC<Props> = ({
   const [buildLoading, setBuildLoading] = useState(false);
   const [buildError, setBuildError] = useState('');
   const [buildLegGreeks, setBuildLegGreeks] = useState<Map<string, LegGreeksPoint[]>>(new Map());
+  const [buildExitLegData, setBuildExitLegData] = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
 
   // Compare mode MTM
   const [compareMtmData, setCompareMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
@@ -276,20 +307,26 @@ export const StrategyPanel: React.FC<Props> = ({
   const [compareError, setCompareError] = useState('');
   // stratId → legId → points
   const [compareLegGreeks, setCompareLegGreeks] = useState<Map<string, Map<string, LegGreeksPoint[]>>>(new Map());
+  const [compareExitLegData, setCompareExitLegData] = useState<Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>>(new Map());
 
   const [marginExpanded, setMarginExpanded] = useState(false);
   const [legsExpanded, setLegsExpanded] = useState(true);
   const [compareLegsExpanded, setCompareLegsExpanded] = useState(true);
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
-  const [rvWindowDays, setRvWindowDays] = useState<7|14|30|60|90>(7);
+  const [rvWindowDays, setRvWindowDays] = useState<7|14|30|60|90>(30);
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
 
   // Slippage controls
   const [slipEnabled, setSlipEnabled] = useState(true);
   const [slipMode, setSlipMode]       = useState<SlippageMode>('smart');
-  const [slipFlat, setSlipFlat]       = useState(5);     // $/contract per side, used in flat mode
-  const [slipMult, setSlipMult]       = useState(1.0);   // 0.5..3.0
+  const [slipFlat, setSlipFlat]       = useState(5);
+  const [slipMult, setSlipMult]       = useState(1.0);
+
+  // Brokerage controls
+  const [brokerageEnabled,  setBrokerageEnabled]  = useState(true);
+  const [brokerageRate,     setBrokerageRate]      = useState<BrokerageRate>('offer');
+  const [brokerageReferral, setBrokerageReferral] = useState(false);
 
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
@@ -325,8 +362,8 @@ export const StrategyPanel: React.FC<Props> = ({
 
 
   // Clear MTM when legs or compare strategies change
-  useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); }, [legs]);
-  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); }, [compareStrategies]);
+  useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); setBuildExitLegData([]); }, [legs]);
+  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); setCompareExitLegData(new Map()); }, [compareStrategies]);
 
   // ── Chain helpers ──────────────────────────────────────────────────────────
   const getChainForLeg = (leg: StrategyLeg): HistoricalChainRow[] =>
@@ -372,10 +409,41 @@ export const StrategyPanel: React.FC<Props> = ({
     return computeSlippagePerSide(slipEnabled, slipMode, slipFlat, multOverride ?? slipMult, inputs);
   }, [slipEnabled, slipMode, slipFlat, slipMult]);
 
+  // Exit-time slippage: same model but uses exit timestamp + exit mark + exit spot.
+  const slipPerSideAt = useCallback((
+    leg: StrategyLeg, exitTs: number, exitMark: number, exitSpot: number, multOverride?: number,
+  ): number => {
+    const inputs: SlippageInputs = {
+      spot: exitSpot,
+      markClose: exitMark,
+      dte: 0,
+      strike: leg.strike,
+      isCall: leg.type === 'CE',
+      hourIst: istHour(exitTs),
+      isWeekend: isWeekendIst(exitTs),
+    };
+    return computeSlippagePerSide(slipEnabled, slipMode, slipFlat, multOverride ?? slipMult, inputs);
+  }, [slipEnabled, slipMode, slipFlat, slipMult]);
+
   // Round-trip cost in USD (after qty / contract size). What the stats panel reports.
   const slipRoundTripUsd = useCallback((leg: StrategyLeg, multOverride?: number): number =>
     2 * slipPerSide(leg, multOverride) * leg.qty * 0.001,
   [slipPerSide]);
+
+  // ── Brokerage helpers ────────────────────────────────────────────────────────
+  // Entry-time brokerage (uses leg's entry spot + mark).
+  const brokeragePerSide = useCallback((leg: StrategyLeg): number => {
+    if (!brokerageEnabled) return 0;
+    return computeBrokerage(leg.entrySpot, leg.entryPremium, leg.qty, brokerageRate, brokerageReferral);
+  }, [brokerageEnabled, brokerageRate, brokerageReferral]);
+
+  // Exit-time brokerage (uses provided exit spot + mark, rate same as entry).
+  const brokeragePerSideAt = useCallback((
+    leg: StrategyLeg, exitMark: number, exitSpot: number,
+  ): number => {
+    if (!brokerageEnabled) return 0;
+    return computeBrokerage(exitSpot, exitMark, leg.qty, brokerageRate, brokerageReferral);
+  }, [brokerageEnabled, brokerageRate, brokerageReferral]);
 
   const getLegPnl = (leg: StrategyLeg) => {
     const dir = leg.action === 'BUY' ? 1 : -1;
@@ -510,15 +578,24 @@ export const StrategyPanel: React.FC<Props> = ({
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statsToRows(s)), 'MTM Stats');
       }
       // Slippage sensitivity sheet — Final P&L at multipliers 0.5×–3×
-      if (slipEnabled && s) {
-        const entryAtCurrent = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
-        const grossFinal = s.finalPnl + entryAtCurrent;
+      if ((slipEnabled || brokerageEnabled) && s) {
+        const slipBase = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+        const brkEntry = legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
+        const brkExit  = buildExitLegData.reduce((acc, { leg, exitMark, exitSpot }) =>
+          acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+        const grossFinal = s.finalPnl + slipBase + brkEntry;
         const sensRows = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
-          const rt = legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
+          const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
+          const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+            acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
           return {
-            Multiplier: `${m.toFixed(1)}×`,
-            'Round-trip Cost (USD)': +rt.toFixed(4),
-            'Final P&L (USD)': +(grossFinal - rt).toFixed(4),
+            'Slip Mult': `${m.toFixed(1)}×`,
+            'Entry Slip (USD)': +eSlip.toFixed(4),
+            'Exit Slip (USD)': +xSlip.toFixed(4),
+            'Entry Fee (USD)': +brkEntry.toFixed(4),
+            'Exit Fee (USD)': +brkExit.toFixed(4),
+            'Total Costs (USD)': +(eSlip + xSlip + brkEntry + brkExit).toFixed(4),
+            'Final P&L (USD)': +(grossFinal - eSlip - xSlip - brkEntry - brkExit).toFixed(4),
           };
         });
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sensRows), 'Slippage Sensitivity');
@@ -534,55 +611,66 @@ export const StrategyPanel: React.FC<Props> = ({
     setBuildError('');
     try {
       const tradeTs = simulationTimestamp;
-      const ivStartTs = computeIvStartTs(tradeTs);
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
 
+      // Fetch full contract lifetime (start_time=0) so IV/RV panes show end-to-end.
+      // MTM P&L is still anchored to tradeTs via mtmData.
       const seriesResults = await Promise.all(
         legs.map(leg =>
-          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe, rvWindowDays)
-            .then(res => ({ leg, data: res.data.filter(d => d.time >= ivStartTs && d.time <= endTs) }))
+          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, 0, timeframe, rvWindowDays)
+            .then(res => ({
+              leg,
+              allData: res.data.filter(d => d.time <= endTs),
+              data:    res.data.filter(d => d.time >= tradeTs && d.time <= endTs),
+            }))
         )
       );
 
       const timeSet = new Set<number>();
-      seriesResults.forEach(({ data }) => data.forEach(d => {
-        if (d.time >= tradeTs) timeSet.add(d.time);
-      }));
+      seriesResults.forEach(({ data }) => data.forEach(d => { timeSet.add(d.time); }));
       const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
-      // Entry-side slippage: subtracted from every chart point. Exit-side is added
-      // on top by the stats panel (see slipExitTotal below) — matches user's model.
-      const slipEntryTotal = legs.reduce(
-        (s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
+      // Entry-side slip + brokerage baked into every chart point.
+      // Exit-side costs are added by the stats panel from stored exit data.
+      const slipEntryTotal      = legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
+      const brokerageEntryTotal = legs.reduce((s, leg) => s + brokeragePerSide(leg), 0);
+      const entryDeduction      = slipEntryTotal + brokerageEntryTotal;
 
       const points: MtmPoint[] = sortedTimes.map(t => {
         let total = 0;
         seriesResults.forEach(({ leg, data }) => {
-          const pts = data.filter(d => d.time >= tradeTs && d.time <= t);
+          const pts = data.filter(d => d.time <= t);
           if (pts.length) {
             const dir = leg.action === 'BUY' ? 1 : -1;
             total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
           }
         });
-        return { time: t, pnl: total - slipEntryTotal };
+        return { time: t, pnl: total - entryDeduction };
       });
 
       const greeksMap = new Map<string, LegGreeksPoint[]>();
-      seriesResults.forEach(({ leg, data }) => {
-        greeksMap.set(leg.id, data.map(d => ({
+      seriesResults.forEach(({ leg, allData }) => {
+        greeksMap.set(leg.id, allData.map(d => ({
           time: d.time, spot: d.spot, iv: d.iv, rv: d.rv,
           delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
         })));
       });
 
+      // Capture exit-time data per leg (last bar) for exit slippage computation
+      const exitData = seriesResults.map(({ leg, data }) => {
+        const last = data.length ? data[data.length - 1] : null;
+        return last ? { leg, exitTs: last.time, exitMark: last.close, exitSpot: last.spot } : null;
+      }).filter((x): x is NonNullable<typeof x> => x !== null);
+
       setBuildMtmData(points);
       setBuildLegGreeks(greeksMap);
+      setBuildExitLegData(exitData);
     } catch {
       setBuildError('Failed to calculate MTM. Check console.');
     } finally {
       setBuildLoading(false);
     }
-  }, [legs, simulationTimestamp, endDate, endTime, timeframe, rvWindowDays, slipPerSide]);
+  }, [legs, simulationTimestamp, endDate, endTime, timeframe, rvWindowDays, slipPerSide, brokeragePerSide]);
 
   // ── Run MTM (compare mode) ─────────────────────────────────────────────────
   const runCompareMtm = useCallback(async () => {
@@ -592,61 +680,71 @@ export const StrategyPanel: React.FC<Props> = ({
     setCompareError('');
     try {
       const tradeTs = simulationTimestamp;
-      const ivStartTs = computeIvStartTs(tradeTs);
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
       const map = new Map<string, MtmPoint[]>();
       const greeksMapOuter = new Map<string, Map<string, LegGreeksPoint[]>>();
+      const exitMapOuter = new Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>();
 
       await Promise.all(nonEmpty.map(async strat => {
         const seriesResults = await Promise.all(
           strat.legs.map(leg =>
-            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe, rvWindowDays)
-              .then(res => ({ leg, data: res.data.filter(d => d.time >= ivStartTs && d.time <= endTs) }))
+            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, 0, timeframe, rvWindowDays)
+              .then(res => ({
+                leg,
+                allData: res.data.filter(d => d.time <= endTs),
+                data:    res.data.filter(d => d.time >= tradeTs && d.time <= endTs),
+              }))
           )
         );
 
         const timeSet = new Set<number>();
-        seriesResults.forEach(({ data }) => data.forEach(d => {
-          if (d.time >= tradeTs) timeSet.add(d.time);
-        }));
+        seriesResults.forEach(({ data }) => data.forEach(d => { timeSet.add(d.time); }));
         const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
-        // Entry-side slippage for this strategy (chart only — see comment in runBuildMtm)
-        const slipEntryTotal = strat.legs.reduce(
-          (s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
+        const slipEntryTotal      = strat.legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
+        const brokerageEntryTotal = strat.legs.reduce((s, leg) => s + brokeragePerSide(leg), 0);
+        const entryDeduction      = slipEntryTotal + brokerageEntryTotal;
 
         const points: MtmPoint[] = sortedTimes.map(t => {
           let total = 0;
           seriesResults.forEach(({ leg, data }) => {
-            const pts = data.filter(d => d.time >= tradeTs && d.time <= t);
+            const pts = data.filter(d => d.time <= t);
             if (pts.length) {
               const dir = leg.action === 'BUY' ? 1 : -1;
               total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
             }
           });
-          return { time: t, pnl: total - slipEntryTotal };
+          return { time: t, pnl: total - entryDeduction };
         });
 
         const legGreeksMap = new Map<string, LegGreeksPoint[]>();
-        seriesResults.forEach(({ leg, data }) => {
-          legGreeksMap.set(leg.id, data.map(d => ({
+        seriesResults.forEach(({ leg, allData }) => {
+          legGreeksMap.set(leg.id, allData.map(d => ({
             time: d.time, spot: d.spot, iv: d.iv, rv: d.rv,
             delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
           })));
         });
 
+        // Capture exit-time data per leg for exit slippage
+        const exitData = seriesResults.map(({ leg, data }) => {
+          const last = data.length ? data[data.length - 1] : null;
+          return last ? { leg, exitTs: last.time, exitMark: last.close, exitSpot: last.spot } : null;
+        }).filter((x): x is NonNullable<typeof x> => x !== null);
+
         map.set(strat.id, points);
         greeksMapOuter.set(strat.id, legGreeksMap);
+        exitMapOuter.set(strat.id, exitData);
       }));
 
       setCompareMtmData(map);
       setCompareLegGreeks(greeksMapOuter);
+      setCompareExitLegData(exitMapOuter);
     } catch {
       setCompareError('Failed to calculate MTM. Check console.');
     } finally {
       setCompareLoading(false);
     }
-  }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe, rvWindowDays, slipPerSide]);
+  }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe, rvWindowDays, slipPerSide, brokeragePerSide]);
 
   // Memoized compare MTM series — PaneSeries format (value = pnl)
   const compareMtmSeries = useMemo((): PaneSeries[] =>
@@ -858,6 +956,36 @@ export const StrategyPanel: React.FC<Props> = ({
     </div>
   );
 
+  const brokerageControls = (
+    <div style={{
+      display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center',
+      padding: '4px 10px', borderBottom: '1px solid var(--border)',
+      background: 'var(--bg1)', fontSize: '11px',
+    }}>
+      <label style={{ display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer', fontWeight: 600 }}>
+        <input type="checkbox" checked={brokerageEnabled} onChange={e => setBrokerageEnabled(e.target.checked)} />
+        <span style={{ color: 'var(--text2)' }}>Apply brokerage</span>
+      </label>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', opacity: brokerageEnabled ? 1 : 0.4 }}>
+        {(['standard', 'offer'] as BrokerageRate[]).map(r => (
+          <label key={r} style={{ display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer' }}>
+            <input type="radio" name="brk-rate" checked={brokerageRate === r}
+                   onChange={() => setBrokerageRate(r)} disabled={!brokerageEnabled} />
+            <span>{BROKERAGE_RATE_LABELS[r].label}</span>
+          </label>
+        ))}
+        <label style={{ display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer' }}>
+          <input type="checkbox" checked={brokerageReferral} disabled={!brokerageEnabled}
+                 onChange={e => setBrokerageReferral(e.target.checked)} />
+          <span>Referral −10%</span>
+        </label>
+      </div>
+      <span style={{ color: 'var(--text3)', fontSize: '10px', marginLeft: 'auto' }}>
+        Taker fee + 18% GST
+      </span>
+    </div>
+  );
+
   const endPicker = (
     <div className="mtm-range-row">
       <span className="mtm-range-label">Show until</span>
@@ -1027,12 +1155,15 @@ export const StrategyPanel: React.FC<Props> = ({
         if (!pts?.length) return;
         const st = computeMtmStats(pts);
         if (!st) return;
-        const entryAtCurrent = strat.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
-        const grossFinal = st.finalPnl + entryAtCurrent;
+        const exitLegs = compareExitLegData.get(strat.id) ?? [];
+        const baseEntry = strat.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+        const grossFinal = st.finalPnl + baseEntry;
         const row: Record<string, unknown> = { 'Strategy': strat.label };
         multipliers.forEach(m => {
-          const rt = strat.legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
-          row[`Final P&L @ ${m.toFixed(1)}×`] = +(grossFinal - rt).toFixed(4);
+          const eSlip = strat.legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
+          const xSlip = exitLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+            acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+          row[`Final P&L @ ${m.toFixed(1)}×`] = +(grossFinal - eSlip - xSlip).toFixed(4);
         });
         sensRows.push(row);
       });
@@ -1197,6 +1328,7 @@ export const StrategyPanel: React.FC<Props> = ({
               )}
             </div>
             {activeLegs.length > 0 && slippageControls}
+            {activeLegs.length > 0 && brokerageControls}
             {activeLegs.length === 0 ? (
               <div className="strategy-empty">
                 Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg to {activeCompareStrat?.label}
@@ -1211,6 +1343,10 @@ export const StrategyPanel: React.FC<Props> = ({
             {compareError && <div style={{ color: 'var(--red)', fontSize: '11px', padding: '4px 10px' }}>{compareError}</div>}
           </div>
         )}
+
+        {/* Slippage controls visible when maximized (legs panel collapsed) */}
+        {!chartsOnly && maximized && activeLegs.length > 0 && slippageControls}
+        {!chartsOnly && maximized && activeLegs.length > 0 && brokerageControls}
 
         {/* ── Compare MTM + Greeks chart (multi-pane) ── */}
         <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
@@ -1255,16 +1391,26 @@ export const StrategyPanel: React.FC<Props> = ({
                       if (!pts?.length) return null;
                       const stats = computeMtmStats(pts);
                       if (!stats) return null;
-                      const entryAtCurrent = s.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
-                      const grossFinal = stats.finalPnl + entryAtCurrent;
+                      const exitLegs  = compareExitLegData.get(s.id) ?? [];
+                      const slipEntry = s.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+                      const slipExit  = exitLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                        acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
+                      const brkEntry  = s.legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
+                      const brkExit   = exitLegs.reduce((acc, { leg, exitMark, exitSpot }) =>
+                        acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+                      const grossFinal = stats.finalPnl + slipEntry + brkEntry;
                       const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
-                        const rt = s.legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
-                        return { mult: m, finalPnl: grossFinal - rt };
+                        const eSlip = s.legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
+                        const xSlip = exitLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                          acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+                        return { mult: m, finalPnl: grossFinal - eSlip - xSlip - brkEntry - brkExit };
                       });
                       return (
                         <MtmStatsPanel
                           key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]}
-                          slipExitUsd={entryAtCurrent} sensitivity={sens}
+                          slipEntryUsd={slipEntry} slipExitUsd={slipExit}
+                          brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
+                          sensitivity={sens}
                         />
                       );
                     })}
@@ -1350,7 +1496,8 @@ export const StrategyPanel: React.FC<Props> = ({
           </div>
         </div>
 
-        {legsExpanded && legs.length > 0 && slippageControls}
+        {legs.length > 0 && (legsExpanded || maximized) && slippageControls}
+        {legs.length > 0 && (legsExpanded || maximized) && brokerageControls}
 
         {legsExpanded && (legs.length === 0 ? (
           <div className="strategy-empty">
@@ -1510,13 +1657,24 @@ export const StrategyPanel: React.FC<Props> = ({
                 {(() => {
                   const s = computeMtmStats(buildMtmData);
                   if (!s) return null;
-                  const entryAtCurrent = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
-                  const grossFinal = s.finalPnl + entryAtCurrent; // back out the entry-side cost baked into chart
+                  const slipEntry = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+                  const slipExit  = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                    acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
+                  const brkEntry  = legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
+                  const brkExit   = buildExitLegData.reduce((acc, { leg, exitMark, exitSpot }) =>
+                    acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+                  // grossFinal: back out entry costs already baked into chart
+                  const grossFinal = s.finalPnl + slipEntry + brkEntry;
                   const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
-                    const rt = legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
-                    return { mult: m, finalPnl: grossFinal - rt };
+                    const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
+                    const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                      acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+                    return { mult: m, finalPnl: grossFinal - eSlip - xSlip - brkEntry - brkExit };
                   });
-                  return <MtmStatsPanel stats={s} slipExitUsd={entryAtCurrent} sensitivity={sens} />;
+                  return <MtmStatsPanel stats={s}
+                    slipEntryUsd={slipEntry} slipExitUsd={slipExit}
+                    brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
+                    sensitivity={sens} />;
                 })()}
               </div>
             )}

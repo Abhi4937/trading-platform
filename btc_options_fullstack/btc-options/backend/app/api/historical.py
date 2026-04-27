@@ -342,7 +342,7 @@ async def get_chart_data_with_greeks(
     opt_type: str = Query(..., alias="type"),
     start_time: int = Query(...),
     timeframe: str = Query(...),
-    rv_window_days: int = Query(7),
+    rv_window_days: int = Query(30),
 ):
     conn = get_conn()
     interval_map = {
@@ -396,48 +396,48 @@ async def get_chart_data_with_greeks(
         opt_type_str = "call" if opt_type.upper() == "CE" else "put"
         K = int(strike)
 
-        # RV (Realized Volatility): rolling stdev of DAILY spot log-returns over
-        # rv_window_days, annualized × √365 × 100. Matches Delta/GVOL convention
-        # (close-to-close on UTC daily bars). For each chart bar at intraday time t,
-        # we use the last *completed* daily RV — i.e. the RV of the previous UTC day,
-        # so RV is constant within a UTC day and steps at midnight.
-        # rv_by_day_start: { day_unix → RV computed using daily returns ending that day }
-        rv_by_day_start: dict[int, float] = {}
+        # RV (Realized Volatility): rolling stdev of log-returns at the chart's own
+        # timeframe frequency, annualized × √(bars_per_year) × 100.
+        # This matches Delta Exchange analytics — RV updates every bar (intraday),
+        # not just once per day. Window = rv_window_days × bars_per_day bars.
+        BARS_PER_DAY = {'1m': 1440, '5m': 288, '15m': 96, '30m': 48, '1h': 24, '4h': 6, '1d': 1}
+        bars_per_day = BARS_PER_DAY.get(timeframe, 288)
+        rv_rolling_bars = rv_window_days * bars_per_day
+        import math as _math
+        annualize_factor = _math.sqrt(365 * bars_per_day)
+        # When start_time=0 (full contract fetch), anchor lookback to the first actual option bar
+        if start_time > 0:
+            rv_lookback_start = max(0, start_time - (rv_window_days + 5) * 86400)
+        else:
+            actual_start = int(merged['time'].min()) if not merged.empty else 0
+            rv_lookback_start = max(0, actual_start - (rv_window_days + 5) * 86400)
+        rv_by_time: dict[int, float] = {}
         try:
             import numpy as np
-            # Need rv_window_days + 1 daily closes minimum, plus a small buffer for safety.
-            rv_lookback_start = max(0, start_time - (rv_window_days + 5) * 86400) if start_time > 0 else 0
-            rv_query = f"""
+            rv_spot_query = f"""
             SELECT
-                time_bucket(INTERVAL '1 day', to_timestamp(timestamp_unix)) AS bucket,
+                time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
                 last(mark_close ORDER BY timestamp_unix) AS spot_close
             FROM read_parquet('{SPOT_DATA_PATH}')
             WHERE timestamp_unix >= {rv_lookback_start}
             GROUP BY bucket ORDER BY bucket ASC
             """
-            rv_df = conn.execute(rv_query).df()
+            rv_df = conn.execute(rv_spot_query).df()
             if not rv_df.empty and len(rv_df) >= 2:
-                rv_df['day_unix'] = rv_df['bucket'].apply(lambda x: int(x.timestamp()))
+                rv_df['time'] = rv_df['bucket'].apply(lambda x: int(x.timestamp()))
                 rv_df['log_ret'] = np.log(rv_df['spot_close'] / rv_df['spot_close'].shift(1))
-                rv_df['rv'] = rv_df['log_ret'].rolling(rv_window_days).std() * np.sqrt(365) * 100
-                # Drop rows where rv couldn't be computed (insufficient window)
+                rv_df['rv'] = rv_df['log_ret'].rolling(rv_rolling_bars).std() * annualize_factor * 100
                 valid = rv_df.dropna(subset=['rv'])
-                rv_by_day_start = dict(zip(valid['day_unix'], valid['rv']))
+                rv_by_time = dict(zip(valid['time'], valid['rv']))
         except Exception as e:
             logger.warning(f"RV computation failed: {e}")
-
-        # Look up RV for a chart bar at unix time t: take the RV of the previous
-        # completed UTC day (today's RV needs today's close — not available intraday).
-        def rv_at(t: int) -> float:
-            day_start = (t // 86400) * 86400
-            return float(rv_by_day_start.get(day_start - 86400, 0.0))
 
         records = []
         for _, row in merged.iterrows():
             t = int(row['time'])
             close = float(row['close'])
             spot = float(row['spot_close'])
-            rv_val = round(rv_at(t), 2)
+            rv_val = round(float(rv_by_time.get(t, 0.0)), 2)
             current_dt = datetime.fromtimestamp(t + bucket_secs, tz=timezone.utc)
             T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
             if close > 0 and spot > 0:
