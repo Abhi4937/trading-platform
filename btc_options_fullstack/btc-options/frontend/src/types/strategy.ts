@@ -7,6 +7,8 @@ export interface StrategyLeg {
   qty: number;
   entryPremium: number;
   entryTimestamp: number; // unix seconds — simulation time when leg was added
+  entrySpot: number;      // BTC spot at entry — frozen for slippage model inputs
+  entryOi?: number;       // open interest at entry (BTC contracts), if available
 }
 
 export interface MtmPoint {

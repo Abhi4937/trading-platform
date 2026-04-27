@@ -42,6 +42,7 @@ export interface HistoricalChartResponse {
 export interface OHLCWithGreeks extends OHLCData {
   spot: number;
   iv: number;
+  hv: number;
   delta: number;
   gamma: number;
   theta: number;

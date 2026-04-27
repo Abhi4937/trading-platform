@@ -4,10 +4,23 @@ import { historicalApi } from '../../services/historical_api';
 import { MultiPaneChart } from './MultiPaneChart';
 import type { PaneSeries } from './MultiPaneChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
+import { computeSlippagePerSide, dteFromEntry, istHour } from '../../utils/slippage';
+import type { SlippageMode, SlippageInputs } from '../../utils/slippage';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
-interface LegGreeksPoint { time: number; spot: number; iv: number; delta: number; gamma: number; theta: number; vega: number; }
+interface LegGreeksPoint { time: number; spot: number; iv: number; hv: number; delta: number; gamma: number; theta: number; vega: number; }
+
+// IV/Delta panes show 4h before trade entry, capped at 6:00 PM IST of the trade day
+// (right after 5:30 PM IST settlement — earlier data belongs to the previous expiry cycle).
+function computeIvStartTs(tradeTs: number): number {
+  const FOUR_HOURS = 4 * 3600;
+  const ist = new Date((tradeTs + 5.5 * 3600) * 1000);
+  const sixPmIstTs = Math.floor(Date.UTC(
+    ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), 12, 30,
+  ) / 1000);
+  return tradeTs > sixPmIstTs ? sixPmIstTs : tradeTs - FOUR_HOURS;
+}
 
 // ── MTM statistics ────────────────────────────────────────────────────────────
 interface DrawdownPeriod {
@@ -69,8 +82,16 @@ const fmtTs = (ts: number) => {
   return `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
 };
 
-const MtmStatsPanel: React.FC<{ stats: MtmStats; color?: string }> = ({ stats, color = 'var(--accent)' }) => {
+interface SensitivityRow { mult: number; finalPnl: number }
+
+const MtmStatsPanel: React.FC<{
+  stats: MtmStats;
+  color?: string;
+  slipExitUsd?: number;          // exit-leg slippage to subtract from Final P&L (display only)
+  sensitivity?: SensitivityRow[];
+}> = ({ stats, color = 'var(--accent)', slipExitUsd = 0, sensitivity }) => {
   const [expanded, setExpanded] = useState(false);
+  const displayFinal = stats.finalPnl - slipExitUsd;
   return (
     <div className="mtm-stats-panel">
       <div className="mtm-stats-row" onClick={() => setExpanded(e => !e)} style={{ cursor: 'pointer' }}>
@@ -91,41 +112,83 @@ const MtmStatsPanel: React.FC<{ stats: MtmStats; color?: string }> = ({ stats, c
           <span className="mtm-stat-time">{fmtTs(stats.maxDdPeakTime)} → {fmtTs(stats.maxDdTroughTime)}</span>
         </div>
         <div className="mtm-stat">
-          <span className="mtm-stat-key">Final P&L</span>
-          <span className="mtm-stat-val" style={{ color: stats.finalPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
-            {stats.finalPnl >= 0 ? '+' : ''}{stats.finalPnl.toFixed(2)}
+          <span className="mtm-stat-key">Final P&L{slipExitUsd > 0 ? ' (round-trip)' : ''}</span>
+          <span className="mtm-stat-val" style={{ color: displayFinal >= 0 ? 'var(--green)' : 'var(--red)' }}>
+            {displayFinal >= 0 ? '+' : ''}{displayFinal.toFixed(2)}
           </span>
         </div>
+        {slipExitUsd > 0 && (
+          <div className="mtm-stat" title="Round-trip slippage cost (entry + exit) deducted from Final P&L">
+            <span className="mtm-stat-key">Slippage</span>
+            <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
+              −{(2 * slipExitUsd).toFixed(2)}
+            </span>
+          </div>
+        )}
         <span className="mtm-stats-toggle">{expanded ? '▲' : '▼'} {stats.drawdowns.length} DD{stats.drawdowns.length !== 1 ? 's' : ''}</span>
       </div>
 
-      {expanded && stats.drawdowns.length > 0 && (
-        <div className="mtm-dd-table-wrap">
-          <table className="mtm-dd-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Drawdown</th>
-                <th>Peak P&L</th>
-                <th>Peak Time</th>
-                <th>Trough P&L</th>
-                <th>Trough Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.drawdowns.map((dd, i) => (
-                <tr key={i}>
-                  <td style={{ color: 'var(--text3)' }}>{i + 1}</td>
-                  <td style={{ color: 'var(--red)', fontWeight: 600 }}>{dd.drawdown.toFixed(2)}</td>
-                  <td style={{ color: dd.peakPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{dd.peakPnl >= 0 ? '+' : ''}{dd.peakPnl.toFixed(2)}</td>
-                  <td style={{ color: 'var(--text3)' }}>{fmtTs(dd.peakTime)}</td>
-                  <td style={{ color: dd.troughPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{dd.troughPnl >= 0 ? '+' : ''}{dd.troughPnl.toFixed(2)}</td>
-                  <td style={{ color: 'var(--text3)' }}>{fmtTs(dd.troughTime)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {expanded && (
+        <>
+          {sensitivity && sensitivity.length > 0 && (
+            <div className="mtm-dd-table-wrap" style={{ marginBottom: 8 }}>
+              <table className="mtm-dd-table">
+                <thead>
+                  <tr>
+                    <th colSpan={sensitivity.length + 1} style={{ textAlign: 'left', color: 'var(--text2)' }}>
+                      Slippage sensitivity — Final P&L at multiplier
+                    </th>
+                  </tr>
+                  <tr>
+                    <th>×</th>
+                    {sensitivity.map(r => <th key={r.mult}>{r.mult.toFixed(1)}×</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ color: 'var(--text3)' }}>P&L</td>
+                    {sensitivity.map(r => (
+                      <td key={r.mult} style={{
+                        color: r.finalPnl >= 0 ? 'var(--green)' : 'var(--red)',
+                        fontWeight: 600,
+                      }}>
+                        {r.finalPnl >= 0 ? '+' : ''}{r.finalPnl.toFixed(2)}
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+          {stats.drawdowns.length > 0 && (
+            <div className="mtm-dd-table-wrap">
+              <table className="mtm-dd-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Drawdown</th>
+                    <th>Peak P&L</th>
+                    <th>Peak Time</th>
+                    <th>Trough P&L</th>
+                    <th>Trough Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.drawdowns.map((dd, i) => (
+                    <tr key={i}>
+                      <td style={{ color: 'var(--text3)' }}>{i + 1}</td>
+                      <td style={{ color: 'var(--red)', fontWeight: 600 }}>{dd.drawdown.toFixed(2)}</td>
+                      <td style={{ color: dd.peakPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{dd.peakPnl >= 0 ? '+' : ''}{dd.peakPnl.toFixed(2)}</td>
+                      <td style={{ color: 'var(--text3)' }}>{fmtTs(dd.peakTime)}</td>
+                      <td style={{ color: dd.troughPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{dd.troughPnl >= 0 ? '+' : ''}{dd.troughPnl.toFixed(2)}</td>
+                      <td style={{ color: 'var(--text3)' }}>{fmtTs(dd.troughTime)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -221,6 +284,12 @@ export const StrategyPanel: React.FC<Props> = ({
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
 
+  // Slippage controls
+  const [slipEnabled, setSlipEnabled] = useState(true);
+  const [slipMode, setSlipMode]       = useState<SlippageMode>('smart');
+  const [slipFlat, setSlipFlat]       = useState(5);     // $/contract per side, used in flat mode
+  const [slipMult, setSlipMult]       = useState(1.0);   // 0.5..3.0
+
   useEffect(() => { setEndDate(selectedExpiry); }, [selectedExpiry]);
 
   // Collapse legs + margin when maximizing, restore when restoring
@@ -283,9 +352,33 @@ export const StrategyPanel: React.FC<Props> = ({
     };
   };
 
+  // ── Slippage helpers ─────────────────────────────────────────────────────
+  // Per-side slippage in $/contract — same value used by chart (entry only)
+  // and stats (round-trip = 2x). Returns 0 when disabled.
+  const slipPerSide = useCallback((leg: StrategyLeg, multOverride?: number): number => {
+    const inputs: SlippageInputs | null = leg.entrySpot > 0
+      ? {
+          spot: leg.entrySpot,
+          markClose: leg.entryPremium,
+          dte: dteFromEntry(leg.entryTimestamp, leg.expiry),
+          strike: leg.strike,
+          isCall: leg.type === 'CE',
+          hourIst: istHour(leg.entryTimestamp),
+          oiClose: leg.entryOi,
+        }
+      : null;
+    return computeSlippagePerSide(slipEnabled, slipMode, slipFlat, multOverride ?? slipMult, inputs);
+  }, [slipEnabled, slipMode, slipFlat, slipMult]);
+
+  // Round-trip cost in USD (after qty / contract size). What the stats panel reports.
+  const slipRoundTripUsd = useCallback((leg: StrategyLeg, multOverride?: number): number =>
+    2 * slipPerSide(leg, multOverride) * leg.qty * 0.001,
+  [slipPerSide]);
+
   const getLegPnl = (leg: StrategyLeg) => {
     const dir = leg.action === 'BUY' ? 1 : -1;
-    return (getCurrentPrice(leg) - leg.entryPremium) * leg.qty * dir * 0.001;
+    const gross = (getCurrentPrice(leg) - leg.entryPremium) * leg.qty * dir * 0.001;
+    return gross - slipRoundTripUsd(leg);
   };
 
   const totalPnl = legs.reduce((s, l) => s + getLegPnl(l), 0);
@@ -342,12 +435,17 @@ export const StrategyPanel: React.FC<Props> = ({
 
   const downloadExcel = () => {
     const wb = XLSX.utils.book_new();
-    const legsRows = legs.map(leg => ({
-      Action: leg.action, Expiry: leg.expiry, Strike: leg.strike, Type: leg.type,
-      Lots: leg.qty, 'Entry Premium': leg.entryPremium,
-      'Current Price': getCurrentPrice(leg),
-      'P&L (USD)': +getLegPnl(leg).toFixed(2),
-    }));
+    const legsRows = legs.map(leg => {
+      const slip = slipPerSide(leg);
+      return {
+        Action: leg.action, Expiry: leg.expiry, Strike: leg.strike, Type: leg.type,
+        Lots: leg.qty, 'Entry Premium': leg.entryPremium,
+        'Current Price': getCurrentPrice(leg),
+        'Est. Slippage Per Side ($/contract)': slipEnabled ? +slip.toFixed(4) : 0,
+        'Round-trip Slippage Cost (USD)': slipEnabled ? +(2 * slip * leg.qty * 0.001).toFixed(4) : 0,
+        'P&L (USD, after round-trip slippage)': +getLegPnl(leg).toFixed(2),
+      };
+    });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(legsRows), 'Strategy');
     if (buildMtmData.length) {
       // Build per-leg lookup: legId → Map<time, LegGreeksPoint>
@@ -362,13 +460,14 @@ export const StrategyPanel: React.FC<Props> = ({
 
       const mtmRows = buildMtmData.map(d => {
         const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
-        // spot from first leg that has data at this time
-        let spot = 0;
+        // spot + hv from first leg that has data at this time (both are underlying-only)
+        let spot = 0, hv = 0;
         for (const leg of legs) {
           const pt = legLookup.get(leg.id)?.get(d.time);
-          if (pt && pt.spot > 0) { spot = pt.spot; break; }
+          if (pt && pt.spot > 0) { spot = pt.spot; hv = pt.hv; break; }
         }
         row['BTC Spot'] = spot > 0 ? +spot.toFixed(2) : '';
+        row['HV%']      = hv > 0   ? +hv.toFixed(2)   : '';
         // per-leg Greeks
         let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
         legs.forEach(leg => {
@@ -377,17 +476,19 @@ export const StrategyPanel: React.FC<Props> = ({
           const dir = leg.action === 'BUY' ? 1 : -1;
           const scale = leg.qty * 0.001 * dir;
           if (pt) {
-            row[`${label} IV%`]   = +pt.iv.toFixed(2);
-            row[`${label} Delta`] = +(pt.delta * scale).toFixed(4);
-            row[`${label} Gamma`] = +(pt.gamma * scale).toFixed(6);
-            row[`${label} Theta`] = +(pt.theta * scale).toFixed(4);
-            row[`${label} Vega`]  = +(pt.vega  * scale).toFixed(4);
+            row[`${label} IV%`]    = +pt.iv.toFixed(2);
+            row[`${label} IV-HV%`] = +(pt.iv - pt.hv).toFixed(2);
+            row[`${label} Delta`]  = +(pt.delta * scale).toFixed(4);
+            row[`${label} Gamma`]  = +(pt.gamma * scale).toFixed(6);
+            row[`${label} Theta`]  = +(pt.theta * scale).toFixed(4);
+            row[`${label} Vega`]   = +(pt.vega  * scale).toFixed(4);
             netDelta += pt.delta * scale;
             netGamma += pt.gamma * scale;
             netTheta += pt.theta * scale;
             netVega  += pt.vega  * scale;
           } else {
-            row[`${label} IV%`] = ''; row[`${label} Delta`] = '';
+            row[`${label} IV%`] = ''; row[`${label} IV-HV%`] = '';
+            row[`${label} Delta`] = '';
             row[`${label} Gamma`] = ''; row[`${label} Theta`] = ''; row[`${label} Vega`] = '';
           }
         });
@@ -395,13 +496,30 @@ export const StrategyPanel: React.FC<Props> = ({
         row['Net Gamma'] = +netGamma.toFixed(6);
         row['Net Theta'] = +netTheta.toFixed(4);
         row['Net Vega']  = +netVega.toFixed(4);
-        row['P&L (USD)'] = +d.pnl.toFixed(4);
+        row['Est. Slippage Cost (USD)'] = slipEnabled
+          ? +(legs.reduce((s, l) => s + 2 * slipPerSide(l) * l.qty * 0.001, 0)).toFixed(4)
+          : 0;
+        row['P&L (USD, chart entry-side)'] = +d.pnl.toFixed(4);
         return row;
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mtmRows), 'MTM P&L');
       const s = computeMtmStats(buildMtmData);
       if (s) {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statsToRows(s)), 'MTM Stats');
+      }
+      // Slippage sensitivity sheet — Final P&L at multipliers 0.5×–3×
+      if (slipEnabled && s) {
+        const entryAtCurrent = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+        const grossFinal = s.finalPnl + entryAtCurrent;
+        const sensRows = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
+          const rt = legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
+          return {
+            Multiplier: `${m.toFixed(1)}×`,
+            'Round-trip Cost (USD)': +rt.toFixed(4),
+            'Final P&L (USD)': +(grossFinal - rt).toFixed(4),
+          };
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sensRows), 'Slippage Sensitivity');
       }
     }
     XLSX.writeFile(wb, `strategy_${selectedExpiry}.xlsx`);
@@ -413,36 +531,44 @@ export const StrategyPanel: React.FC<Props> = ({
     setBuildLoading(true);
     setBuildError('');
     try {
-      const startTs = simulationTimestamp;
+      const tradeTs = simulationTimestamp;
+      const ivStartTs = computeIvStartTs(tradeTs);
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
 
       const seriesResults = await Promise.all(
         legs.map(leg =>
-          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, startTs, timeframe)
-            .then(res => ({ leg, data: res.data.filter(d => d.time >= startTs && d.time <= endTs) }))
+          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe)
+            .then(res => ({ leg, data: res.data.filter(d => d.time >= ivStartTs && d.time <= endTs) }))
         )
       );
 
       const timeSet = new Set<number>();
-      seriesResults.forEach(({ data }) => data.forEach(d => timeSet.add(d.time)));
+      seriesResults.forEach(({ data }) => data.forEach(d => {
+        if (d.time >= tradeTs) timeSet.add(d.time);
+      }));
       const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+
+      // Entry-side slippage: subtracted from every chart point. Exit-side is added
+      // on top by the stats panel (see slipExitTotal below) — matches user's model.
+      const slipEntryTotal = legs.reduce(
+        (s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
 
       const points: MtmPoint[] = sortedTimes.map(t => {
         let total = 0;
         seriesResults.forEach(({ leg, data }) => {
-          const pts = data.filter(d => d.time <= t);
+          const pts = data.filter(d => d.time >= tradeTs && d.time <= t);
           if (pts.length) {
             const dir = leg.action === 'BUY' ? 1 : -1;
             total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
           }
         });
-        return { time: t, pnl: total };
+        return { time: t, pnl: total - slipEntryTotal };
       });
 
       const greeksMap = new Map<string, LegGreeksPoint[]>();
       seriesResults.forEach(({ leg, data }) => {
         greeksMap.set(leg.id, data.map(d => ({
-          time: d.time, spot: d.spot, iv: d.iv,
+          time: d.time, spot: d.spot, iv: d.iv, hv: d.hv,
           delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
         })));
       });
@@ -454,7 +580,7 @@ export const StrategyPanel: React.FC<Props> = ({
     } finally {
       setBuildLoading(false);
     }
-  }, [legs, simulationTimestamp, endDate, endTime, timeframe]);
+  }, [legs, simulationTimestamp, endDate, endTime, timeframe, slipPerSide]);
 
   // ── Run MTM (compare mode) ─────────────────────────────────────────────────
   const runCompareMtm = useCallback(async () => {
@@ -463,7 +589,8 @@ export const StrategyPanel: React.FC<Props> = ({
     setCompareLoading(true);
     setCompareError('');
     try {
-      const startTs = simulationTimestamp;
+      const tradeTs = simulationTimestamp;
+      const ivStartTs = computeIvStartTs(tradeTs);
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
       const map = new Map<string, MtmPoint[]>();
       const greeksMapOuter = new Map<string, Map<string, LegGreeksPoint[]>>();
@@ -471,31 +598,37 @@ export const StrategyPanel: React.FC<Props> = ({
       await Promise.all(nonEmpty.map(async strat => {
         const seriesResults = await Promise.all(
           strat.legs.map(leg =>
-            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, startTs, timeframe)
-              .then(res => ({ leg, data: res.data.filter(d => d.time >= startTs && d.time <= endTs) }))
+            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe)
+              .then(res => ({ leg, data: res.data.filter(d => d.time >= ivStartTs && d.time <= endTs) }))
           )
         );
 
         const timeSet = new Set<number>();
-        seriesResults.forEach(({ data }) => data.forEach(d => timeSet.add(d.time)));
+        seriesResults.forEach(({ data }) => data.forEach(d => {
+          if (d.time >= tradeTs) timeSet.add(d.time);
+        }));
         const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+
+        // Entry-side slippage for this strategy (chart only — see comment in runBuildMtm)
+        const slipEntryTotal = strat.legs.reduce(
+          (s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
 
         const points: MtmPoint[] = sortedTimes.map(t => {
           let total = 0;
           seriesResults.forEach(({ leg, data }) => {
-            const pts = data.filter(d => d.time <= t);
+            const pts = data.filter(d => d.time >= tradeTs && d.time <= t);
             if (pts.length) {
               const dir = leg.action === 'BUY' ? 1 : -1;
               total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
             }
           });
-          return { time: t, pnl: total };
+          return { time: t, pnl: total - slipEntryTotal };
         });
 
         const legGreeksMap = new Map<string, LegGreeksPoint[]>();
         seriesResults.forEach(({ leg, data }) => {
           legGreeksMap.set(leg.id, data.map(d => ({
-            time: d.time, spot: d.spot, iv: d.iv,
+            time: d.time, spot: d.spot, iv: d.iv, hv: d.hv,
             delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
           })));
         });
@@ -511,7 +644,7 @@ export const StrategyPanel: React.FC<Props> = ({
     } finally {
       setCompareLoading(false);
     }
-  }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe]);
+  }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe, slipPerSide]);
 
   // Memoized compare MTM series — PaneSeries format (value = pnl)
   const compareMtmSeries = useMemo((): PaneSeries[] =>
@@ -549,6 +682,32 @@ export const StrategyPanel: React.FC<Props> = ({
         data: (buildLegGreeks.get(leg.id) ?? []).map(p => ({ time: p.time, value: p.delta * scale })),
       };
     }).filter(s => s.data.length > 0),
+  [legs, buildLegGreeks]);
+
+  // HV is a property of the underlying — shared across all legs. Take from the first
+  // leg with data. Rendered as an extra line in the IV pane.
+  const buildHvSeries = useMemo((): PaneSeries | null => {
+    if (buildLegGreeks.size === 0) return null;
+    for (const leg of legs) {
+      const pts = buildLegGreeks.get(leg.id) ?? [];
+      if (pts.length) {
+        return {
+          id: 'hv', label: `BTC HV%`, color: '#f5b14d',
+          data: pts.map(p => ({ time: p.time, value: p.hv })),
+        };
+      }
+    }
+    return null;
+  }, [legs, buildLegGreeks]);
+
+  // IV − HV spread, per leg. Positive = options expensive vs realized; negative = cheap.
+  const buildIvHvSeries = useMemo((): PaneSeries[] =>
+    buildLegGreeks.size === 0 ? [] : legs.map((leg, i) => ({
+      id: leg.id,
+      label: `${leg.action} ${leg.strike}${leg.type}`,
+      color: STRAT_COLORS[i % STRAT_COLORS.length],
+      data: (buildLegGreeks.get(leg.id) ?? []).map(p => ({ time: p.time, value: p.iv - p.hv })),
+    })).filter(s => s.data.length > 0),
   [legs, buildLegGreeks]);
 
   const compareIvSeries = useMemo((): PaneSeries[] => {
@@ -595,12 +754,95 @@ export const StrategyPanel: React.FC<Props> = ({
     return result;
   }, [compareStrategies, compareLegGreeks]);
 
+  const compareHvSeries = useMemo((): PaneSeries | null => {
+    if (compareLegGreeks.size === 0) return null;
+    for (const strat of compareStrategies) {
+      const legGreeksMap = compareLegGreeks.get(strat.id);
+      if (!legGreeksMap) continue;
+      for (const leg of strat.legs) {
+        const pts = legGreeksMap.get(leg.id) ?? [];
+        if (pts.length) {
+          return {
+            id: 'hv', label: 'BTC HV%', color: '#f5b14d',
+            data: pts.map(p => ({ time: p.time, value: p.hv })),
+          };
+        }
+      }
+    }
+    return null;
+  }, [compareStrategies, compareLegGreeks]);
+
+  const compareIvHvSeries = useMemo((): PaneSeries[] => {
+    if (compareLegGreeks.size === 0) return [];
+    const result: PaneSeries[] = [];
+    let ci = 0;
+    compareStrategies.forEach(strat => {
+      const legGreeksMap = compareLegGreeks.get(strat.id);
+      if (!legGreeksMap) return;
+      strat.legs.forEach(leg => {
+        const pts = legGreeksMap.get(leg.id) ?? [];
+        if (!pts.length) return;
+        result.push({
+          id: `${strat.id}-${leg.id}`,
+          label: `${strat.label}: ${leg.action} ${leg.strike}${leg.type}`,
+          color: STRAT_COLORS[ci++ % STRAT_COLORS.length],
+          data: pts.map(p => ({ time: p.time, value: p.iv - p.hv })),
+        });
+      });
+    });
+    return result;
+  }, [compareStrategies, compareLegGreeks]);
+
   // ── Shared chart controls ──────────────────────────────────────────────────
   const chartControls = (
     <div style={{ display: 'flex', gap: '3px' }}>
       {(['1m','5m','15m','30m','1h'] as const).map(tf => (
         <button key={tf} className={`tf-btn${timeframe === tf ? ' active' : ''}`} onClick={() => setTimeframe(tf)}>{tf}</button>
       ))}
+    </div>
+  );
+
+  // ── Slippage controls ──────────────────────────────────────────────────────
+  const slippageControls = (
+    <div style={{
+      display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center',
+      padding: '4px 10px', borderBottom: '1px solid var(--border)',
+      background: 'var(--bg1)', fontSize: '11px',
+    }}>
+      <label style={{ display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer', fontWeight: 600 }}>
+        <input type="checkbox" checked={slipEnabled} onChange={e => setSlipEnabled(e.target.checked)} />
+        <span style={{ color: 'var(--text2)' }}>Apply slippage</span>
+      </label>
+      <div style={{ display: 'flex', gap: '4px', alignItems: 'center', opacity: slipEnabled ? 1 : 0.4 }}>
+        <label style={{ display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer' }}>
+          <input type="radio" name="slip-mode" checked={slipMode === 'smart'}
+                 onChange={() => setSlipMode('smart')} disabled={!slipEnabled} />
+          <span>Smart estimate</span>
+        </label>
+        <label style={{ display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer' }}>
+          <input type="radio" name="slip-mode" checked={slipMode === 'flat'}
+                 onChange={() => setSlipMode('flat')} disabled={!slipEnabled} />
+          <span>Flat $</span>
+        </label>
+        {slipMode === 'flat' && (
+          <input type="number" value={slipFlat} step="0.5" min="0"
+                 onChange={e => setSlipFlat(Math.max(0, Number(e.target.value) || 0))}
+                 disabled={!slipEnabled}
+                 style={{ width: '60px', padding: '1px 4px', fontSize: '11px',
+                          background: 'var(--bg2)', border: '1px solid var(--border)',
+                          color: 'var(--text1)', borderRadius: '3px' }} />
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: '5px', alignItems: 'center', opacity: slipEnabled ? 1 : 0.4 }}>
+        <span style={{ color: 'var(--text3)' }}>×</span>
+        <input type="range" min="0.5" max="3" step="0.1" value={slipMult}
+               onChange={e => setSlipMult(Number(e.target.value))}
+               disabled={!slipEnabled}
+               style={{ width: '90px' }} />
+        <span style={{ color: 'var(--text2)', fontWeight: 600, minWidth: '32px' }}>
+          {slipMult.toFixed(1)}×
+        </span>
+      </div>
     </div>
   );
 
@@ -633,6 +875,7 @@ export const StrategyPanel: React.FC<Props> = ({
             <th>Entry</th>
             <th>Current</th>
             <th>P&amp;L</th>
+            <th title="Estimated per-side slippage in $/contract (round-trip cost = 2× this × lots × 0.001)">Slip $</th>
             <th title="Implied Volatility %">IV%</th>
             <th title="Net Delta">Delta</th>
             <th title="Net Gamma">Gamma</th>
@@ -661,6 +904,9 @@ export const StrategyPanel: React.FC<Props> = ({
                 <td>{curr.toFixed(2)}</td>
                 <td style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
                   {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+                </td>
+                <td style={{ color: 'var(--text3)', fontSize: '11px' }}>
+                  {slipEnabled ? slipPerSide(leg).toFixed(2) : '-'}
                 </td>
                 <td style={{ color: 'var(--gold)' }}>{greeks ? greeks.iv_pct.toFixed(1) : '-'}</td>
                 <td style={{ color: greeks && greeks.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
@@ -695,6 +941,7 @@ export const StrategyPanel: React.FC<Props> = ({
     compareStrategies.forEach(strat => {
       strat.legs.forEach(leg => {
         const g = getLegGreeks(leg);
+        const slip = slipPerSide(leg);
         legsRows.push({
           'Strategy':      strat.label,
           'Action':        leg.action,
@@ -705,6 +952,8 @@ export const StrategyPanel: React.FC<Props> = ({
           'BTC Size':      +(leg.qty * 0.001).toFixed(3),
           'Entry Time (IST)': toIst(leg.entryTimestamp),
           'Entry Price':   +leg.entryPremium.toFixed(4),
+          'Est. Slippage Per Side ($/contract)': slipEnabled ? +slip.toFixed(4) : 0,
+          'Round-trip Slippage Cost (USD)': slipEnabled ? +(2 * slip * leg.qty * 0.001).toFixed(4) : 0,
           'IV%':           g ? +g.iv_pct.toFixed(2)  : '',
           'Delta':         g ? +g.delta.toFixed(4)   : '',
           'Gamma':         g ? +g.gamma.toFixed(5)   : '',
@@ -757,6 +1006,29 @@ export const StrategyPanel: React.FC<Props> = ({
       }
     }
 
+    // Sheet 3b: Slippage Sensitivity — Final P&L per strategy at multipliers
+    if (slipEnabled && compareMtmData.size > 0) {
+      const sensRows: Record<string, unknown>[] = [];
+      const multipliers = [0.5, 1.0, 1.5, 2.0, 3.0];
+      compareStrategies.forEach(strat => {
+        const pts = compareMtmData.get(strat.id);
+        if (!pts?.length) return;
+        const st = computeMtmStats(pts);
+        if (!st) return;
+        const entryAtCurrent = strat.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+        const grossFinal = st.finalPnl + entryAtCurrent;
+        const row: Record<string, unknown> = { 'Strategy': strat.label };
+        multipliers.forEach(m => {
+          const rt = strat.legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
+          row[`Final P&L @ ${m.toFixed(1)}×`] = +(grossFinal - rt).toFixed(4);
+        });
+        sensRows.push(row);
+      });
+      if (sensRows.length) {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sensRows), 'Slippage Sensitivity');
+      }
+    }
+
     // Sheets 4+: per-strategy MTM + per-leg Greeks
     if (compareLegGreeks.size > 0) {
       const legLabel = (leg: StrategyLeg) => `${leg.action} ${leg.strike}${leg.type}`;
@@ -776,12 +1048,13 @@ export const StrategyPanel: React.FC<Props> = ({
 
         const mtmRows = pts.map(d => {
           const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
-          let spot = 0;
+          let spot = 0, hv = 0;
           for (const leg of strat.legs) {
             const pt = legLookup.get(leg.id)?.get(d.time);
-            if (pt && pt.spot > 0) { spot = pt.spot; break; }
+            if (pt && pt.spot > 0) { spot = pt.spot; hv = pt.hv; break; }
           }
           row['BTC Spot'] = spot > 0 ? +spot.toFixed(2) : '';
+          row['HV%']      = hv > 0   ? +hv.toFixed(2)   : '';
           let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
           strat.legs.forEach(leg => {
             const label = legLabel(leg);
@@ -789,17 +1062,19 @@ export const StrategyPanel: React.FC<Props> = ({
             const dir = leg.action === 'BUY' ? 1 : -1;
             const scale = leg.qty * 0.001 * dir;
             if (pt) {
-              row[`${label} IV%`]   = +pt.iv.toFixed(2);
-              row[`${label} Delta`] = +(pt.delta * scale).toFixed(4);
-              row[`${label} Gamma`] = +(pt.gamma * scale).toFixed(6);
-              row[`${label} Theta`] = +(pt.theta * scale).toFixed(4);
-              row[`${label} Vega`]  = +(pt.vega  * scale).toFixed(4);
+              row[`${label} IV%`]    = +pt.iv.toFixed(2);
+              row[`${label} IV-HV%`] = +(pt.iv - pt.hv).toFixed(2);
+              row[`${label} Delta`]  = +(pt.delta * scale).toFixed(4);
+              row[`${label} Gamma`]  = +(pt.gamma * scale).toFixed(6);
+              row[`${label} Theta`]  = +(pt.theta * scale).toFixed(4);
+              row[`${label} Vega`]   = +(pt.vega  * scale).toFixed(4);
               netDelta += pt.delta * scale;
               netGamma += pt.gamma * scale;
               netTheta += pt.theta * scale;
               netVega  += pt.vega  * scale;
             } else {
-              row[`${label} IV%`] = ''; row[`${label} Delta`] = '';
+              row[`${label} IV%`] = ''; row[`${label} IV-HV%`] = '';
+              row[`${label} Delta`] = '';
               row[`${label} Gamma`] = ''; row[`${label} Theta`] = ''; row[`${label} Vega`] = '';
             }
           });
@@ -909,6 +1184,7 @@ export const StrategyPanel: React.FC<Props> = ({
                 <button className="strategy-btn-secondary" onClick={() => onClearCompareLegs(activeCompareStratId)}>Clear</button>
               )}
             </div>
+            {activeLegs.length > 0 && slippageControls}
             {activeLegs.length === 0 ? (
               <div className="strategy-empty">
                 Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg to {activeCompareStrat?.label}
@@ -953,6 +1229,8 @@ export const StrategyPanel: React.FC<Props> = ({
               <MultiPaneChart
                 mtmSeries={compareMtmSeries}
                 ivSeries={compareIvSeries}
+                hvSeries={compareHvSeries ?? undefined}
+                ivHvSeries={compareIvHvSeries}
                 deltaSeries={compareDeltaSeries}
                 chartsOnly={chartsOnly}
                 onToggleChartsOnly={onToggleChartsOnly}
@@ -965,8 +1243,17 @@ export const StrategyPanel: React.FC<Props> = ({
                       if (!pts?.length) return null;
                       const stats = computeMtmStats(pts);
                       if (!stats) return null;
+                      const entryAtCurrent = s.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+                      const grossFinal = stats.finalPnl + entryAtCurrent;
+                      const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
+                        const rt = s.legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
+                        return { mult: m, finalPnl: grossFinal - rt };
+                      });
                       return (
-                        <MtmStatsPanel key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]} />
+                        <MtmStatsPanel
+                          key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]}
+                          slipExitUsd={entryAtCurrent} sensitivity={sens}
+                        />
                       );
                     })}
                   </div>
@@ -1019,6 +1306,15 @@ export const StrategyPanel: React.FC<Props> = ({
                 {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USD
               </span>
             )}
+            {legs.length > 0 && slipEnabled && (() => {
+              const cost = legs.reduce((s, l) => s + slipRoundTripUsd(l), 0);
+              return cost > 0 ? (
+                <span title="Round-trip slippage cost across all legs (already deducted from P&L)"
+                      style={{ fontSize: '11px', color: 'var(--text3)' }}>
+                  slip −{cost.toFixed(2)}
+                </span>
+              ) : null;
+            })()}
             {legs.length > 0 && (
               <button className="strategy-btn-secondary" onClick={onClearLegs}>Clear</button>
             )}
@@ -1042,6 +1338,8 @@ export const StrategyPanel: React.FC<Props> = ({
           </div>
         </div>
 
+        {legsExpanded && legs.length > 0 && slippageControls}
+
         {legsExpanded && (legs.length === 0 ? (
           <div className="strategy-empty">
             Click <span className="strategy-badge buy">B</span> or <span className="strategy-badge sell">S</span> on any strike to add a leg
@@ -1060,6 +1358,17 @@ export const StrategyPanel: React.FC<Props> = ({
                 {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USD
               </span>
             </div>
+            {slipEnabled && (() => {
+              const cost = legs.reduce((s, l) => s + slipRoundTripUsd(l), 0);
+              return cost > 0 ? (
+                <div className="net-greeks-stat" title="Round-trip slippage cost (entry + exit) — already deducted from P&L">
+                  <span className="net-greeks-key">Slip</span>
+                  <span className="net-greeks-val" style={{ color: 'var(--text3)' }}>
+                    −{cost.toFixed(2)} USD
+                  </span>
+                </div>
+              ) : null;
+            })()}
             <div className="net-greeks-divider" />
             <div className="net-greeks-stat">
               <span className="net-greeks-key">Net Δ</span>
@@ -1178,13 +1487,25 @@ export const StrategyPanel: React.FC<Props> = ({
             <MultiPaneChart
               mtmData={buildMtmData}
               ivSeries={buildIvSeries}
+              hvSeries={buildHvSeries ?? undefined}
+              ivHvSeries={buildIvHvSeries}
               deltaSeries={buildDeltaSeries}
               chartsOnly={chartsOnly}
               onToggleChartsOnly={onToggleChartsOnly}
             />
             {!chartsOnly && (
               <div style={{ flexShrink: 0, overflowY: 'auto' }}>
-                {(() => { const s = computeMtmStats(buildMtmData); return s ? <MtmStatsPanel stats={s} /> : null; })()}
+                {(() => {
+                  const s = computeMtmStats(buildMtmData);
+                  if (!s) return null;
+                  const entryAtCurrent = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+                  const grossFinal = s.finalPnl + entryAtCurrent; // back out the entry-side cost baked into chart
+                  const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
+                    const rt = legs.reduce((acc, l) => acc + 2 * slipPerSide(l, m) * l.qty * 0.001, 0);
+                    return { mult: m, finalPnl: grossFinal - rt };
+                  });
+                  return <MtmStatsPanel stats={s} slipExitUsd={entryAtCurrent} sensitivity={sens} />;
+                })()}
               </div>
             )}
           </>

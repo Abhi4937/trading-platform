@@ -283,6 +283,7 @@ export const HistoricalDashboard: React.FC = () => {
       id: `${Date.now()}-${strike}-${type}-${action}`,
       expiry: selectedExpiry, strike, type, action, qty: 1,
       entryPremium: premium, entryTimestamp: ts,
+      entrySpot: spot,
     };
     if (panelMode === 'compare') {
       setCompareStrategies(prev => prev.map(s =>
@@ -291,7 +292,7 @@ export const HistoricalDashboard: React.FC = () => {
     } else {
       setStrategyLegs(prev => [...prev, leg]);
     }
-  }, [panelMode, activeCompareStratId, selectedExpiry, simTimestamp]);
+  }, [panelMode, activeCompareStratId, selectedExpiry, simTimestamp, spot]);
 
   const removeLeg = useCallback((legId: string) => {
     setStrategyLegs(prev => prev.filter(l => l.id !== legId));
