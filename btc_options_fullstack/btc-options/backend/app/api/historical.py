@@ -342,7 +342,7 @@ async def get_chart_data_with_greeks(
     opt_type: str = Query(..., alias="type"),
     start_time: int = Query(...),
     timeframe: str = Query(...),
-    hv_window_days: int = Query(30),
+    rv_window_days: int = Query(7),
 ):
     conn = get_conn()
     interval_map = {
@@ -396,39 +396,48 @@ async def get_chart_data_with_greeks(
         opt_type_str = "call" if opt_type.upper() == "CE" else "put"
         K = int(strike)
 
-        # HV: rolling stdev of log returns of spot, sampled at chart timeframe,
-        # window = hv_window_days. Fetch spot with extra lookback so HV is fully
-        # populated by start_time. Annualize using periods/year for this timeframe.
-        hv_map: dict[int, float] = {}
+        # RV (Realized Volatility): rolling stdev of DAILY spot log-returns over
+        # rv_window_days, annualized × √365 × 100. Matches Delta/GVOL convention
+        # (close-to-close on UTC daily bars). For each chart bar at intraday time t,
+        # we use the last *completed* daily RV — i.e. the RV of the previous UTC day,
+        # so RV is constant within a UTC day and steps at midnight.
+        # rv_by_day_start: { day_unix → RV computed using daily returns ending that day }
+        rv_by_day_start: dict[int, float] = {}
         try:
             import numpy as np
-            hv_window_bars = max(2, int(hv_window_days * 86400 / bucket_secs))
-            periods_per_year = 365 * 86400 / bucket_secs
-            hv_lookback_start = max(0, start_time - hv_window_days * 86400) if start_time > 0 else 0
-            hv_query = f"""
+            # Need rv_window_days + 1 daily closes minimum, plus a small buffer for safety.
+            rv_lookback_start = max(0, start_time - (rv_window_days + 5) * 86400) if start_time > 0 else 0
+            rv_query = f"""
             SELECT
-                time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+                time_bucket(INTERVAL '1 day', to_timestamp(timestamp_unix)) AS bucket,
                 last(mark_close ORDER BY timestamp_unix) AS spot_close
             FROM read_parquet('{SPOT_DATA_PATH}')
-            WHERE timestamp_unix >= {hv_lookback_start}
+            WHERE timestamp_unix >= {rv_lookback_start}
             GROUP BY bucket ORDER BY bucket ASC
             """
-            hv_df = conn.execute(hv_query).df()
-            if not hv_df.empty:
-                hv_df['time'] = hv_df['bucket'].apply(lambda x: int(x.timestamp()))
-                hv_df['log_ret'] = np.log(hv_df['spot_close'] / hv_df['spot_close'].shift(1))
-                hv_df['hv'] = hv_df['log_ret'].rolling(hv_window_bars).std() * np.sqrt(periods_per_year) * 100
-                hv_df['hv'] = hv_df['hv'].fillna(0.0)
-                hv_map = dict(zip(hv_df['time'], hv_df['hv']))
+            rv_df = conn.execute(rv_query).df()
+            if not rv_df.empty and len(rv_df) >= 2:
+                rv_df['day_unix'] = rv_df['bucket'].apply(lambda x: int(x.timestamp()))
+                rv_df['log_ret'] = np.log(rv_df['spot_close'] / rv_df['spot_close'].shift(1))
+                rv_df['rv'] = rv_df['log_ret'].rolling(rv_window_days).std() * np.sqrt(365) * 100
+                # Drop rows where rv couldn't be computed (insufficient window)
+                valid = rv_df.dropna(subset=['rv'])
+                rv_by_day_start = dict(zip(valid['day_unix'], valid['rv']))
         except Exception as e:
-            logger.warning(f"HV computation failed: {e}")
+            logger.warning(f"RV computation failed: {e}")
+
+        # Look up RV for a chart bar at unix time t: take the RV of the previous
+        # completed UTC day (today's RV needs today's close — not available intraday).
+        def rv_at(t: int) -> float:
+            day_start = (t // 86400) * 86400
+            return float(rv_by_day_start.get(day_start - 86400, 0.0))
 
         records = []
         for _, row in merged.iterrows():
             t = int(row['time'])
             close = float(row['close'])
             spot = float(row['spot_close'])
-            hv_val = round(float(hv_map.get(t, 0.0)), 2)
+            rv_val = round(rv_at(t), 2)
             current_dt = datetime.fromtimestamp(t + bucket_secs, tz=timezone.utc)
             T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
             if close > 0 and spot > 0:
@@ -437,7 +446,7 @@ async def get_chart_data_with_greeks(
                 records.append({
                     'time': t, 'open': float(row['open']), 'high': float(row['high']),
                     'low': float(row['low']), 'close': close, 'spot': round(spot, 2),
-                    'iv': round(iv * 100, 2), 'hv': hv_val,
+                    'iv': round(iv * 100, 2), 'rv': rv_val,
                     'delta': g.delta, 'gamma': g.gamma,
                     'theta': g.theta, 'vega': g.vega,
                 })
@@ -445,7 +454,7 @@ async def get_chart_data_with_greeks(
                 records.append({
                     'time': t, 'open': float(row['open']), 'high': float(row['high']),
                     'low': float(row['low']), 'close': close, 'spot': round(spot, 2),
-                    'iv': 0.0, 'hv': hv_val,
+                    'iv': 0.0, 'rv': rv_val,
                     'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0,
                 })
         return {"data": records}

@@ -5,8 +5,8 @@
  * Pane 0 — MTM P&L
  *   Build mode:   BaselineSeries (single strategy, green/red fill)
  *   Compare mode: LineSeries per strategy (mtmSeries prop)
- * Pane 1 — IV%   (LineSeries per leg + HV overlay, toggleable)
- * Pane 2 — IV-HV (LineSeries per leg, toggleable)
+ * Pane 1 — IV%   (LineSeries per leg + RV overlay, toggleable)
+ * Pane 2 — IV-RV (LineSeries per leg, toggleable)
  * Pane 3 — Delta (LineSeries per leg, toggleable)
  *
  * Anti-flicker: chart structure is rebuilt only when pane layout changes
@@ -27,8 +27,8 @@ interface Props {
   mtmData?: MtmPoint[];      // build mode: single baseline
   mtmSeries?: PaneSeries[];  // compare mode: multiple coloured lines
   ivSeries: PaneSeries[];
-  hvSeries?: PaneSeries;     // single line, overlaid in IV pane
-  ivHvSeries?: PaneSeries[]; // per-leg IV-HV spread, dedicated pane
+  rvSeries?: PaneSeries;     // single line, overlaid in IV pane
+  ivRvSeries?: PaneSeries[]; // per-leg IV-RV spread, dedicated pane
   deltaSeries: PaneSeries[];
   chartsOnly?: boolean;
   onToggleChartsOnly?: () => void;
@@ -42,7 +42,7 @@ const HDR_H    = 24;
 
 export const MultiPaneChart: React.FC<Props> = ({
   mtmData, mtmSeries,
-  ivSeries, hvSeries, ivHvSeries,
+  ivSeries, rvSeries, ivRvSeries,
   deltaSeries,
   chartsOnly = false,
   onToggleChartsOnly,
@@ -55,38 +55,38 @@ export const MultiPaneChart: React.FC<Props> = ({
   const mtmBaselineRef = useRef<any>(null);
   const mtmLineRefs    = useRef<Map<string, any>>(new Map());
   const ivRefsMap      = useRef<Map<string, any>>(new Map());
-  const hvLineRef      = useRef<any>(null);
-  const ivHvRefsMap    = useRef<Map<string, any>>(new Map());
+  const rvLineRef      = useRef<any>(null);
+  const ivRvRefsMap    = useRef<Map<string, any>>(new Map());
   const deltaRefsMap   = useRef<Map<string, any>>(new Map());
 
   // Info refs — kept in sync for use inside stable closures
   const mtmSeriesInfo  = useRef<PaneSeries[]>([]);
   const ivSeriesInfo   = useRef<PaneSeries[]>([]);
-  const hvSeriesInfo   = useRef<PaneSeries | null>(null);
-  const ivHvSeriesInfo = useRef<PaneSeries[]>([]);
+  const rvSeriesInfo   = useRef<PaneSeries | null>(null);
+  const ivRvSeriesInfo = useRef<PaneSeries[]>([]);
   const deltaSeriesInfo= useRef<PaneSeries[]>([]);
   useEffect(() => { mtmSeriesInfo.current  = mtmSeries  ?? []; }, [mtmSeries]);
   useEffect(() => { ivSeriesInfo.current   = ivSeries;         }, [ivSeries]);
-  useEffect(() => { hvSeriesInfo.current   = hvSeries ?? null; }, [hvSeries]);
-  useEffect(() => { ivHvSeriesInfo.current = ivHvSeries ?? []; }, [ivHvSeries]);
+  useEffect(() => { rvSeriesInfo.current   = rvSeries ?? null; }, [rvSeries]);
+  useEffect(() => { ivRvSeriesInfo.current = ivRvSeries ?? []; }, [ivRvSeries]);
   useEffect(() => { deltaSeriesInfo.current= deltaSeries;      }, [deltaSeries]);
 
   const [showIv,    setShowIv]    = useState(false);
-  const [showIvHv,  setShowIvHv]  = useState(false);
+  const [showIvRv,  setShowIvRv]  = useState(false);
   const [showDelta, setShowDelta] = useState(false);
   const [mtmH,   setMtmH]   = useState(DEF_MTM);
   const [ivH,    setIvH]    = useState(DEF_GRK);
-  const [ivHvH,  setIvHvH]  = useState(DEF_GRK);
+  const [ivRvH,  setIvRvH]  = useState(DEF_GRK);
   const [deltaH, setDeltaH] = useState(DEF_GRK);
 
   // Height refs — captured at mousedown to prevent cumulative drag bug
   const mtmHRef   = useRef(DEF_MTM);
   const ivHRef    = useRef(DEF_GRK);
-  const ivHvHRef  = useRef(DEF_GRK);
+  const ivRvHRef  = useRef(DEF_GRK);
   const deltaHRef = useRef(DEF_GRK);
   mtmHRef.current   = mtmH;
   ivHRef.current    = ivH;
-  ivHvHRef.current  = ivHvH;
+  ivRvHRef.current  = ivRvH;
   deltaHRef.current = deltaH;
 
   // Derived flags used as effect deps (primitives → no reference instability)
@@ -94,8 +94,8 @@ export const MultiPaneChart: React.FC<Props> = ({
   const hasMtmSeries = (mtmSeries?.length ?? 0) > 0;
   const hasMtm       = hasMtmData || hasMtmSeries;
   const nIv          = ivSeries.length;
-  const hasHv        = (hvSeries?.data.length ?? 0) > 0;
-  const nIvHv        = ivHvSeries?.length ?? 0;
+  const hasRv        = (rvSeries?.data.length ?? 0) > 0;
+  const nIvRv        = ivRvSeries?.length ?? 0;
   const nDelta       = deltaSeries.length;
 
   // ── STRUCTURE EFFECT ──────────────────────────────────────────────────────
@@ -103,21 +103,21 @@ export const MultiPaneChart: React.FC<Props> = ({
   // Data is injected separately to avoid flickering on every parent re-render.
   useEffect(() => {
     if (!containerRef.current) return;
-    if (!hasMtm && nIv === 0 && nIvHv === 0 && nDelta === 0) return;
+    if (!hasMtm && nIv === 0 && nIvRv === 0 && nDelta === 0) return;
 
     // Tear down previous instance
     if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
     mtmBaselineRef.current = null;
     mtmLineRefs.current    = new Map();
     ivRefsMap.current      = new Map();
-    hvLineRef.current      = null;
-    ivHvRefsMap.current    = new Map();
+    rvLineRef.current      = null;
+    ivRvRefsMap.current    = new Map();
     deltaRefsMap.current   = new Map();
 
     const visibleIv    = showIv    && nIv    > 0;
-    const visibleIvHv  = showIvHv  && nIvHv  > 0;
+    const visibleIvRv  = showIvRv  && nIvRv  > 0;
     const visibleDelta = showDelta && nDelta > 0;
-    const totalH = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvHv ? ivHvH : 0) + (visibleDelta ? deltaH : 0);
+    const totalH = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvRv ? ivRvH : 0) + (visibleDelta ? deltaH : 0);
     if (totalH <= 0) return;
 
     const chart = createChart(containerRef.current, {
@@ -162,7 +162,7 @@ export const MultiPaneChart: React.FC<Props> = ({
       nextPane = 1;
     }
 
-    // ── IV% pane (with HV overlay) ────────────────────────────────────────
+    // ── IV% pane (with RV overlay) ────────────────────────────────────────
     if (visibleIv) {
       if (nextPane > 0) chart.addPane();
       ivSeries.forEach(s => {
@@ -173,27 +173,27 @@ export const MultiPaneChart: React.FC<Props> = ({
         if (s.data.length) sr.setData(s.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
         ivRefsMap.current.set(s.id, sr);
       });
-      if (hasHv && hvSeries) {
+      if (hasRv && rvSeries) {
         const sr = chart.addSeries(LineSeries, {
-          color: hvSeries.color, lineWidth: 2, lineStyle: 2, priceLineVisible: false,
+          color: rvSeries.color, lineWidth: 2, lineStyle: 2, priceLineVisible: false,
           lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
         }, nextPane);
-        sr.setData(hvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
-        hvLineRef.current = sr;
+        sr.setData(rvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
+        rvLineRef.current = sr;
       }
       nextPane++;
     }
 
-    // ── IV-HV spread pane ─────────────────────────────────────────────────
-    if (visibleIvHv && ivHvSeries) {
+    // ── IV-RV spread pane ─────────────────────────────────────────────────
+    if (visibleIvRv && ivRvSeries) {
       if (nextPane > 0) chart.addPane();
-      ivHvSeries.forEach(s => {
+      ivRvSeries.forEach(s => {
         const sr = chart.addSeries(LineSeries, {
           color: s.color, lineWidth: 2, priceLineVisible: false,
           lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
         }, nextPane);
         if (s.data.length) sr.setData(s.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
-        ivHvRefsMap.current.set(s.id, sr);
+        ivRvRefsMap.current.set(s.id, sr);
       });
       nextPane++;
     }
@@ -274,28 +274,28 @@ export const MultiPaneChart: React.FC<Props> = ({
         if (rows) { html += rows; hasAny = true; }
       }
 
-      // HV value (overlaid in IV pane)
-      const hvInfo = hvSeriesInfo.current;
-      if (hvInfo && hvLineRef.current) {
-        const val = (param.seriesData.get(hvLineRef.current) as any)?.value as number | undefined;
+      // RV value (overlaid in IV pane)
+      const rvInfo = rvSeriesInfo.current;
+      if (rvInfo && rvLineRef.current) {
+        const val = (param.seriesData.get(rvLineRef.current) as any)?.value as number | undefined;
         if (val !== undefined) {
           html += `<div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;line-height:1.7">
-            <span style="color:${hvInfo.color}">${hvInfo.label}</span>
+            <span style="color:${rvInfo.color}">${rvInfo.label}</span>
             <span style="color:#e2e8f0;font-weight:700">${val.toFixed(2)}%</span>
           </div>`;
           hasAny = true;
         }
       }
 
-      // IV-HV spread values
-      const ivHvInfo = ivHvSeriesInfo.current;
-      if (ivHvInfo.length > 0) {
-        const rows = ivHvInfo.map(s => {
-          const sr  = ivHvRefsMap.current.get(s.id);
+      // IV-RV spread values
+      const ivRvInfo = ivRvSeriesInfo.current;
+      if (ivRvInfo.length > 0) {
+        const rows = ivRvInfo.map(s => {
+          const sr  = ivRvRefsMap.current.get(s.id);
           const val = sr ? (param.seriesData.get(sr) as any)?.value as number | undefined : undefined;
           if (val === undefined) return '';
           return `<div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;line-height:1.7">
-            <span style="color:${s.color}">${s.label} IV-HV</span>
+            <span style="color:${s.color}">${s.label} IV-RV</span>
             <span style="color:${val >= 0 ? '#00e5a0' : '#ff4d6a'};font-weight:700">${val >= 0 ? '+' : ''}${val.toFixed(2)}%</span>
           </div>`;
         }).filter(Boolean).join('');
@@ -337,11 +337,11 @@ export const MultiPaneChart: React.FC<Props> = ({
       chart.remove();
       chartRef.current     = null;
       mtmBaselineRef.current = null;
-      hvLineRef.current      = null;
+      rvLineRef.current      = null;
     };
   // Structural deps only — primitives, stable across reference changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasMtm, hasMtmData, hasMtmSeries, showIv, showIvHv, showDelta, nIv, nIvHv, nDelta, hasHv]);
+  }, [hasMtm, hasMtmData, hasMtmSeries, showIv, showIvRv, showDelta, nIv, nIvRv, nDelta, hasRv]);
 
   // ── DATA EFFECTS — update in-place, no chart rebuild ──────────────────────
   useEffect(() => {
@@ -370,19 +370,19 @@ export const MultiPaneChart: React.FC<Props> = ({
   }, [ivSeries]);
 
   useEffect(() => {
-    const sr = hvLineRef.current;
-    if (!sr || !hvSeries?.data.length) return;
-    sr.setData(hvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
-  }, [hvSeries]);
+    const sr = rvLineRef.current;
+    if (!sr || !rvSeries?.data.length) return;
+    sr.setData(rvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
+  }, [rvSeries]);
 
   useEffect(() => {
-    if (ivHvRefsMap.current.size === 0 || !ivHvSeries) return;
-    ivHvSeries.forEach(s => {
-      const sr = ivHvRefsMap.current.get(s.id);
+    if (ivRvRefsMap.current.size === 0 || !ivRvSeries) return;
+    ivRvSeries.forEach(s => {
+      const sr = ivRvRefsMap.current.get(s.id);
       if (sr && s.data.length) sr.setData(s.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
     });
     requestAnimationFrame(() => chartRef.current?.timeScale().fitContent());
-  }, [ivHvSeries]);
+  }, [ivRvSeries]);
 
   useEffect(() => {
     if (deltaRefsMap.current.size === 0) return;
@@ -398,9 +398,9 @@ export const MultiPaneChart: React.FC<Props> = ({
     const chart = chartRef.current;
     if (!chart) return;
     const visibleIv    = showIv    && nIv    > 0;
-    const visibleIvHv  = showIvHv  && nIvHv  > 0;
+    const visibleIvRv  = showIvRv  && nIvRv  > 0;
     const visibleDelta = showDelta && nDelta > 0;
-    const total = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvHv ? ivHvH : 0) + (visibleDelta ? deltaH : 0);
+    const total = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvRv ? ivRvH : 0) + (visibleDelta ? deltaH : 0);
     if (total <= 0) return;
     // Apply total height synchronously so the container div matches the chart.
     // Defer individual pane setHeight to a RAF so the chart has had one layout
@@ -413,10 +413,10 @@ export const MultiPaneChart: React.FC<Props> = ({
       let p = 0;
       if (hasMtm)      { c.panes()[p]?.setHeight(mtmH);   p++; }
       if (visibleIv)   { c.panes()[p]?.setHeight(ivH);    p++; }
-      if (visibleIvHv) { c.panes()[p]?.setHeight(ivHvH);  p++; }
+      if (visibleIvRv) { c.panes()[p]?.setHeight(ivRvH);  p++; }
       if (visibleDelta){ c.panes()[p]?.setHeight(deltaH); }
     });
-  }, [mtmH, ivH, ivHvH, deltaH, showIv, showIvHv, showDelta, hasMtm, nIv, nIvHv, nDelta]);
+  }, [mtmH, ivH, ivRvH, deltaH, showIv, showIvRv, showDelta, hasMtm, nIv, nIvRv, nDelta]);
 
   // ── Drag handle ────────────────────────────────────────────────────────────
   const makeDragHandle = useCallback((
@@ -433,9 +433,9 @@ export const MultiPaneChart: React.FC<Props> = ({
   }, []);
 
   const visibleIv    = showIv    && nIv    > 0;
-  const visibleIvHv  = showIvHv  && nIvHv  > 0;
+  const visibleIvRv  = showIvRv  && nIvRv  > 0;
   const visibleDelta = showDelta && nDelta > 0;
-  const totalH = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvHv ? ivHvH : 0) + (visibleDelta ? deltaH : 0);
+  const totalH = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvRv ? ivRvH : 0) + (visibleDelta ? deltaH : 0);
 
   const legendRow = (label: string, series: PaneSeries[], visible: boolean, toggle: () => void) => (
     <div onClick={toggle} style={{
@@ -456,7 +456,7 @@ export const MultiPaneChart: React.FC<Props> = ({
     </div>
   );
 
-  if (!hasMtm && nIv === 0 && nIvHv === 0 && nDelta === 0) return null;
+  if (!hasMtm && nIv === 0 && nIvRv === 0 && nDelta === 0) return null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
@@ -498,18 +498,18 @@ export const MultiPaneChart: React.FC<Props> = ({
         <div className="chart-resize-handle" onMouseDown={makeDragHandle(mtmHRef, setMtmH)} />
       )}
 
-      {/* IV% (with HV overlay) toggle + resize */}
+      {/* IV% (with RV overlay) toggle + resize */}
       {nIv > 0 && legendRow(
-        'IV% per Leg' + (hasHv ? ' + HV%' : ''),
-        hasHv && hvSeries ? [...ivSeries, hvSeries] : ivSeries,
+        'IV% per Leg' + (hasRv ? ' + RV%' : ''),
+        hasRv && rvSeries ? [...ivSeries, rvSeries] : ivSeries,
         showIv,
         () => setShowIv(v => !v),
       )}
       {showIv && <div className="chart-resize-handle" onMouseDown={makeDragHandle(ivHRef, setIvH)} />}
 
-      {/* IV-HV spread toggle + resize */}
-      {nIvHv > 0 && ivHvSeries && legendRow('IV − HV % per Leg', ivHvSeries, showIvHv, () => setShowIvHv(v => !v))}
-      {showIvHv && <div className="chart-resize-handle" onMouseDown={makeDragHandle(ivHvHRef, setIvHvH)} />}
+      {/* IV-RV spread toggle + resize */}
+      {nIvRv > 0 && ivRvSeries && legendRow('IV − RV % per Leg', ivRvSeries, showIvRv, () => setShowIvRv(v => !v))}
+      {showIvRv && <div className="chart-resize-handle" onMouseDown={makeDragHandle(ivRvHRef, setIvRvH)} />}
 
       {/* Delta toggle + resize */}
       {nDelta > 0 && legendRow('Delta per Leg', deltaSeries, showDelta, () => setShowDelta(v => !v))}

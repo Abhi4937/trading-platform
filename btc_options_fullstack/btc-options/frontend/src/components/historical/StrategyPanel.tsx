@@ -4,12 +4,12 @@ import { historicalApi } from '../../services/historical_api';
 import { MultiPaneChart } from './MultiPaneChart';
 import type { PaneSeries } from './MultiPaneChart';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
-import { computeSlippagePerSide, dteFromEntry, istHour } from '../../utils/slippage';
+import { computeSlippagePerSide, dteFromEntry, istHour, isWeekendIst } from '../../utils/slippage';
 import type { SlippageMode, SlippageInputs } from '../../utils/slippage';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow } from '../../types/historical';
 
-interface LegGreeksPoint { time: number; spot: number; iv: number; hv: number; delta: number; gamma: number; theta: number; vega: number; }
+interface LegGreeksPoint { time: number; spot: number; iv: number; rv: number; delta: number; gamma: number; theta: number; vega: number; }
 
 // IV/Delta panes show 4h before trade entry, capped at 6:00 PM IST of the trade day
 // (right after 5:30 PM IST settlement — earlier data belongs to the previous expiry cycle).
@@ -281,6 +281,7 @@ export const StrategyPanel: React.FC<Props> = ({
   const [legsExpanded, setLegsExpanded] = useState(true);
   const [compareLegsExpanded, setCompareLegsExpanded] = useState(true);
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
+  const [rvWindowDays, setRvWindowDays] = useState<7|14|30|60|90>(7);
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
 
@@ -364,6 +365,7 @@ export const StrategyPanel: React.FC<Props> = ({
           strike: leg.strike,
           isCall: leg.type === 'CE',
           hourIst: istHour(leg.entryTimestamp),
+          isWeekend: isWeekendIst(leg.entryTimestamp),
           oiClose: leg.entryOi,
         }
       : null;
@@ -460,14 +462,14 @@ export const StrategyPanel: React.FC<Props> = ({
 
       const mtmRows = buildMtmData.map(d => {
         const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
-        // spot + hv from first leg that has data at this time (both are underlying-only)
-        let spot = 0, hv = 0;
+        // spot + rv from first leg that has data at this time (both are underlying-only)
+        let spot = 0, rv = 0;
         for (const leg of legs) {
           const pt = legLookup.get(leg.id)?.get(d.time);
-          if (pt && pt.spot > 0) { spot = pt.spot; hv = pt.hv; break; }
+          if (pt && pt.spot > 0) { spot = pt.spot; rv = pt.rv; break; }
         }
         row['BTC Spot'] = spot > 0 ? +spot.toFixed(2) : '';
-        row['HV%']      = hv > 0   ? +hv.toFixed(2)   : '';
+        row['RV%']      = rv > 0   ? +rv.toFixed(2)   : '';
         // per-leg Greeks
         let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
         legs.forEach(leg => {
@@ -477,7 +479,7 @@ export const StrategyPanel: React.FC<Props> = ({
           const scale = leg.qty * 0.001 * dir;
           if (pt) {
             row[`${label} IV%`]    = +pt.iv.toFixed(2);
-            row[`${label} IV-HV%`] = +(pt.iv - pt.hv).toFixed(2);
+            row[`${label} IV-RV%`] = pt.iv > 0 ? +(pt.iv - pt.rv).toFixed(2) : '';
             row[`${label} Delta`]  = +(pt.delta * scale).toFixed(4);
             row[`${label} Gamma`]  = +(pt.gamma * scale).toFixed(6);
             row[`${label} Theta`]  = +(pt.theta * scale).toFixed(4);
@@ -487,7 +489,7 @@ export const StrategyPanel: React.FC<Props> = ({
             netTheta += pt.theta * scale;
             netVega  += pt.vega  * scale;
           } else {
-            row[`${label} IV%`] = ''; row[`${label} IV-HV%`] = '';
+            row[`${label} IV%`] = ''; row[`${label} IV-RV%`] = '';
             row[`${label} Delta`] = '';
             row[`${label} Gamma`] = ''; row[`${label} Theta`] = ''; row[`${label} Vega`] = '';
           }
@@ -537,7 +539,7 @@ export const StrategyPanel: React.FC<Props> = ({
 
       const seriesResults = await Promise.all(
         legs.map(leg =>
-          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe)
+          historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe, rvWindowDays)
             .then(res => ({ leg, data: res.data.filter(d => d.time >= ivStartTs && d.time <= endTs) }))
         )
       );
@@ -568,7 +570,7 @@ export const StrategyPanel: React.FC<Props> = ({
       const greeksMap = new Map<string, LegGreeksPoint[]>();
       seriesResults.forEach(({ leg, data }) => {
         greeksMap.set(leg.id, data.map(d => ({
-          time: d.time, spot: d.spot, iv: d.iv, hv: d.hv,
+          time: d.time, spot: d.spot, iv: d.iv, rv: d.rv,
           delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
         })));
       });
@@ -580,7 +582,7 @@ export const StrategyPanel: React.FC<Props> = ({
     } finally {
       setBuildLoading(false);
     }
-  }, [legs, simulationTimestamp, endDate, endTime, timeframe, slipPerSide]);
+  }, [legs, simulationTimestamp, endDate, endTime, timeframe, rvWindowDays, slipPerSide]);
 
   // ── Run MTM (compare mode) ─────────────────────────────────────────────────
   const runCompareMtm = useCallback(async () => {
@@ -598,7 +600,7 @@ export const StrategyPanel: React.FC<Props> = ({
       await Promise.all(nonEmpty.map(async strat => {
         const seriesResults = await Promise.all(
           strat.legs.map(leg =>
-            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe)
+            historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, ivStartTs, timeframe, rvWindowDays)
               .then(res => ({ leg, data: res.data.filter(d => d.time >= ivStartTs && d.time <= endTs) }))
           )
         );
@@ -628,7 +630,7 @@ export const StrategyPanel: React.FC<Props> = ({
         const legGreeksMap = new Map<string, LegGreeksPoint[]>();
         seriesResults.forEach(({ leg, data }) => {
           legGreeksMap.set(leg.id, data.map(d => ({
-            time: d.time, spot: d.spot, iv: d.iv, hv: d.hv,
+            time: d.time, spot: d.spot, iv: d.iv, rv: d.rv,
             delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
           })));
         });
@@ -644,7 +646,7 @@ export const StrategyPanel: React.FC<Props> = ({
     } finally {
       setCompareLoading(false);
     }
-  }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe, slipPerSide]);
+  }, [compareStrategies, simulationTimestamp, endDate, endTime, timeframe, rvWindowDays, slipPerSide]);
 
   // Memoized compare MTM series — PaneSeries format (value = pnl)
   const compareMtmSeries = useMemo((): PaneSeries[] =>
@@ -684,29 +686,32 @@ export const StrategyPanel: React.FC<Props> = ({
     }).filter(s => s.data.length > 0),
   [legs, buildLegGreeks]);
 
-  // HV is a property of the underlying — shared across all legs. Take from the first
+  // RV is a property of the underlying — shared across all legs. Take from the first
   // leg with data. Rendered as an extra line in the IV pane.
-  const buildHvSeries = useMemo((): PaneSeries | null => {
+  const buildRvSeries = useMemo((): PaneSeries | null => {
     if (buildLegGreeks.size === 0) return null;
     for (const leg of legs) {
       const pts = buildLegGreeks.get(leg.id) ?? [];
       if (pts.length) {
         return {
-          id: 'hv', label: `BTC HV%`, color: '#f5b14d',
-          data: pts.map(p => ({ time: p.time, value: p.hv })),
+          id: 'rv', label: `BTC RV%`, color: '#f5b14d',
+          data: pts.filter(p => p.rv > 0).map(p => ({ time: p.time, value: p.rv })),
         };
       }
     }
     return null;
   }, [legs, buildLegGreeks]);
 
-  // IV − HV spread, per leg. Positive = options expensive vs realized; negative = cheap.
-  const buildIvHvSeries = useMemo((): PaneSeries[] =>
+  // IV − RV spread, per leg. Positive = options expensive vs realized; negative = cheap.
+  // Skip points where IV is 0 (no-trade bars) — would otherwise show -RV phantom spikes.
+  const buildIvRvSeries = useMemo((): PaneSeries[] =>
     buildLegGreeks.size === 0 ? [] : legs.map((leg, i) => ({
       id: leg.id,
       label: `${leg.action} ${leg.strike}${leg.type}`,
       color: STRAT_COLORS[i % STRAT_COLORS.length],
-      data: (buildLegGreeks.get(leg.id) ?? []).map(p => ({ time: p.time, value: p.iv - p.hv })),
+      data: (buildLegGreeks.get(leg.id) ?? [])
+        .filter(p => p.iv > 0 && p.rv > 0)
+        .map(p => ({ time: p.time, value: p.iv - p.rv })),
     })).filter(s => s.data.length > 0),
   [legs, buildLegGreeks]);
 
@@ -754,7 +759,7 @@ export const StrategyPanel: React.FC<Props> = ({
     return result;
   }, [compareStrategies, compareLegGreeks]);
 
-  const compareHvSeries = useMemo((): PaneSeries | null => {
+  const compareRvSeries = useMemo((): PaneSeries | null => {
     if (compareLegGreeks.size === 0) return null;
     for (const strat of compareStrategies) {
       const legGreeksMap = compareLegGreeks.get(strat.id);
@@ -763,8 +768,8 @@ export const StrategyPanel: React.FC<Props> = ({
         const pts = legGreeksMap.get(leg.id) ?? [];
         if (pts.length) {
           return {
-            id: 'hv', label: 'BTC HV%', color: '#f5b14d',
-            data: pts.map(p => ({ time: p.time, value: p.hv })),
+            id: 'rv', label: 'BTC RV%', color: '#f5b14d',
+            data: pts.filter(p => p.rv > 0).map(p => ({ time: p.time, value: p.rv })),
           };
         }
       }
@@ -772,7 +777,7 @@ export const StrategyPanel: React.FC<Props> = ({
     return null;
   }, [compareStrategies, compareLegGreeks]);
 
-  const compareIvHvSeries = useMemo((): PaneSeries[] => {
+  const compareIvRvSeries = useMemo((): PaneSeries[] => {
     if (compareLegGreeks.size === 0) return [];
     const result: PaneSeries[] = [];
     let ci = 0;
@@ -786,7 +791,7 @@ export const StrategyPanel: React.FC<Props> = ({
           id: `${strat.id}-${leg.id}`,
           label: `${strat.label}: ${leg.action} ${leg.strike}${leg.type}`,
           color: STRAT_COLORS[ci++ % STRAT_COLORS.length],
-          data: pts.map(p => ({ time: p.time, value: p.iv - p.hv })),
+          data: pts.filter(p => p.iv > 0 && p.rv > 0).map(p => ({ time: p.time, value: p.iv - p.rv })),
         });
       });
     });
@@ -795,10 +800,23 @@ export const StrategyPanel: React.FC<Props> = ({
 
   // ── Shared chart controls ──────────────────────────────────────────────────
   const chartControls = (
-    <div style={{ display: 'flex', gap: '3px' }}>
-      {(['1m','5m','15m','30m','1h'] as const).map(tf => (
-        <button key={tf} className={`tf-btn${timeframe === tf ? ' active' : ''}`} onClick={() => setTimeframe(tf)}>{tf}</button>
-      ))}
+    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: '3px' }}>
+        {(['1m','5m','15m','30m','1h'] as const).map(tf => (
+          <button key={tf} className={`tf-btn${timeframe === tf ? ' active' : ''}`} onClick={() => setTimeframe(tf)}>{tf}</button>
+        ))}
+      </div>
+      <span style={{ fontSize: '11px', color: 'var(--text3)' }}>RV</span>
+      <div style={{ display: 'flex', gap: '3px' }}>
+        {([7,14,30,60,90] as const).map(d => (
+          <button
+            key={d}
+            className={`tf-btn${rvWindowDays === d ? ' active' : ''}`}
+            onClick={() => setRvWindowDays(d)}
+            title={`${d}-day realized volatility (daily close-to-close)`}
+          >{d}d</button>
+        ))}
+      </div>
     </div>
   );
 
@@ -833,16 +851,10 @@ export const StrategyPanel: React.FC<Props> = ({
                           color: 'var(--text1)', borderRadius: '3px' }} />
         )}
       </div>
-      <div style={{ display: 'flex', gap: '5px', alignItems: 'center', opacity: slipEnabled ? 1 : 0.4 }}>
-        <span style={{ color: 'var(--text3)' }}>×</span>
-        <input type="range" min="0.5" max="3" step="0.1" value={slipMult}
-               onChange={e => setSlipMult(Number(e.target.value))}
-               disabled={!slipEnabled}
-               style={{ width: '90px' }} />
-        <span style={{ color: 'var(--text2)', fontWeight: 600, minWidth: '32px' }}>
-          {slipMult.toFixed(1)}×
-        </span>
-      </div>
+      <span title="Stress scenarios are shown in the MTM Stats sensitivity table"
+            style={{ color: 'var(--text3)', fontSize: '10px', marginLeft: 'auto' }}>
+        Sensitivity 0.5×–3× → see MTM Stats
+      </span>
     </div>
   );
 
@@ -1048,13 +1060,13 @@ export const StrategyPanel: React.FC<Props> = ({
 
         const mtmRows = pts.map(d => {
           const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
-          let spot = 0, hv = 0;
+          let spot = 0, rv = 0;
           for (const leg of strat.legs) {
             const pt = legLookup.get(leg.id)?.get(d.time);
-            if (pt && pt.spot > 0) { spot = pt.spot; hv = pt.hv; break; }
+            if (pt && pt.spot > 0) { spot = pt.spot; rv = pt.rv; break; }
           }
           row['BTC Spot'] = spot > 0 ? +spot.toFixed(2) : '';
-          row['HV%']      = hv > 0   ? +hv.toFixed(2)   : '';
+          row['RV%']      = rv > 0   ? +rv.toFixed(2)   : '';
           let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
           strat.legs.forEach(leg => {
             const label = legLabel(leg);
@@ -1063,7 +1075,7 @@ export const StrategyPanel: React.FC<Props> = ({
             const scale = leg.qty * 0.001 * dir;
             if (pt) {
               row[`${label} IV%`]    = +pt.iv.toFixed(2);
-              row[`${label} IV-HV%`] = +(pt.iv - pt.hv).toFixed(2);
+              row[`${label} IV-RV%`] = pt.iv > 0 ? +(pt.iv - pt.rv).toFixed(2) : '';
               row[`${label} Delta`]  = +(pt.delta * scale).toFixed(4);
               row[`${label} Gamma`]  = +(pt.gamma * scale).toFixed(6);
               row[`${label} Theta`]  = +(pt.theta * scale).toFixed(4);
@@ -1073,7 +1085,7 @@ export const StrategyPanel: React.FC<Props> = ({
               netTheta += pt.theta * scale;
               netVega  += pt.vega  * scale;
             } else {
-              row[`${label} IV%`] = ''; row[`${label} IV-HV%`] = '';
+              row[`${label} IV%`] = ''; row[`${label} IV-RV%`] = '';
               row[`${label} Delta`] = '';
               row[`${label} Gamma`] = ''; row[`${label} Theta`] = ''; row[`${label} Vega`] = '';
             }
@@ -1229,8 +1241,8 @@ export const StrategyPanel: React.FC<Props> = ({
               <MultiPaneChart
                 mtmSeries={compareMtmSeries}
                 ivSeries={compareIvSeries}
-                hvSeries={compareHvSeries ?? undefined}
-                ivHvSeries={compareIvHvSeries}
+                rvSeries={compareRvSeries ?? undefined}
+                ivRvSeries={compareIvRvSeries}
                 deltaSeries={compareDeltaSeries}
                 chartsOnly={chartsOnly}
                 onToggleChartsOnly={onToggleChartsOnly}
@@ -1487,8 +1499,8 @@ export const StrategyPanel: React.FC<Props> = ({
             <MultiPaneChart
               mtmData={buildMtmData}
               ivSeries={buildIvSeries}
-              hvSeries={buildHvSeries ?? undefined}
-              ivHvSeries={buildIvHvSeries}
+              rvSeries={buildRvSeries ?? undefined}
+              ivRvSeries={buildIvRvSeries}
               deltaSeries={buildDeltaSeries}
               chartsOnly={chartsOnly}
               onToggleChartsOnly={onToggleChartsOnly}

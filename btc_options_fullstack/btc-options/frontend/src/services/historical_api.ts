@@ -43,8 +43,8 @@ export const historicalApi = {
     return res.json();
   },
 
-  async getChartDataWithGreeks(expiry: string, strike: number, type: 'CE' | 'PE', startTime: number, timeframe: string, signal?: AbortSignal): Promise<ChartDataWithGreeksResponse> {
-    const res = await fetch(`${API_BASE}/historical/chart-data-with-greeks?expiry=${expiry}&strike=${strike}&type=${type}&start_time=${startTime}&timeframe=${timeframe}`, { signal });
+  async getChartDataWithGreeks(expiry: string, strike: number, type: 'CE' | 'PE', startTime: number, timeframe: string, rvWindowDays: number = 7, signal?: AbortSignal): Promise<ChartDataWithGreeksResponse> {
+    const res = await fetch(`${API_BASE}/historical/chart-data-with-greeks?expiry=${expiry}&strike=${strike}&type=${type}&start_time=${startTime}&timeframe=${timeframe}&rv_window_days=${rvWindowDays}`, { signal });
     if (!res.ok) throw new Error('Failed to fetch chart data with greeks');
     return res.json();
   },
