@@ -342,7 +342,7 @@ async def get_chart_data_with_greeks(
     opt_type: str = Query(..., alias="type"),
     start_time: int = Query(...),
     timeframe: str = Query(...),
-    rv_window_days: int = Query(30),
+    rv_window_days: int = Query(7),
 ):
     conn = get_conn()
     interval_map = {
