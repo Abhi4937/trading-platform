@@ -449,6 +449,8 @@ export const HistoricalDashboard: React.FC = () => {
               simulationTimestamp={currentSimTimestamp}
               maximized={maximized}
               onToggleMaximize={() => setMaximized(m => !m)}
+              chartsOnly={chartsOnly}
+              onToggleChartsOnly={() => setChartsOnly(c => !c)}
             />
           ) : (
             <>

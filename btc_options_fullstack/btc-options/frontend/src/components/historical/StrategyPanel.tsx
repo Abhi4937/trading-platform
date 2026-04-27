@@ -93,9 +93,10 @@ const MtmStatsPanel: React.FC<{
   slipExitUsd?: number;
   brokerageEntryUsd?: number;
   brokerageExitUsd?: number;
+  maxExitPnl?: number;   // peak P&L net of exit costs at that moment
   sensitivity?: SensitivityRow[];
 }> = ({ stats, color = 'var(--accent)', slipEntryUsd = 0, slipExitUsd = 0,
-        brokerageEntryUsd = 0, brokerageExitUsd = 0, sensitivity }) => {
+        brokerageEntryUsd = 0, brokerageExitUsd = 0, maxExitPnl, sensitivity }) => {
   const [expanded, setExpanded] = useState(false);
   const displayFinal = stats.finalPnl - slipExitUsd - brokerageExitUsd;
   return (
@@ -107,6 +108,14 @@ const MtmStatsPanel: React.FC<{
           <span className="mtm-stat-val" style={{ color: 'var(--green)' }}>+{stats.maxPnl.toFixed(2)}</span>
           <span className="mtm-stat-time">{fmtTs(stats.maxPnlTime)}</span>
         </div>
+        {maxExitPnl !== undefined && (
+          <div className="mtm-stat" title="Net P&L if you had closed at the peak (after exit slip + exit fee at that moment)">
+            <span className="mtm-stat-key">If closed @ peak</span>
+            <span className="mtm-stat-val" style={{ color: maxExitPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+              {maxExitPnl >= 0 ? '+' : ''}{maxExitPnl.toFixed(2)}
+            </span>
+          </div>
+        )}
         <div className="mtm-stat">
           <span className="mtm-stat-key">Min P&L</span>
           <span className="mtm-stat-val" style={{ color: stats.minPnl < 0 ? 'var(--red)' : 'var(--green)' }}>{stats.minPnl.toFixed(2)}</span>
@@ -299,7 +308,8 @@ export const StrategyPanel: React.FC<Props> = ({
   const [buildLoading, setBuildLoading] = useState(false);
   const [buildError, setBuildError] = useState('');
   const [buildLegGreeks, setBuildLegGreeks] = useState<Map<string, LegGreeksPoint[]>>(new Map());
-  const [buildExitLegData, setBuildExitLegData] = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
+  const [buildExitLegData,    setBuildExitLegData]    = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
+  const [buildMaxPnlExitData, setBuildMaxPnlExitData] = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
 
   // Compare mode MTM
   const [compareMtmData, setCompareMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
@@ -307,13 +317,14 @@ export const StrategyPanel: React.FC<Props> = ({
   const [compareError, setCompareError] = useState('');
   // stratId → legId → points
   const [compareLegGreeks, setCompareLegGreeks] = useState<Map<string, Map<string, LegGreeksPoint[]>>>(new Map());
-  const [compareExitLegData, setCompareExitLegData] = useState<Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>>(new Map());
+  const [compareExitLegData,    setCompareExitLegData]    = useState<Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>>(new Map());
+  const [compareMaxPnlExitData, setCompareMaxPnlExitData] = useState<Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>>(new Map());
 
   const [marginExpanded, setMarginExpanded] = useState(false);
   const [legsExpanded, setLegsExpanded] = useState(true);
   const [compareLegsExpanded, setCompareLegsExpanded] = useState(true);
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
-  const [rvWindowDays, setRvWindowDays] = useState<7|14|30|60|90>(30);
+  const [rvWindowDays, setRvWindowDays] = useState<7|14|30|60|90>(7);
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
 
@@ -362,8 +373,8 @@ export const StrategyPanel: React.FC<Props> = ({
 
 
   // Clear MTM when legs or compare strategies change
-  useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); setBuildExitLegData([]); }, [legs]);
-  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); setCompareExitLegData(new Map()); }, [compareStrategies]);
+  useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); setBuildExitLegData([]); setBuildMaxPnlExitData([]); }, [legs]);
+  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); setCompareExitLegData(new Map()); setCompareMaxPnlExitData(new Map()); }, [compareStrategies]);
 
   // ── Chain helpers ──────────────────────────────────────────────────────────
   const getChainForLeg = (leg: StrategyLeg): HistoricalChainRow[] =>
@@ -662,9 +673,18 @@ export const StrategyPanel: React.FC<Props> = ({
         return last ? { leg, exitTs: last.time, exitMark: last.close, exitSpot: last.spot } : null;
       }).filter((x): x is NonNullable<typeof x> => x !== null);
 
+      // Capture per-leg mark/spot at the peak P&L bar (for "if closed @ peak" stat)
+      const maxPoint = points.length ? points.reduce((m, p) => p.pnl > m.pnl ? p : m, points[0]) : null;
+      const maxExitData = maxPoint ? seriesResults.map(({ leg, data }) => {
+        const bar = data.filter(d => d.time <= maxPoint.time);
+        const last = bar.length ? bar[bar.length - 1] : null;
+        return last ? { leg, exitTs: last.time, exitMark: last.close, exitSpot: last.spot } : null;
+      }).filter((x): x is NonNullable<typeof x> => x !== null) : [];
+
       setBuildMtmData(points);
       setBuildLegGreeks(greeksMap);
       setBuildExitLegData(exitData);
+      setBuildMaxPnlExitData(maxExitData);
     } catch {
       setBuildError('Failed to calculate MTM. Check console.');
     } finally {
@@ -683,7 +703,8 @@ export const StrategyPanel: React.FC<Props> = ({
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
       const map = new Map<string, MtmPoint[]>();
       const greeksMapOuter = new Map<string, Map<string, LegGreeksPoint[]>>();
-      const exitMapOuter = new Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>();
+      const exitMapOuter    = new Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>();
+      const maxPnlMapOuter  = new Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>();
 
       await Promise.all(nonEmpty.map(async strat => {
         const seriesResults = await Promise.all(
@@ -731,14 +752,24 @@ export const StrategyPanel: React.FC<Props> = ({
           return last ? { leg, exitTs: last.time, exitMark: last.close, exitSpot: last.spot } : null;
         }).filter((x): x is NonNullable<typeof x> => x !== null);
 
+        // Capture per-leg mark/spot at peak P&L bar
+        const maxPoint = points.length ? points.reduce((m, p) => p.pnl > m.pnl ? p : m, points[0]) : null;
+        const maxExitData = maxPoint ? seriesResults.map(({ leg, data }) => {
+          const bar = data.filter(d => d.time <= maxPoint.time);
+          const last = bar.length ? bar[bar.length - 1] : null;
+          return last ? { leg, exitTs: last.time, exitMark: last.close, exitSpot: last.spot } : null;
+        }).filter((x): x is NonNullable<typeof x> => x !== null) : [];
+
         map.set(strat.id, points);
         greeksMapOuter.set(strat.id, legGreeksMap);
         exitMapOuter.set(strat.id, exitData);
+        maxPnlMapOuter.set(strat.id, maxExitData);
       }));
 
       setCompareMtmData(map);
       setCompareLegGreeks(greeksMapOuter);
       setCompareExitLegData(exitMapOuter);
+      setCompareMaxPnlExitData(maxPnlMapOuter);
     } catch {
       setCompareError('Failed to calculate MTM. Check console.');
     } finally {
@@ -1395,10 +1426,18 @@ export const StrategyPanel: React.FC<Props> = ({
                       const slipEntry = s.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
                       const slipExit  = exitLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
                         acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
-                      const brkEntry  = s.legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
-                      const brkExit   = exitLegs.reduce((acc, { leg, exitMark, exitSpot }) =>
+                      const brkEntry    = s.legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
+                      const brkExit     = exitLegs.reduce((acc, { leg, exitMark, exitSpot }) =>
                         acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
-                      const grossFinal = stats.finalPnl + slipEntry + brkEntry;
+                      const grossFinal  = stats.finalPnl + slipEntry + brkEntry;
+                      const maxPnlLegs  = compareMaxPnlExitData.get(s.id) ?? [];
+                      const peakExitSlip = maxPnlLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                        acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
+                      const peakExitBrk  = maxPnlLegs.reduce((acc, { leg, exitMark, exitSpot }) =>
+                        acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+                      const maxExitPnl  = maxPnlLegs.length > 0
+                        ? stats.maxPnl - peakExitSlip - peakExitBrk
+                        : undefined;
                       const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
                         const eSlip = s.legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
                         const xSlip = exitLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
@@ -1410,7 +1449,7 @@ export const StrategyPanel: React.FC<Props> = ({
                           key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]}
                           slipEntryUsd={slipEntry} slipExitUsd={slipExit}
                           brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
-                          sensitivity={sens}
+                          maxExitPnl={maxExitPnl} sensitivity={sens}
                         />
                       );
                     })}
@@ -1607,6 +1646,11 @@ export const StrategyPanel: React.FC<Props> = ({
                 <div className="margin-detail-row"><span className="margin-detail-label">Premium Collected</span><span className="margin-detail-val" style={{ color: 'var(--green)' }}>{fmt(marginResult.totalPremiumCollected)} USDT</span></div>
                 <div className="margin-detail-row"><span className="margin-detail-label">Margin / Notional</span><span className="margin-detail-val">{((marginResult.portfolioMargin / marginResult.totalNotional) * 100).toFixed(2)}%</span></div>
                 <div className="margin-detail-row"><span className="margin-detail-label">Margin per Lot</span><span className="margin-detail-val">{fmt(marginResult.marginPerLot)} USDT</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Maintenance Margin</span><span className="margin-detail-val">{fmt(marginResult.maintenanceMargin)} USDT</span></div>
+                <div className="margin-detail-row">
+                  <span className="margin-detail-label">Floor Rate (OM%)</span>
+                  <span className="margin-detail-val">{(marginResult.omPctApplied * 100).toFixed(3)}% <span style={{ color: 'var(--text3)', fontSize: '10px' }}>on {fmt(marginResult.shortOptionsNotional)} short</span></span>
+                </div>
               </div>
               <div className="margin-scenarios">
                 <div className="margin-scenario-row worst">
@@ -1621,8 +1665,8 @@ export const StrategyPanel: React.FC<Props> = ({
                 </div>
               </div>
               <div className="margin-tier-info">
-                Stress tier: ±{(marginResult.priceShockApplied * 100).toFixed(0)}% price · +{marginResult.volUpApplied}pp / −{marginResult.volDownApplied}pp vol
-                <span className="margin-disclaimer-icon" title="Estimated margin based on Delta Exchange methodology. Actual may differ 10–15%.">&nbsp;ⓘ</span>
+                Stress: ±{(marginResult.priceShockApplied * 100).toFixed(1)}% price · IV +{(marginResult.volUpApplied * 100).toFixed(1)}% / −{(marginResult.volDownApplied * 100).toFixed(1)}% @ {marginResult.minDteDaysApplied.toFixed(1)} DTE
+                <span className="margin-disclaimer-icon" title="Matches Delta Exchange India official portfolio-margin methodology (29-scenario stress-test, continuous spans, DTE-adjusted IV shocks).">&nbsp;ⓘ</span>
               </div>
             </div>
           )}
@@ -1665,6 +1709,14 @@ export const StrategyPanel: React.FC<Props> = ({
                     acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
                   // grossFinal: back out entry costs already baked into chart
                   const grossFinal = s.finalPnl + slipEntry + brkEntry;
+                  // "if closed @ peak" — exit costs computed at peak-bar mark/spot
+                  const peakExitSlip = buildMaxPnlExitData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                    acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
+                  const peakExitBrk  = buildMaxPnlExitData.reduce((acc, { leg, exitMark, exitSpot }) =>
+                    acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+                  const maxExitPnl = buildMaxPnlExitData.length > 0
+                    ? s.maxPnl - peakExitSlip - peakExitBrk
+                    : undefined;
                   const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
                     const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
                     const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
@@ -1674,7 +1726,7 @@ export const StrategyPanel: React.FC<Props> = ({
                   return <MtmStatsPanel stats={s}
                     slipEntryUsd={slipEntry} slipExitUsd={slipExit}
                     brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
-                    sensitivity={sens} />;
+                    maxExitPnl={maxExitPnl} sensitivity={sens} />;
                 })()}
               </div>
             )}
