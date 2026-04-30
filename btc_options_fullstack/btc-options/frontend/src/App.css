@@ -1238,6 +1238,11 @@ tr.leg-selected-row td.strike-cell {
 }
 
 /* Small phones: ≤ 480px */
+/* ── Payoff slider ── */
+.payoff-slider { -webkit-appearance: none; appearance: none; height: 3px; background: var(--bg3); border-radius: 2px; outline: none; flex: 1; }
+.payoff-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+.payoff-slider::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--accent); cursor: pointer; border: none; }
+
 @media (max-width: 480px) {
   .topbar { padding: 5px 8px; gap: 6px; }
   .logo { font-size: 13px; }

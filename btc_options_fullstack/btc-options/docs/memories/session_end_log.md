@@ -161,3 +161,165 @@ da644eb feat: Compare button — per-leg MTM curves on shared chart
  M frontend/src/pages/HistoricalDashboard.tsx
 ?? "UI ss/"
 ```
+
+---
+## Snapshot — 2026-04-27 11:10 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+c0c38a3 feat: Greeks time series in MTM download — per-leg + net portfolio
+04fcea8 feat: draggable panel divider + zero reference line on compare chart
+06637b8 feat: compare mode collapsible legs + draggable chart resize + DD sort by time
+251fab5 feat: maximize strategy builder + fix expiry after settlement
+d646676 feat: MTM statistics panel — max/min P&L, max drawdown, all drawdown periods
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/backend/app/api/historical.py      |  53 ++++---
+ .../src/components/historical/MultiPaneChart.tsx   | 130 ++++++++--------
+ .../src/components/historical/StrategyPanel.tsx    | 110 +++++++------
+ .../frontend/src/services/historical_api.ts        |   4 +-
+ .../btc-options/frontend/src/types/historical.ts   |   2 +-
+ .../btc-options/frontend/src/utils/slippage.ts     | 173 ++++++++++-----------
+ 6 files changed, 245 insertions(+), 227 deletions(-)
+```
+
+### Git Status
+```
+ M backend/app/api/historical.py
+ M frontend/src/components/historical/MultiPaneChart.tsx
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/services/historical_api.ts
+ M frontend/src/types/historical.ts
+ M frontend/src/utils/slippage.ts
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? margin-calculator.jsx
+?? modify-codebase-for-deployment.md
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-04-27 11:29 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+c0c38a3 feat: Greeks time series in MTM download — per-leg + net portfolio
+04fcea8 feat: draggable panel divider + zero reference line on compare chart
+06637b8 feat: compare mode collapsible legs + draggable chart resize + DD sort by time
+251fab5 feat: maximize strategy builder + fix expiry after settlement
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   |  43 +++++
+ .../src/components/historical/StrategyPanel.tsx    | 116 ++++++++++----
+ .../btc-options/frontend/src/utils/slippage.ts     | 173 ++++++++++-----------
+ 3 files changed, 217 insertions(+), 115 deletions(-)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/utils/slippage.ts
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? margin-calculator.jsx
+?? modify-codebase-for-deployment.md
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-04-27 13:49 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+c0c38a3 feat: Greeks time series in MTM download — per-leg + net portfolio
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   |  80 +++++++++
+ .../src/components/historical/MultiPaneChart.tsx   |  13 ++
+ .../btc-options/frontend/src/utils/marginEngine.ts | 200 +++++++++++++++------
+ 3 files changed, 234 insertions(+), 59 deletions(-)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+ M frontend/src/components/historical/MultiPaneChart.tsx
+ M frontend/src/utils/marginEngine.ts
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-04-27 19:23 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+c0c38a3 feat: Greeks time series in MTM download — per-leg + net portfolio
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   | 118 ++++++++
+ .../btc-options/frontend/src/App.css               |   5 +
+ .../src/components/historical/MultiPaneChart.tsx   |  13 +
+ .../src/components/historical/StrategyPanel.tsx    | 138 +++++----
+ .../btc-options/frontend/src/utils/marginEngine.ts | 333 ++++++++++++++++-----
+ 5 files changed, 481 insertions(+), 126 deletions(-)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+ M frontend/src/App.css
+ M frontend/src/components/historical/MultiPaneChart.tsx
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/utils/marginEngine.ts
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? frontend/src/components/historical/PayoffGraph.tsx
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```

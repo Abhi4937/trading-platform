@@ -3,6 +3,7 @@ import type {
   HistoricalOptionChainResponse,
   HistoricalChartResponse,
   ChartDataWithGreeksResponse,
+  AtmIvSeriesResponse,
 } from '../types/historical';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1';
@@ -46,6 +47,12 @@ export const historicalApi = {
   async getChartDataWithGreeks(expiry: string, strike: number, type: 'CE' | 'PE', startTime: number, timeframe: string, rvWindowDays: number = 7, signal?: AbortSignal): Promise<ChartDataWithGreeksResponse> {
     const res = await fetch(`${API_BASE}/historical/chart-data-with-greeks?expiry=${expiry}&strike=${strike}&type=${type}&start_time=${startTime}&timeframe=${timeframe}&rv_window_days=${rvWindowDays}`, { signal });
     if (!res.ok) throw new Error('Failed to fetch chart data with greeks');
+    return res.json();
+  },
+
+  async getAtmIvSeries(expiry: string, timeframe: string, rvWindowDays: number = 7, signal?: AbortSignal): Promise<AtmIvSeriesResponse> {
+    const res = await fetch(`${API_BASE}/historical/atm-iv-series?expiry=${expiry}&timeframe=${timeframe}&rv_window_days=${rvWindowDays}`, { signal });
+    if (!res.ok) throw new Error('Failed to fetch ATM IV series');
     return res.json();
   },
 };

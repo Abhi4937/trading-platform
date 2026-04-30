@@ -3,13 +3,14 @@ import * as XLSX from 'xlsx';
 import { historicalApi } from '../../services/historical_api';
 import { MultiPaneChart } from './MultiPaneChart';
 import type { PaneSeries } from './MultiPaneChart';
+import { PayoffGraph } from './PayoffGraph';
 import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngine';
 import { computeSlippagePerSide, dteFromEntry, istHour, isWeekendIst } from '../../utils/slippage';
 import type { SlippageMode, SlippageInputs } from '../../utils/slippage';
 import { computeBrokerage, BROKERAGE_RATE_LABELS } from '../../utils/brokerage';
 import type { BrokerageRate } from '../../utils/brokerage';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
-import type { HistoricalChainRow } from '../../types/historical';
+import type { HistoricalChainRow, AtmIvPoint } from '../../types/historical';
 
 interface LegGreeksPoint { time: number; spot: number; iv: number; rv: number; delta: number; gamma: number; theta: number; vega: number; }
 
@@ -98,7 +99,8 @@ const MtmStatsPanel: React.FC<{
 }> = ({ stats, color = 'var(--accent)', slipEntryUsd = 0, slipExitUsd = 0,
         brokerageEntryUsd = 0, brokerageExitUsd = 0, maxExitPnl, sensitivity }) => {
   const [expanded, setExpanded] = useState(false);
-  const displayFinal = stats.finalPnl - slipExitUsd - brokerageExitUsd;
+  // Chart curve already nets entry slip; brokerage (entry+exit) and exit slip are deducted here.
+  const displayFinal = stats.finalPnl - brokerageEntryUsd - slipExitUsd - brokerageExitUsd;
   return (
     <div className="mtm-stats-panel">
       <div className="mtm-stats-row" onClick={() => setExpanded(e => !e)} style={{ cursor: 'pointer' }}>
@@ -149,7 +151,7 @@ const MtmStatsPanel: React.FC<{
           </div>
         )}
         {brokerageEntryUsd > 0 && (
-          <div className="mtm-stat" title="Entry brokerage — taker fee + 18% GST (Delta Exchange India)">
+          <div className="mtm-stat" title="Entry brokerage — taker fee + 18% GST. Deducted from Final P&L (not from chart curve).">
             <span className="mtm-stat-key">Entry fee</span>
             <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
               −{brokerageEntryUsd.toFixed(2)}
@@ -310,6 +312,7 @@ export const StrategyPanel: React.FC<Props> = ({
   const [buildLegGreeks, setBuildLegGreeks] = useState<Map<string, LegGreeksPoint[]>>(new Map());
   const [buildExitLegData,    setBuildExitLegData]    = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
   const [buildMaxPnlExitData, setBuildMaxPnlExitData] = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
+  const [buildAtmData, setBuildAtmData] = useState<AtmIvPoint[]>([]);
 
   // Compare mode MTM
   const [compareMtmData, setCompareMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
@@ -319,8 +322,11 @@ export const StrategyPanel: React.FC<Props> = ({
   const [compareLegGreeks, setCompareLegGreeks] = useState<Map<string, Map<string, LegGreeksPoint[]>>>(new Map());
   const [compareExitLegData,    setCompareExitLegData]    = useState<Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>>(new Map());
   const [compareMaxPnlExitData, setCompareMaxPnlExitData] = useState<Map<string, { leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>>(new Map());
+  // ATM IV/RV per expiry (keyed by expiry YYYY-MM-DD), shared across compare strategies
+  const [compareAtmData, setCompareAtmData] = useState<Map<string, AtmIvPoint[]>>(new Map());
 
   const [marginExpanded, setMarginExpanded] = useState(false);
+  const [compareMarginExpanded, setCompareMarginExpanded] = useState<Set<string>>(new Set());
   const [legsExpanded, setLegsExpanded] = useState(true);
   const [compareLegsExpanded, setCompareLegsExpanded] = useState(true);
   const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
@@ -351,6 +357,9 @@ export const StrategyPanel: React.FC<Props> = ({
   const [chartHeightPx, setChartHeightPx] = useState(220);
   // Bottom handle: drag DOWN = stats grow (independent of chart), drag UP = stats shrink
   const [statsHeightPx, setStatsHeightPx] = useState(140);
+
+  const [buildTab, setBuildTab] = useState<'mtm' | 'payoff'>('mtm');
+  useEffect(() => { if (legs.length === 0) setBuildTab('mtm'); }, [legs.length]);
 
   const buildBottomDragRef = useRef<{ startY: number; startChartH: number; startStatsH: number } | null>(null);
   const onBottomDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -415,6 +424,7 @@ export const StrategyPanel: React.FC<Props> = ({
           hourIst: istHour(leg.entryTimestamp),
           isWeekend: isWeekendIst(leg.entryTimestamp),
           oiClose: leg.entryOi,
+          qty: leg.qty,
         }
       : null;
     return computeSlippagePerSide(slipEnabled, slipMode, slipFlat, multOverride ?? slipMult, inputs);
@@ -432,6 +442,7 @@ export const StrategyPanel: React.FC<Props> = ({
       isCall: leg.type === 'CE',
       hourIst: istHour(exitTs),
       isWeekend: isWeekendIst(exitTs),
+      qty: leg.qty,
     };
     return computeSlippagePerSide(slipEnabled, slipMode, slipFlat, multOverride ?? slipMult, inputs);
   }, [slipEnabled, slipMode, slipFlat, slipMult]);
@@ -474,13 +485,32 @@ export const StrategyPanel: React.FC<Props> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [legs, chain, legChains, selectedExpiry]);
 
+  // Combined per-expiry chain map: active expiry's chain + any fetched leg chains.
+  const chainsByExpiry = useMemo(() => {
+    const m = new Map(legChains);
+    if (selectedExpiry) m.set(selectedExpiry, chain);
+    return m;
+  }, [chain, legChains, selectedExpiry]);
+
   // ── Margin (build mode) ────────────────────────────────────────────────────
   const marginResult = useMemo(() => {
-    if (!legs.length || spot <= 0 || !selectedExpiry || !simulationTimestamp) return null;
-    const { marginLegs, skippedLegs } = buildMarginLegs(legs, chain, spot, selectedExpiry, simulationTimestamp);
+    if (!legs.length || spot <= 0 || !simulationTimestamp) return null;
+    const { marginLegs, skippedLegs } = buildMarginLegs(legs, chainsByExpiry, spot, simulationTimestamp);
     if (!marginLegs.length) return null;
     return computePortfolioMargin(marginLegs, spot, undefined, skippedLegs);
-  }, [legs, chain, spot, selectedExpiry, simulationTimestamp]);
+  }, [legs, chainsByExpiry, spot, simulationTimestamp]);
+
+  // ── Margin (compare mode — per-strategy) ───────────────────────────────────
+  const compareMarginResults = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof computePortfolioMargin> | null>();
+    if (spot <= 0 || !simulationTimestamp) return map;
+    compareStrategies.forEach(s => {
+      if (!s.legs.length) { map.set(s.id, null); return; }
+      const { marginLegs, skippedLegs } = buildMarginLegs(s.legs, chainsByExpiry, spot, simulationTimestamp);
+      map.set(s.id, marginLegs.length ? computePortfolioMargin(marginLegs, spot, undefined, skippedLegs) : null);
+    });
+    return map;
+  }, [compareStrategies, chainsByExpiry, spot, simulationTimestamp]);
 
   const minEntryTs = legs.length ? Math.min(...legs.map(l => l.entryTimestamp)) : undefined;
 
@@ -528,6 +558,47 @@ export const StrategyPanel: React.FC<Props> = ({
       };
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(legsRows), 'Strategy');
+
+    // ── Margin Required sheet (29-scenario portfolio margin at entry) ──────
+    if (marginResult) {
+      const m = marginResult;
+      const marginRows: Record<string, unknown>[] = [
+        { Metric: 'Portfolio Margin (USDT)',         Value: +m.portfolioMargin.toFixed(2) },
+        { Metric: 'Initial Margin (USDT)',           Value: +m.initialMargin.toFixed(2) },
+        { Metric: 'Maintenance Margin (USDT)',       Value: +m.maintenanceMargin.toFixed(2) },
+        { Metric: 'Margin per Lot (USDT)',           Value: +m.marginPerLot.toFixed(4) },
+        {},
+        { Metric: 'Risk Margin (worst-scenario loss)',  Value: +m.riskMargin.toFixed(2) },
+        { Metric: 'Margin Floor (statutory minimum)',   Value: +m.marginFloor.toFixed(2) },
+        { Metric: 'Binding Constraint',                  Value: m.bindingConstraint },
+        { Metric: 'DTE Scale Applied',                   Value: +m.dteScaleApplied.toFixed(4) },
+        { Metric: 'Pre-scale Margin (USDT)',             Value: +m.preScaleMargin.toFixed(2) },
+        {},
+        { Metric: 'Total Notional (USDT)',           Value: +m.totalNotional.toFixed(2) },
+        { Metric: 'Short Options Notional (USDT)',   Value: +m.shortOptionsNotional.toFixed(2) },
+        { Metric: 'Total Premium Collected (USDT)',  Value: +m.totalPremiumCollected.toFixed(2) },
+        { Metric: 'Effective Leverage',               Value: +m.effectiveLeverage.toFixed(2) },
+        { Metric: 'OM% Applied',                      Value: (m.omPctApplied * 100).toFixed(3) + '%' },
+        { Metric: 'Net Delta (BTC)',                  Value: +m.netDeltaBtc.toFixed(4) },
+        {},
+        { Metric: 'Price Shock Applied',              Value: (m.priceShockApplied * 100).toFixed(2) + '%' },
+        { Metric: 'Vol Up Shock (DTE-adjusted)',      Value: (m.volUpApplied * 100).toFixed(2) + ' pts' },
+        { Metric: 'Vol Down Shock (DTE-adjusted)',    Value: (m.volDownApplied * 100).toFixed(2) + ' pts' },
+        { Metric: 'Min DTE Days Applied',             Value: +m.minDteDaysApplied.toFixed(2) },
+        {},
+        { Metric: 'Worst Scenario — Spot Shock',      Value: m.worstScenario.priceShockPct.toFixed(2) + '%' },
+        { Metric: 'Worst Scenario — Vol Shock (pts)', Value: +m.worstScenario.volShockPts.toFixed(2) },
+        { Metric: 'Worst Scenario — PnL (USDT)',      Value: +m.worstScenario.pnl.toFixed(2) },
+        {},
+        { Metric: 'Best Scenario — Spot Shock',       Value: m.bestScenario.priceShockPct.toFixed(2) + '%' },
+        { Metric: 'Best Scenario — Vol Shock (pts)',  Value: +m.bestScenario.volShockPts.toFixed(2) },
+        { Metric: 'Best Scenario — PnL (USDT)',       Value: +m.bestScenario.pnl.toFixed(2) },
+        {},
+        { Metric: 'Skipped Legs (no IV data)',        Value: m.skippedLegs },
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marginRows), 'Margin Required');
+    }
+
     if (buildMtmData.length) {
       // Build per-leg lookup: legId → Map<time, LegGreeksPoint>
       const legLabel = (leg: StrategyLeg) => `${leg.action} ${leg.strike}${leg.type}`;
@@ -594,7 +665,7 @@ export const StrategyPanel: React.FC<Props> = ({
         const brkEntry = legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
         const brkExit  = buildExitLegData.reduce((acc, { leg, exitMark, exitSpot }) =>
           acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
-        const grossFinal = s.finalPnl + slipBase + brkEntry;
+        const grossFinal = s.finalPnl + slipBase;
         const sensRows = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
           const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
           const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
@@ -624,28 +695,32 @@ export const StrategyPanel: React.FC<Props> = ({
       const tradeTs = simulationTimestamp;
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
 
-      // Fetch full contract lifetime (start_time=0) so IV/RV panes show end-to-end.
-      // MTM P&L is still anchored to tradeTs via mtmData.
+      // Fetch full contract lifetime (start_time=0) so IV/RV/Delta panes show end-to-end.
+      // MTM P&L is still anchored to tradeTs via mtmData (the `data` subset).
+      // `allData` extends through the contract's lifetime, NOT capped at endTs.
       const seriesResults = await Promise.all(
         legs.map(leg =>
           historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, 0, timeframe, rvWindowDays)
             .then(res => ({
               leg,
-              allData: res.data.filter(d => d.time <= endTs),
+              allData: res.data,
               data:    res.data.filter(d => d.time >= tradeTs && d.time <= endTs),
             }))
         )
       );
 
+      // ATM IV/RV time series for the selected expiry (single-shot, contract lifetime)
+      historicalApi.getAtmIvSeries(selectedExpiry, timeframe, rvWindowDays)
+        .then(res => setBuildAtmData(res.data ?? []))
+        .catch(() => setBuildAtmData([]));
+
       const timeSet = new Set<number>();
       seriesResults.forEach(({ data }) => data.forEach(d => { timeSet.add(d.time); }));
       const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
-      // Entry-side slip + brokerage baked into every chart point.
-      // Exit-side costs are added by the stats panel from stored exit data.
-      const slipEntryTotal      = legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
-      const brokerageEntryTotal = legs.reduce((s, leg) => s + brokeragePerSide(leg), 0);
-      const entryDeduction      = slipEntryTotal + brokerageEntryTotal;
+      // Entry-side slip baked into every chart point (part of the realized fill price).
+      // Brokerage (entry + exit) and exit slip are shown only in the stats panel.
+      const entryDeduction = legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
 
       const points: MtmPoint[] = sortedTimes.map(t => {
         let total = 0;
@@ -712,7 +787,7 @@ export const StrategyPanel: React.FC<Props> = ({
             historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, 0, timeframe, rvWindowDays)
               .then(res => ({
                 leg,
-                allData: res.data.filter(d => d.time <= endTs),
+                allData: res.data,
                 data:    res.data.filter(d => d.time >= tradeTs && d.time <= endTs),
               }))
           )
@@ -722,9 +797,8 @@ export const StrategyPanel: React.FC<Props> = ({
         seriesResults.forEach(({ data }) => data.forEach(d => { timeSet.add(d.time); }));
         const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
-        const slipEntryTotal      = strat.legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
-        const brokerageEntryTotal = strat.legs.reduce((s, leg) => s + brokeragePerSide(leg), 0);
-        const entryDeduction      = slipEntryTotal + brokerageEntryTotal;
+        // Entry slip only — brokerage (entry+exit) and exit slip belong to the stats panel.
+        const entryDeduction = strat.legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
 
         const points: MtmPoint[] = sortedTimes.map(t => {
           let total = 0;
@@ -770,6 +844,16 @@ export const StrategyPanel: React.FC<Props> = ({
       setCompareLegGreeks(greeksMapOuter);
       setCompareExitLegData(exitMapOuter);
       setCompareMaxPnlExitData(maxPnlMapOuter);
+
+      // Fetch ATM IV/RV for each unique expiry across all compare strategies
+      const expiries = Array.from(new Set(nonEmpty.flatMap(s => s.legs.map(l => l.expiry))));
+      const atmMap = new Map<string, AtmIvPoint[]>();
+      await Promise.all(expiries.map(exp =>
+        historicalApi.getAtmIvSeries(exp, timeframe, rvWindowDays)
+          .then(res => atmMap.set(exp, res.data ?? []))
+          .catch(() => atmMap.set(exp, []))
+      ));
+      setCompareAtmData(atmMap);
     } catch {
       setCompareError('Failed to calculate MTM. Check console.');
     } finally {
@@ -843,6 +927,26 @@ export const StrategyPanel: React.FC<Props> = ({
         .map(p => ({ time: p.time, value: p.iv - p.rv })),
     })).filter(s => s.data.length > 0),
   [legs, buildLegGreeks]);
+
+  // ATM IV (avg of CE+PE at strike closest to spot, per bar) — overlay on IV pane
+  const buildAtmIvSeries = useMemo((): PaneSeries | undefined => {
+    if (!buildAtmData.length) return undefined;
+    return {
+      id: 'atm-iv', label: 'ATM IV%', color: '#00d4ff',
+      data: buildAtmData.filter(p => p.atm_iv > 0).map(p => ({ time: p.time, value: p.atm_iv })),
+    };
+  }, [buildAtmData]);
+
+  // ATM IV - RV — overlay on IV-RV pane
+  const buildAtmIvRvSeries = useMemo((): PaneSeries | undefined => {
+    if (!buildAtmData.length) return undefined;
+    const filtered = buildAtmData.filter(p => p.atm_iv > 0 && p.rv > 0);
+    if (!filtered.length) return undefined;
+    return {
+      id: 'atm-iv-rv', label: 'ATM IV − RV%', color: '#00d4ff',
+      data: filtered.map(p => ({ time: p.time, value: p.iv_minus_rv })),
+    };
+  }, [buildAtmData]);
 
   const compareIvSeries = useMemo((): PaneSeries[] => {
     if (compareLegGreeks.size === 0) return [];
@@ -926,6 +1030,29 @@ export const StrategyPanel: React.FC<Props> = ({
     });
     return result;
   }, [compareStrategies, compareLegGreeks]);
+
+  // ATM IV/IV-RV overlays for compare mode (uses selectedExpiry)
+  const compareAtmIvSeries = useMemo((): PaneSeries | undefined => {
+    const pts = compareAtmData.get(selectedExpiry);
+    if (!pts?.length) return undefined;
+    const filtered = pts.filter(p => p.atm_iv > 0);
+    if (!filtered.length) return undefined;
+    return {
+      id: 'atm-iv', label: `ATM IV% (${selectedExpiry})`, color: '#00d4ff',
+      data: filtered.map(p => ({ time: p.time, value: p.atm_iv })),
+    };
+  }, [compareAtmData, selectedExpiry]);
+
+  const compareAtmIvRvSeries = useMemo((): PaneSeries | undefined => {
+    const pts = compareAtmData.get(selectedExpiry);
+    if (!pts?.length) return undefined;
+    const filtered = pts.filter(p => p.atm_iv > 0 && p.rv > 0);
+    if (!filtered.length) return undefined;
+    return {
+      id: 'atm-iv-rv', label: `ATM IV − RV% (${selectedExpiry})`, color: '#00d4ff',
+      data: filtered.map(p => ({ time: p.time, value: p.iv_minus_rv })),
+    };
+  }, [compareAtmData, selectedExpiry]);
 
   // ── Shared chart controls ──────────────────────────────────────────────────
   const chartControls = (
@@ -1046,7 +1173,7 @@ export const StrategyPanel: React.FC<Props> = ({
             <th>Entry</th>
             <th>Current</th>
             <th>P&amp;L</th>
-            <th title="Estimated per-side slippage in $/contract (round-trip cost = 2× this × lots × 0.001)">Slip $</th>
+            <th title="Estimated per-side slippage in USD for this leg (round-trip cost = 2× this). Net entry slip = sum of these.">Slip $</th>
             <th title="Implied Volatility %">IV%</th>
             <th title="Net Delta">Delta</th>
             <th title="Net Gamma">Gamma</th>
@@ -1077,7 +1204,7 @@ export const StrategyPanel: React.FC<Props> = ({
                   {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
                 </td>
                 <td style={{ color: 'var(--text3)', fontSize: '11px' }}>
-                  {slipEnabled ? slipPerSide(leg).toFixed(2) : '-'}
+                  {slipEnabled ? (slipPerSide(leg) * leg.qty * 0.001).toFixed(2) : '-'}
                 </td>
                 <td style={{ color: 'var(--gold)' }}>{greeks ? greeks.iv_pct.toFixed(1) : '-'}</td>
                 <td style={{ color: greeks && greeks.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
@@ -1135,6 +1262,42 @@ export const StrategyPanel: React.FC<Props> = ({
       legsRows.push({} as Record<string, unknown>); // blank row between strategies
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(legsRows), 'Strategy Legs');
+
+    // Sheet 1b: Margin Required — one row per strategy, computed from each
+    // strategy's own legs against the current spot/sim time.
+    if (spot > 0 && simulationTimestamp) {
+      const marginRows: Record<string, unknown>[] = [];
+      compareStrategies.forEach(strat => {
+        if (!strat.legs.length) return;
+        const { marginLegs, skippedLegs } = buildMarginLegs(
+          strat.legs, chainsByExpiry, spot, simulationTimestamp,
+        );
+        if (!marginLegs.length) return;
+        const m = computePortfolioMargin(marginLegs, spot, undefined, skippedLegs);
+        if (!m) return;
+        marginRows.push({
+          Strategy: strat.label,
+          'Portfolio Margin (USDT)':       +m.portfolioMargin.toFixed(2),
+          'Maintenance Margin (USDT)':     +m.maintenanceMargin.toFixed(2),
+          'Margin per Lot (USDT)':         +m.marginPerLot.toFixed(4),
+          'Risk Margin (USDT)':            +m.riskMargin.toFixed(2),
+          'Margin Floor (USDT)':           +m.marginFloor.toFixed(2),
+          'Binding Constraint':            m.bindingConstraint,
+          'Total Notional (USDT)':         +m.totalNotional.toFixed(2),
+          'Short Notional (USDT)':         +m.shortOptionsNotional.toFixed(2),
+          'Premium Collected (USDT)':      +m.totalPremiumCollected.toFixed(2),
+          'Effective Leverage':            +m.effectiveLeverage.toFixed(2),
+          'Net Delta (BTC)':               +m.netDeltaBtc.toFixed(4),
+          'Worst Scenario PnL (USDT)':     +m.worstScenario.pnl.toFixed(2),
+          'Worst Scenario Spot Shock':     m.worstScenario.priceShockPct.toFixed(2) + '%',
+          'Worst Scenario Vol Shock (pts)':+m.worstScenario.volShockPts.toFixed(2),
+          'Skipped Legs (no IV)':          m.skippedLegs,
+        });
+      });
+      if (marginRows.length) {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(marginRows), 'Margin Required');
+      }
+    }
 
     // Sheet 2: MTM Comparison — all timestamps as rows, each strategy as a column
     if (compareMtmData.size > 0) {
@@ -1409,7 +1572,9 @@ export const StrategyPanel: React.FC<Props> = ({
                 mtmSeries={compareMtmSeries}
                 ivSeries={compareIvSeries}
                 rvSeries={compareRvSeries ?? undefined}
+                atmIvSeries={compareAtmIvSeries}
                 ivRvSeries={compareIvRvSeries}
+                atmIvRvSeries={compareAtmIvRvSeries}
                 deltaSeries={compareDeltaSeries}
                 chartsOnly={chartsOnly}
                 onToggleChartsOnly={onToggleChartsOnly}
@@ -1429,7 +1594,7 @@ export const StrategyPanel: React.FC<Props> = ({
                       const brkEntry    = s.legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
                       const brkExit     = exitLegs.reduce((acc, { leg, exitMark, exitSpot }) =>
                         acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
-                      const grossFinal  = stats.finalPnl + slipEntry + brkEntry;
+                      const grossFinal  = stats.finalPnl + slipEntry;
                       const maxPnlLegs  = compareMaxPnlExitData.get(s.id) ?? [];
                       const peakExitSlip = maxPnlLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
                         acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
@@ -1465,6 +1630,104 @@ export const StrategyPanel: React.FC<Props> = ({
             </div>
           )}
         </div>
+
+        {/* ── Portfolio Margin (per strategy) ── */}
+        {!chartsOnly && hasAnyLegs && compareStrategies.some(s => s.legs.length > 0) && (
+          <>
+            {compareStrategies.filter(s => s.legs.length > 0).map((s, i) => {
+              const m = compareMarginResults.get(s.id);
+              const isExpanded = compareMarginExpanded.has(s.id);
+              const toggleExpanded = () => {
+                if (!m) return;
+                setCompareMarginExpanded(prev => {
+                  const next = new Set(prev);
+                  if (next.has(s.id)) next.delete(s.id); else next.add(s.id);
+                  return next;
+                });
+              };
+              const stratColor = STRAT_COLORS[i % STRAT_COLORS.length];
+              return (
+                <div key={s.id} className="margin-card">
+                  <div className="margin-compact-row" onClick={toggleExpanded}>
+                    <span className="strat-tab-dot" style={{ background: stratColor, marginRight: 6 }} />
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: stratColor, marginRight: 8 }}>{s.label}</span>
+                    {m ? (
+                      <>
+                        <div className="margin-kv">
+                          <span className="margin-label">Margin Req.</span>
+                          <span className="margin-val">{fmt(m.portfolioMargin)} USDT</span>
+                        </div>
+                        <div className="margin-kv">
+                          <span className="margin-label">Leverage</span>
+                          <span className="margin-val" style={{ color: leverageColor(m.effectiveLeverage) }}>
+                            {m.effectiveLeverage.toFixed(1)}×
+                          </span>
+                        </div>
+                        <div className="margin-kv">
+                          <span className="margin-label">Net Δ</span>
+                          <span className="margin-val" style={{ color: m.netDeltaBtc >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                            {m.netDeltaBtc >= 0 ? '+' : ''}{m.netDeltaBtc.toFixed(4)} BTC
+                          </span>
+                        </div>
+                        <span className={`margin-binding-badge ${m.bindingConstraint}`}>
+                          {m.bindingConstraint === 'risk_margin' ? 'Risk Margin' : 'Margin Floor'}
+                        </span>
+                        <span className="margin-expand-toggle">{isExpanded ? '▲' : '▼'}</span>
+                      </>
+                    ) : (
+                      <span style={{ fontSize: '11px', color: 'var(--text3)' }}>Margin: N/A — mark price unavailable at this timestamp</span>
+                    )}
+                  </div>
+                  {m && m.skippedLegs > 0 && (
+                    <div className="margin-skip-warning">
+                      ⚠ {m.skippedLegs} leg{m.skippedLegs > 1 ? 's' : ''} excluded — mark price is 0 at this timestamp
+                    </div>
+                  )}
+                  {m && isExpanded && (
+                    <div className="margin-detail">
+                      <div className="margin-detail-grid">
+                        <div className="margin-detail-row"><span className="margin-detail-label">Risk Margin</span><span className="margin-detail-val">{fmt(m.riskMargin)} USDT</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Margin Floor</span><span className="margin-detail-val">{fmt(m.marginFloor)} USDT</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Pre-scale <span style={{ color: 'var(--text3)', fontSize: '10px' }}>max(Risk, Floor)</span></span><span className="margin-detail-val">{fmt(m.preScaleMargin)} USDT</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">DTE scale <span style={{ color: 'var(--text3)', fontSize: '10px' }}>(0.49 / DTE)^0.234</span></span><span className="margin-detail-val">×{m.dteScaleApplied.toFixed(3)}</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Portfolio Margin <span style={{ color: 'var(--text3)', fontSize: '10px' }}>pre-scale × DTE scale</span></span><span className="margin-detail-val">{fmt(m.portfolioMargin)} USDT</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">UCF <span style={{ color: 'var(--text3)', fontSize: '10px' }}>signed expected payoff</span></span><span className="margin-detail-val" style={{ color: m.ucf >= 0 ? 'var(--green)' : 'var(--red)' }}>{m.ucf >= 0 ? '+' : ''}{fmt(m.ucf)} USDT</span></div>
+                        <div className="margin-detail-row">
+                          <span className="margin-detail-label">Total Notional</span>
+                          <span className="margin-detail-val">{fmt(m.totalNotional)} USDT <span style={{ color: 'var(--text3)', fontSize: '10px' }}>({(m.totalNotional / spot).toFixed(3)} BTC)</span></span>
+                        </div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Premium Collected</span><span className="margin-detail-val" style={{ color: 'var(--green)' }}>{fmt(m.totalPremiumCollected)} USDT</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Margin / Notional</span><span className="margin-detail-val">{((m.initialMargin / m.totalNotional) * 100).toFixed(2)}%</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Margin per Lot</span><span className="margin-detail-val">{fmt(m.marginPerLot)} USDT</span></div>
+                        <div className="margin-detail-row"><span className="margin-detail-label">Maintenance Margin</span><span className="margin-detail-val">{fmt(m.maintenanceMargin)} USDT</span></div>
+                        <div className="margin-detail-row">
+                          <span className="margin-detail-label">Floor Rate (OM%)</span>
+                          <span className="margin-detail-val">{(m.omPctApplied * 100).toFixed(3)}% <span style={{ color: 'var(--text3)', fontSize: '10px' }}>on {fmt(m.shortOptionsNotional)} short</span></span>
+                        </div>
+                      </div>
+                      <div className="margin-scenarios">
+                        <div className="margin-scenario-row worst">
+                          <span className="margin-scenario-icon">▼</span><span className="margin-scenario-label">Worst</span>
+                          <span className="margin-scenario-desc">Price {m.worstScenario.priceShockPct >= 0 ? '+' : ''}{m.worstScenario.priceShockPct.toFixed(1)}% · Vol {m.worstScenario.volShockPts >= 0 ? '+' : ''}{m.worstScenario.volShockPts.toFixed(0)}pp</span>
+                          <span className="margin-scenario-pnl" style={{ color: 'var(--red)' }}>−{fmt(Math.abs(m.worstScenario.pnl))} USDT</span>
+                        </div>
+                        <div className="margin-scenario-row best">
+                          <span className="margin-scenario-icon">▲</span><span className="margin-scenario-label">Best</span>
+                          <span className="margin-scenario-desc">Price {m.bestScenario.priceShockPct >= 0 ? '+' : ''}{m.bestScenario.priceShockPct.toFixed(1)}% · Vol {m.bestScenario.volShockPts >= 0 ? '+' : ''}{m.bestScenario.volShockPts.toFixed(0)}pp</span>
+                          <span className="margin-scenario-pnl" style={{ color: 'var(--green)' }}>+{fmt(m.bestScenario.pnl)} USDT</span>
+                        </div>
+                      </div>
+                      <div className="margin-tier-info">
+                        Stress: ±{(m.priceShockApplied * 100).toFixed(1)}% price · IV +{(m.volUpApplied * 100).toFixed(1)}% / −{(m.volDownApplied * 100).toFixed(1)}% @ {m.minDteDaysApplied.toFixed(1)} DTE
+                        <span className="margin-disclaimer-icon" title="Matches Delta Exchange India official portfolio-margin methodology (29-scenario stress-test, continuous spans, DTE-adjusted IV shocks).">&nbsp;ⓘ</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
       </div>
     );
   }
@@ -1639,12 +1902,16 @@ export const StrategyPanel: React.FC<Props> = ({
               <div className="margin-detail-grid">
                 <div className="margin-detail-row"><span className="margin-detail-label">Risk Margin</span><span className="margin-detail-val">{fmt(marginResult.riskMargin)} USDT</span></div>
                 <div className="margin-detail-row"><span className="margin-detail-label">Margin Floor</span><span className="margin-detail-val">{fmt(marginResult.marginFloor)} USDT</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Pre-scale <span style={{ color: 'var(--text3)', fontSize: '10px' }}>max(Risk, Floor)</span></span><span className="margin-detail-val">{fmt(marginResult.preScaleMargin)} USDT</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">DTE scale <span style={{ color: 'var(--text3)', fontSize: '10px' }}>(0.49 / DTE)^0.234</span></span><span className="margin-detail-val">×{marginResult.dteScaleApplied.toFixed(3)}</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Portfolio Margin <span style={{ color: 'var(--text3)', fontSize: '10px' }}>pre-scale × DTE scale</span></span><span className="margin-detail-val">{fmt(marginResult.portfolioMargin)} USDT</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">UCF <span style={{ color: 'var(--text3)', fontSize: '10px' }}>signed expected payoff</span></span><span className="margin-detail-val" style={{ color: marginResult.ucf >= 0 ? 'var(--green)' : 'var(--red)' }}>{marginResult.ucf >= 0 ? '+' : ''}{fmt(marginResult.ucf)} USDT</span></div>
                 <div className="margin-detail-row">
                   <span className="margin-detail-label">Total Notional</span>
                   <span className="margin-detail-val">{fmt(marginResult.totalNotional)} USDT <span style={{ color: 'var(--text3)', fontSize: '10px' }}>({(marginResult.totalNotional / spot).toFixed(3)} BTC)</span></span>
                 </div>
                 <div className="margin-detail-row"><span className="margin-detail-label">Premium Collected</span><span className="margin-detail-val" style={{ color: 'var(--green)' }}>{fmt(marginResult.totalPremiumCollected)} USDT</span></div>
-                <div className="margin-detail-row"><span className="margin-detail-label">Margin / Notional</span><span className="margin-detail-val">{((marginResult.portfolioMargin / marginResult.totalNotional) * 100).toFixed(2)}%</span></div>
+                <div className="margin-detail-row"><span className="margin-detail-label">Margin / Notional</span><span className="margin-detail-val">{((marginResult.initialMargin / marginResult.totalNotional) * 100).toFixed(2)}%</span></div>
                 <div className="margin-detail-row"><span className="margin-detail-label">Margin per Lot</span><span className="margin-detail-val">{fmt(marginResult.marginPerLot)} USDT</span></div>
                 <div className="margin-detail-row"><span className="margin-detail-label">Maintenance Margin</span><span className="margin-detail-val">{fmt(marginResult.maintenanceMargin)} USDT</span></div>
                 <div className="margin-detail-row">
@@ -1673,70 +1940,88 @@ export const StrategyPanel: React.FC<Props> = ({
         </div>
       )}
 
-      {/* ── MTM + Greeks chart (multi-pane) ── */}
-      <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+      {/* ── MTM / Payoff chart tabs ── */}
+      <div className="strategy-chart-card" style={{ flex: 1, minHeight: 0, overflowY: buildTab === 'payoff' ? 'hidden' : 'auto', display: 'flex', flexDirection: 'column' }}>
         {!chartsOnly && (
-          <>
-            <div className="strategy-chart-header">
-              <span className="strategy-chart-label">MTM P&amp;L</span>
-              {chartControls}
+          <div className="strategy-chart-header">
+            <div style={{ display: 'flex', gap: '3px' }}>
+              <button className={`tf-btn${buildTab === 'mtm' ? ' active' : ''}`} onClick={() => setBuildTab('mtm')}>MTM P&amp;L</button>
+              {legs.length > 0 && (
+                <button className={`tf-btn${buildTab === 'payoff' ? ' active' : ''}`} onClick={() => setBuildTab('payoff')}>Payoff</button>
+              )}
             </div>
-            {endPicker}
-          </>
+            {buildTab === 'mtm' && chartControls}
+          </div>
         )}
 
-        {buildMtmData.length > 0 ? (
+        {buildTab === 'mtm' && (
           <>
-            <MultiPaneChart
-              mtmData={buildMtmData}
-              ivSeries={buildIvSeries}
-              rvSeries={buildRvSeries ?? undefined}
-              ivRvSeries={buildIvRvSeries}
-              deltaSeries={buildDeltaSeries}
-              chartsOnly={chartsOnly}
-              onToggleChartsOnly={onToggleChartsOnly}
-            />
-            {!chartsOnly && (
-              <div style={{ flexShrink: 0, overflowY: 'auto' }}>
-                {(() => {
-                  const s = computeMtmStats(buildMtmData);
-                  if (!s) return null;
-                  const slipEntry = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
-                  const slipExit  = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
-                    acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
-                  const brkEntry  = legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
-                  const brkExit   = buildExitLegData.reduce((acc, { leg, exitMark, exitSpot }) =>
-                    acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
-                  // grossFinal: back out entry costs already baked into chart
-                  const grossFinal = s.finalPnl + slipEntry + brkEntry;
-                  // "if closed @ peak" — exit costs computed at peak-bar mark/spot
-                  const peakExitSlip = buildMaxPnlExitData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
-                    acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
-                  const peakExitBrk  = buildMaxPnlExitData.reduce((acc, { leg, exitMark, exitSpot }) =>
-                    acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
-                  const maxExitPnl = buildMaxPnlExitData.length > 0
-                    ? s.maxPnl - peakExitSlip - peakExitBrk
-                    : undefined;
-                  const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
-                    const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
-                    const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
-                      acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
-                    return { mult: m, finalPnl: grossFinal - eSlip - xSlip - brkEntry - brkExit };
-                  });
-                  return <MtmStatsPanel stats={s}
-                    slipEntryUsd={slipEntry} slipExitUsd={slipExit}
-                    brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
-                    maxExitPnl={maxExitPnl} sensitivity={sens} />;
-                })()}
+            {!chartsOnly && endPicker}
+            {buildMtmData.length > 0 ? (
+              <>
+                <MultiPaneChart
+                  mtmData={buildMtmData}
+                  ivSeries={buildIvSeries}
+                  rvSeries={buildRvSeries ?? undefined}
+                  atmIvSeries={buildAtmIvSeries}
+                  ivRvSeries={buildIvRvSeries}
+                  atmIvRvSeries={buildAtmIvRvSeries}
+                  deltaSeries={buildDeltaSeries}
+                  chartsOnly={chartsOnly}
+                  onToggleChartsOnly={onToggleChartsOnly}
+                />
+                {!chartsOnly && (
+                  <div style={{ flexShrink: 0, overflowY: 'auto' }}>
+                    {(() => {
+                      const s = computeMtmStats(buildMtmData);
+                      if (!s) return null;
+                      const slipEntry = legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
+                      const slipExit  = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                        acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
+                      const brkEntry  = legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
+                      const brkExit   = buildExitLegData.reduce((acc, { leg, exitMark, exitSpot }) =>
+                        acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+                      const grossFinal = s.finalPnl + slipEntry;
+                      const peakExitSlip = buildMaxPnlExitData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                        acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot) * leg.qty * 0.001, 0);
+                      const peakExitBrk  = buildMaxPnlExitData.reduce((acc, { leg, exitMark, exitSpot }) =>
+                        acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+                      const maxExitPnl = buildMaxPnlExitData.length > 0
+                        ? s.maxPnl - peakExitSlip - peakExitBrk
+                        : undefined;
+                      const sens = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
+                        const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
+                        const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+                          acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+                        return { mult: m, finalPnl: grossFinal - eSlip - xSlip - brkEntry - brkExit };
+                      });
+                      return <MtmStatsPanel stats={s}
+                        slipEntryUsd={slipEntry} slipExitUsd={slipExit}
+                        brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
+                        maxExitPnl={maxExitPnl} sensitivity={sens} />;
+                    })()}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="strategy-chart-empty">
+                {legs.length > 0
+                  ? 'Click Run MTM ▶ to see P&L chart'
+                  : 'Add legs to see MTM chart'}
               </div>
             )}
           </>
-        ) : (
-          <div className="strategy-chart-empty">
-            {legs.length > 0
-              ? 'Click Run MTM ▶ to see P&L chart'
-              : 'Add legs to see MTM chart'}
-          </div>
+        )}
+
+        {buildTab === 'payoff' && legs.length > 0 && (
+          <PayoffGraph
+            legs={legs}
+            chain={chain}
+            legChains={legChains}
+            spot={spot}
+            selectedExpiry={selectedExpiry}
+            simulationTimestamp={simulationTimestamp}
+          />
         )}
       </div>
     </div>

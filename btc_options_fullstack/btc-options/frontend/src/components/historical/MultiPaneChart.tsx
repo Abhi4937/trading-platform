@@ -28,7 +28,9 @@ interface Props {
   mtmSeries?: PaneSeries[];  // compare mode: multiple coloured lines
   ivSeries: PaneSeries[];
   rvSeries?: PaneSeries;     // single line, overlaid in IV pane
+  atmIvSeries?: PaneSeries;  // single line, overlaid in IV pane (ATM IV avg of CE+PE)
   ivRvSeries?: PaneSeries[]; // per-leg IV-RV spread, dedicated pane
+  atmIvRvSeries?: PaneSeries; // single line, overlaid in IV-RV pane (ATM IV - RV)
   deltaSeries: PaneSeries[];
   chartsOnly?: boolean;
   onToggleChartsOnly?: () => void;
@@ -42,7 +44,7 @@ const HDR_H    = 24;
 
 export const MultiPaneChart: React.FC<Props> = ({
   mtmData, mtmSeries,
-  ivSeries, rvSeries, ivRvSeries,
+  ivSeries, rvSeries, atmIvSeries, ivRvSeries, atmIvRvSeries,
   deltaSeries,
   chartsOnly = false,
   onToggleChartsOnly,
@@ -57,6 +59,8 @@ export const MultiPaneChart: React.FC<Props> = ({
   const ivRefsMap      = useRef<Map<string, any>>(new Map());
   const rvLineRef      = useRef<any>(null);
   const ivRvRefsMap    = useRef<Map<string, any>>(new Map());
+  const atmIvLineRef   = useRef<any>(null);
+  const atmIvRvLineRef = useRef<any>(null);
   const deltaRefsMap   = useRef<Map<string, any>>(new Map());
 
   // Info refs — kept in sync for use inside stable closures
@@ -64,11 +68,15 @@ export const MultiPaneChart: React.FC<Props> = ({
   const ivSeriesInfo   = useRef<PaneSeries[]>([]);
   const rvSeriesInfo   = useRef<PaneSeries | null>(null);
   const ivRvSeriesInfo = useRef<PaneSeries[]>([]);
+  const atmIvSeriesInfo   = useRef<PaneSeries | null>(null);
+  const atmIvRvSeriesInfo = useRef<PaneSeries | null>(null);
   const deltaSeriesInfo= useRef<PaneSeries[]>([]);
   useEffect(() => { mtmSeriesInfo.current  = mtmSeries  ?? []; }, [mtmSeries]);
   useEffect(() => { ivSeriesInfo.current   = ivSeries;         }, [ivSeries]);
   useEffect(() => { rvSeriesInfo.current   = rvSeries ?? null; }, [rvSeries]);
   useEffect(() => { ivRvSeriesInfo.current = ivRvSeries ?? []; }, [ivRvSeries]);
+  useEffect(() => { atmIvSeriesInfo.current   = atmIvSeries   ?? null; }, [atmIvSeries]);
+  useEffect(() => { atmIvRvSeriesInfo.current = atmIvRvSeries ?? null; }, [atmIvRvSeries]);
   useEffect(() => { deltaSeriesInfo.current= deltaSeries;      }, [deltaSeries]);
 
   const [showIv,    setShowIv]    = useState(false);
@@ -95,7 +103,9 @@ export const MultiPaneChart: React.FC<Props> = ({
   const hasMtm       = hasMtmData || hasMtmSeries;
   const nIv          = ivSeries.length;
   const hasRv        = (rvSeries?.data.length ?? 0) > 0;
+  const hasAtmIv     = (atmIvSeries?.data.length ?? 0) > 0;
   const nIvRv        = ivRvSeries?.length ?? 0;
+  const hasAtmIvRv   = (atmIvRvSeries?.data.length ?? 0) > 0;
   const nDelta       = deltaSeries.length;
 
   // ── STRUCTURE EFFECT ──────────────────────────────────────────────────────
@@ -114,8 +124,8 @@ export const MultiPaneChart: React.FC<Props> = ({
     ivRvRefsMap.current    = new Map();
     deltaRefsMap.current   = new Map();
 
-    const visibleIv    = showIv    && nIv    > 0;
-    const visibleIvRv  = showIvRv  && nIvRv  > 0;
+    const visibleIv    = showIv    && (nIv    > 0 || hasAtmIv);
+    const visibleIvRv  = showIvRv  && (nIvRv  > 0 || hasAtmIvRv);
     const visibleDelta = showDelta && nDelta > 0;
     const totalH = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvRv ? ivRvH : 0) + (visibleDelta ? deltaH : 0);
     if (totalH <= 0) return;
@@ -165,6 +175,7 @@ export const MultiPaneChart: React.FC<Props> = ({
     // ── IV% pane (with RV overlay) ────────────────────────────────────────
     if (visibleIv) {
       if (nextPane > 0) chart.addPane();
+      let ivZeroAdded = false;
       ivSeries.forEach(s => {
         const sr = chart.addSeries(LineSeries, {
           color: s.color, lineWidth: 2, priceLineVisible: false,
@@ -172,6 +183,10 @@ export const MultiPaneChart: React.FC<Props> = ({
         }, nextPane);
         if (s.data.length) sr.setData(s.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
         ivRefsMap.current.set(s.id, sr);
+        if (!ivZeroAdded) {
+          sr.createPriceLine({ price: 0, color: 'rgba(150,150,150,0.35)', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
+          ivZeroAdded = true;
+        }
       });
       if (hasRv && rvSeries) {
         const sr = chart.addSeries(LineSeries, {
@@ -180,21 +195,48 @@ export const MultiPaneChart: React.FC<Props> = ({
         }, nextPane);
         sr.setData(rvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
         rvLineRef.current = sr;
+        if (!ivZeroAdded) {
+          sr.createPriceLine({ price: 0, color: 'rgba(150,150,150,0.35)', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
+        }
+      }
+      if (hasAtmIv && atmIvSeries) {
+        const sr = chart.addSeries(LineSeries, {
+          color: atmIvSeries.color, lineWidth: 3, priceLineVisible: false,
+          lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
+        }, nextPane);
+        sr.setData(atmIvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
+        atmIvLineRef.current = sr;
       }
       nextPane++;
     }
 
     // ── IV-RV spread pane ─────────────────────────────────────────────────
-    if (visibleIvRv && ivRvSeries) {
+    if (visibleIvRv && (ivRvSeries || hasAtmIvRv)) {
       if (nextPane > 0) chart.addPane();
-      ivRvSeries.forEach(s => {
+      let ivRvZeroAdded = false;
+      (ivRvSeries ?? []).forEach(s => {
         const sr = chart.addSeries(LineSeries, {
           color: s.color, lineWidth: 2, priceLineVisible: false,
           lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
         }, nextPane);
         if (s.data.length) sr.setData(s.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
         ivRvRefsMap.current.set(s.id, sr);
+        if (!ivRvZeroAdded) {
+          sr.createPriceLine({ price: 0, color: '#7a9bb5', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: '0' });
+          ivRvZeroAdded = true;
+        }
       });
+      if (hasAtmIvRv && atmIvRvSeries) {
+        const sr = chart.addSeries(LineSeries, {
+          color: atmIvRvSeries.color, lineWidth: 3, priceLineVisible: false,
+          lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
+        }, nextPane);
+        sr.setData(atmIvRvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
+        atmIvRvLineRef.current = sr;
+        if (!ivRvZeroAdded) {
+          sr.createPriceLine({ price: 0, color: '#7a9bb5', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: '0' });
+        }
+      }
       nextPane++;
     }
 
@@ -287,6 +329,19 @@ export const MultiPaneChart: React.FC<Props> = ({
         }
       }
 
+      // ATM IV value (overlaid in IV pane)
+      const atmIvInfo = atmIvSeriesInfo.current;
+      if (atmIvInfo && atmIvLineRef.current) {
+        const val = (param.seriesData.get(atmIvLineRef.current) as any)?.value as number | undefined;
+        if (val !== undefined) {
+          html += `<div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;line-height:1.7">
+            <span style="color:${atmIvInfo.color}">${atmIvInfo.label}</span>
+            <span style="color:#e2e8f0;font-weight:700">${val.toFixed(2)}%</span>
+          </div>`;
+          hasAny = true;
+        }
+      }
+
       // IV-RV spread values
       const ivRvInfo = ivRvSeriesInfo.current;
       if (ivRvInfo.length > 0) {
@@ -300,6 +355,19 @@ export const MultiPaneChart: React.FC<Props> = ({
           </div>`;
         }).filter(Boolean).join('');
         if (rows) { html += rows; hasAny = true; }
+      }
+
+      // ATM IV-RV value (overlaid in IV-RV pane)
+      const atmIvRvInfo = atmIvRvSeriesInfo.current;
+      if (atmIvRvInfo && atmIvRvLineRef.current) {
+        const val = (param.seriesData.get(atmIvRvLineRef.current) as any)?.value as number | undefined;
+        if (val !== undefined) {
+          html += `<div style="display:flex;justify-content:space-between;gap:12px;font-size:10px;line-height:1.7">
+            <span style="color:${atmIvRvInfo.color}">${atmIvRvInfo.label}</span>
+            <span style="color:${val >= 0 ? '#00e5a0' : '#ff4d6a'};font-weight:700">${val >= 0 ? '+' : ''}${val.toFixed(2)}%</span>
+          </div>`;
+          hasAny = true;
+        }
       }
 
       // Delta values
@@ -338,10 +406,12 @@ export const MultiPaneChart: React.FC<Props> = ({
       chartRef.current     = null;
       mtmBaselineRef.current = null;
       rvLineRef.current      = null;
+      atmIvLineRef.current   = null;
+      atmIvRvLineRef.current = null;
     };
   // Structural deps only — primitives, stable across reference changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasMtm, hasMtmData, hasMtmSeries, showIv, showIvRv, showDelta, nIv, nIvRv, nDelta, hasRv]);
+  }, [hasMtm, hasMtmData, hasMtmSeries, showIv, showIvRv, showDelta, nIv, nIvRv, nDelta, hasRv, hasAtmIv, hasAtmIvRv]);
 
   // ── DATA EFFECTS — update in-place, no chart rebuild ──────────────────────
   useEffect(() => {
@@ -376,6 +446,18 @@ export const MultiPaneChart: React.FC<Props> = ({
   }, [rvSeries]);
 
   useEffect(() => {
+    const sr = atmIvLineRef.current;
+    if (!sr || !atmIvSeries?.data.length) return;
+    sr.setData(atmIvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
+  }, [atmIvSeries]);
+
+  useEffect(() => {
+    const sr = atmIvRvLineRef.current;
+    if (!sr || !atmIvRvSeries?.data.length) return;
+    sr.setData(atmIvRvSeries.data.map(d => ({ time: (d.time + IST) as UTCTimestamp, value: d.value })));
+  }, [atmIvRvSeries]);
+
+  useEffect(() => {
     if (ivRvRefsMap.current.size === 0 || !ivRvSeries) return;
     ivRvSeries.forEach(s => {
       const sr = ivRvRefsMap.current.get(s.id);
@@ -397,8 +479,8 @@ export const MultiPaneChart: React.FC<Props> = ({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    const visibleIv    = showIv    && nIv    > 0;
-    const visibleIvRv  = showIvRv  && nIvRv  > 0;
+    const visibleIv    = showIv    && (nIv    > 0 || hasAtmIv);
+    const visibleIvRv  = showIvRv  && (nIvRv  > 0 || hasAtmIvRv);
     const visibleDelta = showDelta && nDelta > 0;
     const total = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvRv ? ivRvH : 0) + (visibleDelta ? deltaH : 0);
     if (total <= 0) return;
@@ -432,8 +514,8 @@ export const MultiPaneChart: React.FC<Props> = ({
     document.addEventListener('mouseup', onUp);
   }, []);
 
-  const visibleIv    = showIv    && nIv    > 0;
-  const visibleIvRv  = showIvRv  && nIvRv  > 0;
+  const visibleIv    = showIv    && (nIv    > 0 || hasAtmIv);
+  const visibleIvRv  = showIvRv  && (nIvRv  > 0 || hasAtmIvRv);
   const visibleDelta = showDelta && nDelta > 0;
   const totalH = (hasMtm ? mtmH : 0) + (visibleIv ? ivH : 0) + (visibleIvRv ? ivRvH : 0) + (visibleDelta ? deltaH : 0);
 
@@ -498,17 +580,29 @@ export const MultiPaneChart: React.FC<Props> = ({
         <div className="chart-resize-handle" onMouseDown={makeDragHandle(mtmHRef, setMtmH)} />
       )}
 
-      {/* IV% (with RV overlay) toggle + resize */}
-      {nIv > 0 && legendRow(
-        'IV% per Leg' + (hasRv ? ' + RV%' : ''),
-        hasRv && rvSeries ? [...ivSeries, rvSeries] : ivSeries,
+      {/* IV% (with RV + ATM-IV overlays) toggle + resize */}
+      {(nIv > 0 || hasAtmIv) && legendRow(
+        'IV% per Leg' + (hasRv ? ' + RV%' : '') + (hasAtmIv ? ' + ATM-IV' : ''),
+        [
+          ...ivSeries,
+          ...(hasRv && rvSeries ? [rvSeries] : []),
+          ...(hasAtmIv && atmIvSeries ? [atmIvSeries] : []),
+        ],
         showIv,
         () => setShowIv(v => !v),
       )}
       {showIv && <div className="chart-resize-handle" onMouseDown={makeDragHandle(ivHRef, setIvH)} />}
 
       {/* IV-RV spread toggle + resize */}
-      {nIvRv > 0 && ivRvSeries && legendRow('IV − RV % per Leg', ivRvSeries, showIvRv, () => setShowIvRv(v => !v))}
+      {(nIvRv > 0 || hasAtmIvRv) && legendRow(
+        'IV − RV %' + (hasAtmIvRv ? ' (+ ATM)' : ''),
+        [
+          ...(ivRvSeries ?? []),
+          ...(hasAtmIvRv && atmIvRvSeries ? [atmIvRvSeries] : []),
+        ],
+        showIvRv,
+        () => setShowIvRv(v => !v),
+      )}
       {showIvRv && <div className="chart-resize-handle" onMouseDown={makeDragHandle(ivRvHRef, setIvRvH)} />}
 
       {/* Delta toggle + resize */}

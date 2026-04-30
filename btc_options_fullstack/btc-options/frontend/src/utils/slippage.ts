@@ -13,10 +13,13 @@
  *      across new fills.
  *   3. IV regime is implicit — if IV doubles, both mark and slip double in tandem.
  *
- * Calibrated against ~25 fills + the 7 short-strangle entries below. The observed
- * `slip / mark` ratio across the sample clusters in the 0.3%–1.6% range, with
- * dead-hour and weekend trades in the upper half. We use 1.2% as the active-hour
- * baseline, then multipliers stretch up to ~5% for 3 AM Saturday wings.
+ * Calibrated against ~25 fills + the 7 short-strangle entries below + a 280-lot
+ * ATM straddle round-trip on 2025-12-27 (round-trip slip 0.7%/mark). The observed
+ * `slip / mark` ratio across the sample clusters in the 0.3%–1.6% range. We use
+ * 0.5% as the active-hour baseline, then multipliers stretch up to ~2% for the
+ * extreme case (deep wings + dead-hour + weekend). The original 1.2%/2.5×/1.3×
+ * over-predicted by ~4× for short-dated ATM trades because BTC books are global
+ * 24/7 — IST-centric dead-hour penalty doesn't really apply.
  *
  * Per-trade error remains ±50%. The sensitivity table in the UI shows P&L at
  * 0.5×/1×/1.5×/2×/3× to make that uncertainty explicit.
@@ -58,44 +61,70 @@ export interface SlippageInputs {
   hourIst: number;     // 0..23, IST hour-of-day at entry
   isWeekend?: boolean; // Sat or Sun by IST date
   oiClose?: number;    // kept for API compat — chain OI not currently surfaced
+  qty?: number;        // contracts (lots) — used for impact-cost scaling. Default 200 (impact size).
 }
 
 // ── Tunable constants ──────────────────────────────────────────────────────
-const BASE_PCT  = 0.012;    // 1.2% of mark per side, active hours, near-ATM
-const FLOOR_USD = 0.05;     // minimum $/contract (avoids hard zero on cheap legs)
-const CAP_FRAC  = 0.30;     // hard ceiling at 30% of mark (tail-risk bound)
-const CAP_USD   = 50;       // absolute floor on the cap
+// Recalibrated 2026-04-28 with sub-linear quantity scaling, motivated by
+// Delta India's Impact Size = 200 contracts framework. Slip has a fixed
+// "spread crossing" component plus a linear per-BTC term, so the per-BTC
+// rate decreases with qty (matches user's observed sub-linear cost):
+//
+//   slip_$ = (MIN_SPREAD + PER_BTC × qty_btc) × moneyness × hour × weekend
+//
+// Calibration: linear $1 per 100 lots NET (PE+CE strangle), plus a one-tick
+// fixed crossing cost — Delta India BTC option tick size is $0.10, which is the
+// minimum spread you can cross. This adds ~$0.26 to a strangle's net slip across
+// all qty (small perturbation off pure linear scaling, but more realistic for
+// very small trades).
+//   At 7%OTM active-hours weekday with MIN=$0.10, PER=$3.85:
+//     100-lot strangle NET ≈ $1.26
+//     700-lot strangle NET ≈ $7.27
+//     1000-lot strangle NET ≈ $10.27
+const MIN_SPREAD_USD = 0.10;    // fixed cost to cross one tick of spread, per side
+const PER_BTC_BASE   = 3.85;    // marginal slip per BTC of size, active hours
+const BASE_PCT       = 0.012;   // 1.2% of mark — overrides floor for very expensive legs
+const FLOOR_USD        = 0.05;  // minimum $/contract (avoids hard zero on cheap legs)
+const CAP_FRAC         = 0.30;  // hard ceiling at 30% of mark (tail-risk bound)
+const CAP_USD          = 50;    // absolute floor on the cap
 
 /**
- * Raw heuristic slippage estimate in $/contract — multiplicative model only,
+ * Raw heuristic slippage estimate in USDT/BTC — multiplicative model only,
  * NO floor/cap applied. Bounds are applied by computeSlippagePerSide so they
  * scale with the user's stress-test multiplier.
  */
 export function estimateSlippage(inp: SlippageInputs): number {
-  const { spot, markClose, strike, hourIst, isWeekend } = inp;
+  const { markClose, hourIst, isWeekend, qty } = inp;
   if (markClose <= 0) return 0;
 
-  const moneyness = Math.abs(strike - spot) / spot;
+  // ── Moneyness multiplier — REMOVED 2026-04-30 per user calibration.
+  // Wings DON'T get extra slip in user's experience: deep-OTM CE 78.5k @ 700 lots
+  // observed $2 actual vs old model (mult 2.0) producing $5.59. Mark-proportional
+  // BASE_PCT term still differentiates expensive ATM legs from cheap wings naturally.
+  const moneynessMult = 1.0;
 
-  // ── Moneyness multiplier — wider books at the wings ──
-  let moneynessMult: number;
-  if      (moneyness < 0.02) moneynessMult = 1.0;   // ATM
-  else if (moneyness < 0.05) moneynessMult = 1.1;
-  else if (moneyness < 0.10) moneynessMult = 1.3;
-  else if (moneyness < 0.15) moneynessMult = 1.6;
-  else if (moneyness < 0.20) moneynessMult = 2.0;
-  else                       moneynessMult = 2.5;   // deep wings
-
-  // ── Hour multiplier (IST) — dead-hour penalty calibrated against trades T3–T6 ──
+  // ── Hour multiplier (IST) — softened 2026-04-28: BTC books are global, so
+  // 00–06 IST is US afternoon, not "dead". Penalty kept but reduced.
   let hourMult: number;
-  if      (hourIst >= 0 && hourIst < 6) hourMult = 2.5;  // deep dead hours
-  else if (hourIst >= 6 && hourIst < 9) hourMult = 1.5;  // Asia waking up
+  if      (hourIst >= 0 && hourIst < 6) hourMult = 1.1;  // overnight IST = US afternoon
+  else if (hourIst >= 6 && hourIst < 9) hourMult = 1.05; // Asia waking up
   else                                  hourMult = 1.0;  // active (incl. evening US/EU)
 
   // ── Weekend multiplier — thin books on Sat/Sun across all hours ──
-  const weekendMult = isWeekend ? 1.3 : 1.0;
+  const weekendMult = isWeekend ? 1.05 : 1.0;
 
-  return BASE_PCT * markClose * moneynessMult * hourMult * weekendMult;
+  // Convert per-side fixed + linear cost to a per-BTC equivalent so the
+  // outer caller's `* qty * 0.001` arithmetic still works:
+  //   total_slip_$ = (MIN_SPREAD + PER_BTC × qty_btc) × multipliers
+  //   per_btc_slip = total_slip_$ / qty_btc
+  //                = (MIN_SPREAD/qty_btc + PER_BTC) × multipliers
+  // For the high-mark cap, use the legacy mark% as an alternative lower bound.
+  const qtyBtc = Math.max(0.001, (qty ?? 200) * 0.001);
+  const additivePerBtc = MIN_SPREAD_USD / qtyBtc + PER_BTC_BASE;
+  const markPctPerBtc  = BASE_PCT * markClose;
+  const baseSlipPerBtc = Math.max(additivePerBtc, markPctPerBtc);
+
+  return baseSlipPerBtc * moneynessMult * hourMult * weekendMult;
 }
 
 /**

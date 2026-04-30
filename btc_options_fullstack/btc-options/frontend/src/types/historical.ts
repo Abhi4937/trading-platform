@@ -52,3 +52,15 @@ export interface OHLCWithGreeks extends OHLCData {
 export interface ChartDataWithGreeksResponse {
   data: OHLCWithGreeks[];
 }
+
+export interface AtmIvPoint {
+  time: number;
+  atm_strike: number;
+  atm_iv: number;        // percent
+  rv: number;            // percent
+  iv_minus_rv: number;   // percent (0 when rv unavailable)
+}
+
+export interface AtmIvSeriesResponse {
+  data: AtmIvPoint[];
+}

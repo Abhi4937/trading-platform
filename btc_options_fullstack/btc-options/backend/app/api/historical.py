@@ -525,3 +525,178 @@ async def get_chart_data(
     except Exception as e:
         logger.error(f"Error fetching chart data for {exact_path}: {e}")
         return {"data": []}
+
+
+@router.get("/atm-iv-series")
+async def get_atm_iv_series(
+    expiry: str = Query(...),
+    timeframe: str = Query(...),
+    rv_window_days: int = Query(7),
+):
+    """ATM IV time series across the contract lifetime.
+
+    For each timeframe bucket: spot → closest strike → average of CE+PE IV at that strike.
+    Returns {time, atm_strike, atm_iv, rv, iv_minus_rv}.
+    """
+    conn = get_conn()
+    interval_map = {
+        '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes',
+        '30m': '30 minutes', '1h': '1 hour', '4h': '4 hours', '1d': '1 day',
+    }
+    interval_secs = {
+        '1m': 60, '5m': 300, '15m': 900,
+        '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400,
+    }
+    interval = interval_map.get(timeframe, '5 minutes')
+    bucket_secs = interval_secs.get(timeframe, 300)
+
+    strikes = get_strikes_for_expiry(expiry)
+    if not strikes:
+        return {"data": []}
+
+    # Use middle strike's parquet to find data range for this expiry
+    sample_strike = strikes[len(strikes) // 2]
+    sample_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={sample_strike}/CE.parquet"
+    if not os.path.exists(sample_path):
+        sample_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={sample_strike}/PE.parquet"
+        if not os.path.exists(sample_path):
+            return {"data": []}
+
+    try:
+        rng = conn.execute(
+            f"SELECT MIN(timestamp_unix), MAX(timestamp_unix) FROM read_parquet('{sample_path}')"
+        ).fetchone()
+        if not rng or rng[0] is None:
+            return {"data": []}
+        min_ts, max_ts = int(rng[0]), int(rng[1])
+
+        # Bucketed spot for the contract lifetime
+        spot_query = f"""
+        SELECT
+            time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+            last(mark_close ORDER BY timestamp_unix) AS spot_close
+        FROM read_parquet('{SPOT_DATA_PATH}')
+        WHERE timestamp_unix >= {min_ts} AND timestamp_unix <= {max_ts}
+        GROUP BY bucket ORDER BY bucket ASC
+        """
+        spot_df = conn.execute(spot_query).df()
+        if spot_df.empty:
+            return {"data": []}
+        spot_df['time'] = spot_df['bucket'].apply(lambda x: int(x.timestamp()))
+
+        import numpy as np
+        strikes_arr = np.array(sorted(strikes))
+        spot_df['atm_strike'] = spot_df['spot_close'].apply(
+            lambda s: int(strikes_arr[np.argmin(np.abs(strikes_arr - s))]) if s and s > 0 else 0
+        )
+
+        # Bulk-load CE + PE bucketed marks for each unique ATM strike
+        unique_strikes = [int(s) for s in spot_df['atm_strike'].unique() if s > 0]
+        strike_data: dict[int, dict[str, dict[int, float]]] = {}
+        for K in unique_strikes:
+            ce_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={K}/CE.parquet"
+            pe_path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={K}/PE.parquet"
+            ce_data, pe_data = {}, {}
+            for path, target in [(ce_path, 'ce'), (pe_path, 'pe')]:
+                if not os.path.exists(path):
+                    continue
+                df = conn.execute(f"""
+                    SELECT
+                        time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+                        last(mark_close ORDER BY timestamp_unix) AS close
+                    FROM read_parquet('{path}')
+                    GROUP BY bucket ORDER BY bucket ASC
+                """).df()
+                if not df.empty:
+                    df['time'] = df['bucket'].apply(lambda x: int(x.timestamp()))
+                    if target == 'ce':
+                        ce_data = dict(zip(df['time'].astype(int), df['close'].astype(float)))
+                    else:
+                        pe_data = dict(zip(df['time'].astype(int), df['close'].astype(float)))
+            strike_data[K] = {'ce': ce_data, 'pe': pe_data}
+
+        # RV — same window/annualization as chart-data-with-greeks
+        import math as _math
+        BARS_PER_DAY = {'1m': 1440, '5m': 288, '15m': 96, '30m': 48, '1h': 24, '4h': 6, '1d': 1}
+        bars_per_day = BARS_PER_DAY.get(timeframe, 288)
+        rv_rolling_bars = rv_window_days * bars_per_day
+        annualize_factor = _math.sqrt(365 * bars_per_day)
+        rv_lookback_start = max(0, min_ts - (rv_window_days + 5) * 86400)
+        rv_by_time: dict[int, float] = {}
+        try:
+            rv_df = conn.execute(f"""
+                SELECT
+                    time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+                    last(mark_close ORDER BY timestamp_unix) AS spot_close
+                FROM read_parquet('{SPOT_DATA_PATH}')
+                WHERE timestamp_unix >= {rv_lookback_start}
+                GROUP BY bucket ORDER BY bucket ASC
+            """).df()
+            if not rv_df.empty and len(rv_df) >= 2:
+                rv_df['time'] = rv_df['bucket'].apply(lambda x: int(x.timestamp()))
+                rv_df['log_ret'] = np.log(rv_df['spot_close'] / rv_df['spot_close'].shift(1))
+                rv_df['rv'] = rv_df['log_ret'].rolling(rv_rolling_bars).std() * annualize_factor * 100
+                valid = rv_df.dropna(subset=['rv'])
+                rv_by_time = dict(zip(valid['time'].astype(int), valid['rv'].astype(float)))
+        except Exception as e:
+            logger.warning(f"ATM RV computation failed: {e}")
+
+        from app.core.greeks import implied_vol as _iv
+        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
+        r = 0.0
+
+        # Strikes we have parquet data loaded for (subset of all expiry strikes).
+        # Used as the fallback pool when the ATM strike has no IV at a given bar.
+        loaded_strikes = sorted(strike_data.keys())
+
+        records = []
+        for _, row in spot_df.iterrows():
+            t = int(row['time'])
+            spot = float(row['spot_close']) if row['spot_close'] else 0.0
+            K_atm = int(row['atm_strike'])
+            if spot <= 0 or K_atm == 0:
+                continue
+            current_dt = datetime.fromtimestamp(t + bucket_secs, tz=timezone.utc)
+            T = max(0.0001, (expiry_dt - current_dt).total_seconds() / (365 * 24 * 3600))
+
+            # Try ATM strike first; on missing data, walk loaded strikes by distance
+            # from spot and use the first that yields a valid IV.
+            candidates = sorted(loaded_strikes, key=lambda s: abs(s - spot))
+            if K_atm in candidates:
+                candidates = [K_atm] + [k for k in candidates if k != K_atm]
+
+            atm_iv = 0.0
+            K_used = K_atm
+            for K_try in candidates:
+                ce_close = strike_data.get(K_try, {}).get('ce', {}).get(t, 0.0)
+                pe_close = strike_data.get(K_try, {}).get('pe', {}).get(t, 0.0)
+                ivs = []
+                if ce_close > 0:
+                    v = _iv(ce_close, spot, K_try, T, r, "call")
+                    if v > 0:
+                        ivs.append(v)
+                if pe_close > 0:
+                    v = _iv(pe_close, spot, K_try, T, r, "put")
+                    if v > 0:
+                        ivs.append(v)
+                if ivs:
+                    atm_iv = sum(ivs) / len(ivs) * 100.0
+                    K_used = K_try
+                    break
+
+            if atm_iv <= 0:
+                continue
+
+            rv_val = round(float(rv_by_time.get(t, 0.0)), 2)
+            records.append({
+                'time': t,
+                'atm_strike': K_used,
+                'atm_iv': round(atm_iv, 2),
+                'rv': rv_val,
+                'iv_minus_rv': round(atm_iv - rv_val, 2) if rv_val > 0 else 0.0,
+            })
+
+        return {"data": records}
+    except Exception as e:
+        logger.error(f"Error fetching ATM IV series for {expiry}: {e}")
+        return {"data": []}
