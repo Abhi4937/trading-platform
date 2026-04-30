@@ -1,0 +1,216 @@
+// ── Mirrors backend Pydantic models in app/api/backtest.py ──────────────────
+
+export type ExpirySelector =
+  | 'current' | 'next' | 'next_to_next'
+  | 'weekly'  | 'next_weekly'
+  | 'monthly' | 'next_monthly'
+  | 'current_plus_n';
+
+// ── AlgoTest-aligned enums (form-side, translated to backend schema on submit)
+
+export type AlgoStrategyType = 'Intraday' | 'BTST' | 'Positional';
+export type AlgoUnderlyingFrom = 'Cash' | 'Futures';
+export type AlgoSquareOff = 'Partial' | 'Complete';
+export type AlgoPosition = 'Buy' | 'Sell';
+export type AlgoOptionType = 'Call' | 'Put';
+export type AlgoSegment = 'Futures' | 'Options';
+export type AlgoExpiryType = 'Weekly' | 'Next Weekly' | 'Monthly' | 'Next Monthly';
+
+export type AlgoStrikeCriteria =
+  | 'Strike Type' | 'Premium Range' | 'Closest Premium'
+  | 'Premium >=' | 'Premium <='
+  | 'Straddle Width' | '% of ATM' | 'Synthetic Future'
+  | 'ATM Straddle Premium %' | 'Closest Delta' | 'Delta Range';
+
+// ITM20..ITM1, ATM, OTM1..OTM30 — 51 entries
+export type AlgoStrikeType = string;
+
+export const ALGO_STRIKE_OPTIONS: AlgoStrikeType[] = [
+  ...Array.from({ length: 20 }, (_, i) => `ITM${20 - i}`),
+  'ATM',
+  ...Array.from({ length: 30 }, (_, i) => `OTM${i + 1}`),
+];
+
+export const ALGO_STRIKE_CRITERIA: AlgoStrikeCriteria[] = [
+  'Strike Type', 'Premium Range', 'Closest Premium',
+  'Premium >=', 'Premium <=', 'Straddle Width', '% of ATM',
+  'Synthetic Future', 'ATM Straddle Premium %', 'Closest Delta', 'Delta Range',
+];
+
+export const ALGO_EXPIRY_OPTS: AlgoExpiryType[] = [
+  'Weekly', 'Next Weekly', 'Monthly', 'Next Monthly',
+];
+
+export const ALGO_TRAILING_OPTS = ['Lock', 'Lock and Trail', 'Overall Trail SL'] as const;
+export type AlgoTrailingOption = (typeof ALGO_TRAILING_OPTS)[number];
+
+export const ALGO_OVERALL_SL_OPTS = ['Max Loss', 'Total Premium %'] as const;
+export type AlgoOverallSlType = (typeof ALGO_OVERALL_SL_OPTS)[number];
+
+export const ALGO_OVERALL_TGT_OPTS = ['Max Profit', 'Total Premium %'] as const;
+export type AlgoOverallTgtType = (typeof ALGO_OVERALL_TGT_OPTS)[number];
+
+export const ALGO_REENTRY_OPTS = ['RE ASAP', 'RE ASAP ↩', 'RE MOMENTUM', 'RE MOMENTUM ↩'] as const;
+export type AlgoReentryType = (typeof ALGO_REENTRY_OPTS)[number];
+
+export const ALGO_OVERALL_MOMENTUM_OPTS = [
+  'Points (Pts) ↑', 'Points (Pts) ↓', 'Percent (%) ↑', 'Percent (%) ↓',
+] as const;
+export type AlgoOverallMomentum = (typeof ALGO_OVERALL_MOMENTUM_OPTS)[number];
+
+// ── Helpers: AlgoTest enums → backend schema ─────────────────────────────────
+
+/** "ITM5" → -5, "ATM" → 0, "OTM3" → 3 */
+export function strikeTypeToOffset(s: AlgoStrikeType): number {
+  if (s === 'ATM') return 0;
+  const itm = /^ITM(\d+)$/.exec(s); if (itm) return -Number(itm[1]);
+  const otm = /^OTM(\d+)$/.exec(s); if (otm) return  Number(otm[1]);
+  return 0;
+}
+
+export function expiryTypeToSelector(e: AlgoExpiryType): ExpirySelector {
+  switch (e) {
+    case 'Weekly':       return 'weekly';
+    case 'Next Weekly':  return 'next_weekly';
+    case 'Monthly':      return 'monthly';
+    case 'Next Monthly': return 'next_monthly';
+  }
+}
+
+export interface BacktestLegTemplate {
+  strike_offset: number;            // ATM-relative
+  type: 'CE' | 'PE';
+  action: 'BUY' | 'SELL';
+  qty: number;
+  expiry_selector: ExpirySelector;
+  expiry_offset?: number;
+}
+
+export interface SlippageConfig {
+  enabled: boolean;
+  mode: 'flat' | 'smart';
+  flat_value?: number;
+  mult: number;
+}
+
+export interface BrokerageConfig {
+  enabled: boolean;
+  rate: 'standard' | 'offer';
+  referral: boolean;
+}
+
+export interface BacktestRequest {
+  start_date: string;               // YYYY-MM-DD
+  end_date: string;                 // YYYY-MM-DD
+  legs: BacktestLegTemplate[];
+  entry_time_ist: string;           // "09:20"
+  weekday_mask: number[];           // subset of [0..6] (Mon..Sun)
+  forced_exit_time_ist: string;     // "15:25"
+  // 0 = same day (intraday), 1 = next day (BTST), N = positional N days
+  exit_day_offset?: number;
+  timeframe?: '1m' | '5m' | '15m' | '30m' | '1h';
+  slippage: SlippageConfig;
+  brokerage: BrokerageConfig;
+  // phase 3+ hooks (optional, ignored in phase 1)
+  stop_loss?: any;
+  target?: any;
+  trail_sl?: any;
+  dte_force_close?: number;
+  per_leg_exits?: any[];
+  reentry_after_sl?: number;
+  spot_trigger?: any;
+  iv_trigger?: any;
+  capital?: any;
+}
+
+// ── Response shapes ──────────────────────────────────────────────────────────
+
+export interface BacktestSubmitResponse {
+  job_id: string;
+  status: string;
+}
+
+export interface BacktestProgress {
+  days_done: number;
+  days_total: number;
+  current_date: string | null;
+  eta_seconds: number | null;
+}
+
+export interface BacktestLegFill {
+  expiry: string;
+  strike: number;
+  type: 'CE' | 'PE';
+  action: 'BUY' | 'SELL';
+  qty: number;
+  entry_mark: number;
+  exit_mark: number;
+  leg_pnl: number;
+}
+
+export interface BacktestTrade {
+  date: string;
+  entry_time: string | null;
+  exit_time: string | null;
+  exit_reason: string | null;
+  spot_at_entry: number | null;
+  spot_at_exit:  number | null;
+  legs: BacktestLegFill[];
+  gross_pnl: number;
+  slippage_cost: number;
+  brokerage_cost: number;
+  net_pnl: number;
+  margin_used: number | null;
+  max_mtm: number;
+  max_mtm_time: string | null;
+  max_pnl_net: number;
+  min_mtm: number;
+  min_mtm_time: string | null;
+  min_pnl_net: number;
+  is_reentry: boolean;
+  skipped: boolean;
+  skip_reason?: string;
+}
+
+export interface BacktestSummary {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  breakevens: number;
+  win_rate_pct: number;
+  gross_pnl: number;
+  total_costs: number;
+  net_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  expectancy: number;
+  sharpe_daily: number;
+  max_drawdown: number;
+  max_drawdown_pct: number;
+  max_dd_peak_date: string | null;
+  max_dd_trough_date: string | null;
+  avg_margin_used: number;
+  return_on_margin_pct: number;
+}
+
+export interface BacktestEquityPoint {
+  date: string;
+  cum_pnl: number;
+  daily_pnl: number;
+}
+
+export interface BacktestResult {
+  summary: BacktestSummary;
+  equity_curve: BacktestEquityPoint[];
+  trades: BacktestTrade[];
+}
+
+export type BacktestStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled';
+
+export interface BacktestStatusResponse {
+  job_id: string;
+  status: BacktestStatus;
+  progress: BacktestProgress;
+  error: string | null;
+  result: BacktestResult | null;
+}

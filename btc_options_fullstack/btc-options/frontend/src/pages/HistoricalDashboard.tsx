@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { historicalApi } from '../services/historical_api';
+import { usePersistedState, writePersisted, readPersisted, clearPersisted } from '../hooks/usePersistedState';
 import { ReplayController } from '../components/historical/ReplayController';
 import { HistoricalOptionChain } from '../components/historical/HistoricalOptionChain';
 import { HistoricalChart } from '../components/historical/HistoricalChart';
@@ -9,10 +10,11 @@ import type { Strategy, StrategyLeg } from '../types/strategy';
 
 export const HistoricalDashboard: React.FC = () => {
   const [dataRange, setDataRange] = useState<{ min_ts: number, max_ts: number } | null>(null);
-  const [simulationDate, setSimulationDate] = useState<string>('');
-  const [simulationTime, setSimulationTime] = useState<string>('');
+  // Persist date/time/expiry across mode switches & reloads.
+  const [simulationDate, setSimulationDate] = usePersistedState<string>('historical:simulationDate', '');
+  const [simulationTime, setSimulationTime] = usePersistedState<string>('historical:simulationTime', '');
   const [expiries, setExpiries] = useState<{date: string, label: string}[]>([]);
-  const [selectedExpiry, setSelectedExpiry] = useState<string>('');
+  const [selectedExpiry, setSelectedExpiry] = usePersistedState<string>('historical:selectedExpiry', '');
 
   const [chain, setChain] = useState<HistoricalChainRow[]>([]);
   const [spot, setSpot] = useState<number>(0);
@@ -22,8 +24,8 @@ export const HistoricalDashboard: React.FC = () => {
   const [timeframe, setTimeframe] = useState<string>('5m');
   const [chartData, setChartData] = useState<OHLCData[]>([]);
 
-  // Panel mode
-  const [strategyMode, setStrategyMode] = useState(false);
+  // Panel mode (persisted so MTM view comes back after navigating away)
+  const [strategyMode, setStrategyMode] = usePersistedState<boolean>('historical:strategyMode', false);
   const [maximized, setMaximized] = useState(false);
   const [chartsOnly, setChartsOnly] = useState(false);
 
@@ -49,13 +51,54 @@ export const HistoricalDashboard: React.FC = () => {
     document.addEventListener('mouseup', onUp);
   }, [chartPanelWidth]);
 
-  // Build mode — single strategy legs
-  const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
+  // Build mode — single strategy legs (persisted across mode switches & reloads)
+  const [strategyLegs, setStrategyLegs] = usePersistedState<StrategyLeg[]>(
+    'historical:strategyLegs', []
+  );
 
   // Compare mode
-  const [panelMode, setPanelMode] = useState<'build' | 'compare'>('build');
-  const [compareStrategies, setCompareStrategies] = useState<Strategy[]>([]);
-  const [activeCompareStratId, setActiveCompareStratId] = useState<string>('');
+  const [panelMode, setPanelMode] = usePersistedState<'build' | 'compare'>(
+    'historical:panelMode', 'build'
+  );
+  const [compareStrategies, setCompareStrategies] = usePersistedState<Strategy[]>(
+    'historical:compareStrategies', []
+  );
+  const [activeCompareStratId, setActiveCompareStratId] = usePersistedState<string>(
+    'historical:activeCompareStratId', ''
+  );
+
+  // Saved-strategy snapshots (named, separate from auto-persistence)
+  const HIST_SAVED_LIST = 'historical:savedStrategies';
+  const [savedNames, setSavedNames] = useState<string[]>(
+    () => readPersisted<string[]>(HIST_SAVED_LIST) ?? []
+  );
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveName, setSaveName] = useState('');
+
+  const saveCurrentStrategy = (name: string) => {
+    const trimmed = name.trim(); if (!trimmed) return;
+    writePersisted(`historical:strategy:${trimmed}`, {
+      strategyLegs, panelMode, compareStrategies, activeCompareStratId,
+    });
+    const list = Array.from(new Set([...savedNames, trimmed])).sort();
+    writePersisted(HIST_SAVED_LIST, list);
+    setSavedNames(list);
+    setShowSaveDialog(false); setSaveName('');
+  };
+  const loadSavedStrategy = (name: string) => {
+    const s = readPersisted<any>(`historical:strategy:${name}`);
+    if (!s) return;
+    setStrategyLegs(s.strategyLegs ?? []);
+    setPanelMode(s.panelMode ?? 'build');
+    setCompareStrategies(s.compareStrategies ?? []);
+    setActiveCompareStratId(s.activeCompareStratId ?? '');
+  };
+  const deleteSavedStrategy = (name: string) => {
+    clearPersisted(`historical:strategy:${name}`);
+    const list = savedNames.filter(n => n !== name);
+    writePersisted(HIST_SAVED_LIST, list);
+    setSavedNames(list);
+  };
 
   // All legs (for pin strikes and legChains fetch)
   const allLegs = useMemo(() => {
@@ -154,11 +197,14 @@ export const HistoricalDashboard: React.FC = () => {
   useEffect(() => {
     historicalApi.getDataRange().then(range => {
       setDataRange(range);
-      const defaultDate = new Date(range.max_ts * 1000).toISOString().split('T')[0];
-      setSimulationDate(defaultDate);
-      setSimulationTime('00:00');
+      // Only seed defaults if no persisted value exists. Without this guard,
+      // every mode switch / reload would clobber the user's last selection.
+      if (!simulationDate) {
+        setSimulationDate(new Date(range.max_ts * 1000).toISOString().split('T')[0]);
+      }
+      if (!simulationTime) setSimulationTime('00:00');
     }).catch(console.error);
-  }, []);
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (simulationDate) {
@@ -362,6 +408,83 @@ export const HistoricalDashboard: React.FC = () => {
 
   return (
     <div className="historical-container">
+      {/* Save/Load strategy bar — minimal floating UI, top-right */}
+      <div style={{
+        position: 'absolute', top: 6, right: 12, zIndex: 5,
+        display: 'flex', gap: 8, alignItems: 'center', fontSize: 11,
+      }}>
+        {savedNames.length > 0 && (
+          <select
+            defaultValue=""
+            onChange={e => { if (e.target.value) { loadSavedStrategy(e.target.value); e.target.value = ''; } }}
+            style={{
+              background: '#0d1421', border: '1px solid #1a2d42',
+              color: '#c9d1d9', borderRadius: 4, padding: '4px 8px',
+              fontSize: 11, cursor: 'pointer',
+            }}>
+            <option value="">📂 Load saved…</option>
+            {savedNames.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        )}
+        {savedNames.length > 0 && (
+          <select
+            defaultValue=""
+            onChange={e => {
+              if (e.target.value && confirm(`Delete saved strategy "${e.target.value}"?`)) {
+                deleteSavedStrategy(e.target.value);
+              }
+              e.target.value = '';
+            }}
+            style={{
+              background: '#0d1421', border: '1px solid #1a2d42',
+              color: '#ff4d6a', borderRadius: 4, padding: '4px 8px',
+              fontSize: 11, cursor: 'pointer',
+            }}>
+            <option value="">🗑 Delete saved…</option>
+            {savedNames.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        )}
+        <button onClick={() => setShowSaveDialog(true)} style={{
+          background: '#1f6feb', color: '#fff', border: 'none',
+          borderRadius: 4, padding: '4px 12px', fontSize: 11,
+          fontWeight: 600, cursor: 'pointer',
+        }}>💾 Save Strategy</button>
+      </div>
+
+      {showSaveDialog && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+        }} onClick={() => setShowSaveDialog(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: '#0d1421', border: '1px solid #1a2d42',
+            borderRadius: 8, padding: 20, minWidth: 320,
+          }}>
+            <h3 style={{ margin: 0, marginBottom: 12, fontSize: 14, color: '#e6edf3' }}>Save Strategy</h3>
+            <input autoFocus type="text" placeholder="e.g. ATM short straddle"
+              value={saveName} onChange={e => setSaveName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveCurrentStrategy(saveName); }}
+              style={{
+                width: '100%', padding: '6px 10px', fontSize: 12,
+                background: '#080e16', border: '1px solid #1a2d42',
+                color: '#c9d1d9', borderRadius: 4, marginBottom: 12,
+              }} />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowSaveDialog(false)} style={{
+                background: 'transparent', border: '1px solid #1a2d42',
+                color: '#c9d1d9', borderRadius: 4, padding: '5px 14px',
+                fontSize: 11, cursor: 'pointer',
+              }}>Cancel</button>
+              <button onClick={() => saveCurrentStrategy(saveName)} style={{
+                background: '#1f6feb', border: 'none', color: '#fff',
+                borderRadius: 4, padding: '5px 14px', fontSize: 11,
+                fontWeight: 600, cursor: 'pointer',
+              }}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {!chartsOnly && !maximized && <div className="replay-wrapper">
         <ReplayController
           simulationDate={simulationDate}

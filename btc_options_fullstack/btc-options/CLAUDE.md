@@ -99,3 +99,46 @@ Do NOT start new work on top of uncommitted changes.
 - Multiple named strategies (Strategy 1, 2, …), tabs to switch active strategy
 - CompareChart: P&L lines per strategy on shared chart
 - MultiPaneChart below with `hideMtm` — IV% and Delta for all legs across all strategies
+
+## Backtest Dashboard — Features Built (2026-04-30)
+
+### Architecture (3-way mode toggle: Live / Historical / Backtest in `App.tsx`)
+- `frontend/src/pages/BacktestDashboard.tsx` — top-level page, owns jobId/status/polling
+- `frontend/src/components/backtest/BacktestForm.tsx` — AlgoTest-style form (legs, entry/exit times, SL/TG stubs, costs, save-strategy snapshots). Dark theme, custom Stepper component.
+- `frontend/src/components/backtest/BacktestEquityChart.tsx` — lightweight-charts BaselineSeries
+- `frontend/src/components/backtest/BacktestDailyPnlBars.tsx` — recharts BarChart, green/red
+- `frontend/src/components/backtest/BacktestStatsPanel.tsx` — KPI grid (win rate, max DD, expectancy, etc.)
+- `frontend/src/components/backtest/BacktestTradeLogTable.tsx` — sortable table with CE/PE entry/exit columns + Max/Min MTM with timestamps + Max/Min Net (P&L if exited at peak/trough). CSV export.
+- `frontend/src/components/backtest/BacktestProgressBar.tsx` — progress + cancel
+- `backend/app/api/backtest.py` — POST submit / GET status / DELETE cancel
+- `backend/app/services/backtest.py` — day-loop simulator, samples 1m bars for max/min MTM tracking
+- `backend/app/services/backtest_jobs.py` — in-memory job registry, asyncio cancel events
+- `backend/app/services/option_data.py` — DuckDB helpers: spot lookup, strike resolvers (Strike Type / Closest Premium / Closest Delta), expiry resolver
+- `backend/app/services/costs.py` — Python port of `frontend/src/utils/slippage.ts` + brokerage. Slippage matches the historical viewer's `slipRoundTripUsd` exactly.
+- `backend/app/services/margin_v2.py` + `margin_engine_v2.py` + `margin_engine_v2_constants.json` — 29-scenario portfolio margin, used per trade
+
+### Async-job + 1Hz polling pattern
+- `POST /api/v1/historical/backtest` → `{ job_id, status: "queued" }` immediately
+- Backend runs day-loop in `asyncio.create_task` writing to in-process `_backtest_jobs` registry
+- `GET /api/v1/historical/backtest/{job_id}` → `{ status, progress, result? }`
+- `DELETE /api/v1/historical/backtest/{job_id}` → cancels via `asyncio.Event`
+- Single uvicorn worker constraint: registry is in-process, jobs lost on restart
+
+### State persistence (`frontend/src/hooks/usePersistedState.ts`)
+- localStorage-backed `useState` so date/time/expiry/strategy/MTM survive mode switches
+- Keys: `historical:*` (auto-state) and `historical:strategy:<name>` (named saves)
+- Same for `backtest:lastResult` (only persisted on `status === "done"`, never during running)
+- Named saved strategies survive backend restarts; auto-state does not (see below)
+
+### Backend session ID — auto-state reset on restart (`backend/app/main.py` + `frontend/src/utils/sessionGuard.ts`)
+- Backend generates `SESSION_ID = uuid.uuid4().hex` at process start
+- Frontend `main.tsx` blocks React mount on `GET /api/v1/session-id`
+- If stored ID differs → wipes all `historical:*` + `backtest:*` localStorage keys (excluding named saves)
+- This means: rebuilding the docker container resets all auto-persisted UI state on the next page load
+
+### Slippage model (CRITICAL invariant — keep in sync)
+- Frontend: `frontend/src/utils/slippage.ts`
+- Backend port: `backend/app/services/costs.py`
+- Calibration: `MIN_SPREAD_USD=0.10`, `PER_BTC_BASE=3.85`, `BASE_PCT=0.012`, no moneyness multiplier (removed 2026-04-30)
+- Round-trip slip = `2 × entry_slip` (matches `slipRoundTripUsd` in StrategyPanel.tsx)
+- If calibrating: change ONE place and mirror in the other. Verify with a single-day backtest matching the historical MTM panel within $0.10.

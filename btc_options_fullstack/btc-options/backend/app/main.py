@@ -2,11 +2,16 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 import traceback
+import uuid
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest
+
+# Fresh ID per process — frontend uses this to detect a backend restart and
+# wipe its auto-persisted UI state on the next page load.
+SESSION_ID = uuid.uuid4().hex
 from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
 from app.core.logging_middleware import LoggingMiddleware
@@ -106,6 +111,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
+@app.get("/api/v1/session-id", tags=["Health"])
+def get_session_id():
+    """UUID generated at process startup. Frontend compares against its
+    locally-stored copy to detect a backend restart; on mismatch it wipes the
+    auto-persisted UI state. Named saved strategies are unaffected."""
+    return {"session_id": SESSION_ID}
+
+
 app.include_router(health.router, tags=["Health"])
 app.include_router(expiries.router, prefix="/api/v1", tags=["Expiries"])
 app.include_router(options.router,  prefix="/api/v1", tags=["Options Chain"])
@@ -113,3 +126,4 @@ app.include_router(plot_data.router, prefix="/api/v1", tags=["Plot Data"])
 app.include_router(logs.router,     prefix="/api/v1", tags=["Logs"])
 app.include_router(ws.router,       tags=["WebSocket"])
 app.include_router(historical.router, prefix="/api/v1/historical", tags=["Historical"])
+app.include_router(backtest.router,   prefix="/api/v1/historical", tags=["Backtest"])

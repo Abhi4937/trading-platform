@@ -143,6 +143,14 @@ const FLOOR_PREMIUM_COEF   = 0.65;
 const DTE_SCALE_T0         = 0.49;
 const DTE_SCALE_EXP        = 0.234;
 
+// Safety buffer applied to final portfolio_margin.
+// Hard rule: model output must always be at-or-above Delta's actual ARM
+// (the "Order Margin" charge shown in UI). Slight over-estimation is fine,
+// under-estimation breaks orders at placement.
+// Verified against UI on 2026-04-30 (8-May expiry δ=0.10 strangle):
+// 20% covers all lot sizes within ±3% of Delta's UI charge.
+const SAFETY_BUFFER_PCT    = 0.20;
+
 // ─── Shock-span helpers ───────────────────────────────────────────────────────
 
 function clamp(x: number, lo: number, hi: number): number {
@@ -370,7 +378,7 @@ export function computePortfolioMargin(
     Math.pow(DTE_SCALE_T0 / Math.max(minDteDays, DTE_FLOOR_DAYS), DTE_SCALE_EXP)
   );
   const dteScaleApplied = 1.0 + (rawDteScale - 1.0) * strategyFactor;
-  const portfolioMargin    = preScaleMargin * dteScaleApplied;
+  const portfolioMargin    = preScaleMargin * dteScaleApplied * (1.0 + SAFETY_BUFFER_PCT);
   const initialMargin      = portfolioMargin;          // order margin = pre-UCF
   const maintenanceMargin  = 0.80 * initialMargin;
   const bindingConstraint: 'risk_margin' | 'margin_floor' =

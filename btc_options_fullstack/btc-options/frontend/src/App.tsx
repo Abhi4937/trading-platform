@@ -4,10 +4,13 @@ import { OptionChainTable } from './components/chain/OptionChainTable';
 import { LogViewer } from './components/logs/LogViewer';
 import { Spinner } from './components/ui/Spinner';
 import { HistoricalDashboard } from './pages/HistoricalDashboard';
+import { BacktestDashboard } from './pages/BacktestDashboard';
 import './App.css';
 
+type AppMode = 'LIVE' | 'HISTORICAL' | 'BACKTEST';
+
 export default function App() {
-  const [mode, setMode] = useState<'LIVE' | 'HISTORICAL'>('LIVE');
+  const [mode, setMode] = useState<AppMode>('LIVE');
   const { expiries, spot, loading: expLoading } = useExpiries();
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   const [showLogs, setShowLogs] = useState(false);
@@ -71,7 +74,9 @@ export default function App() {
         )}
 
         <div className="title-center">
-          {mode === 'HISTORICAL' ? 'HISTORICAL DATA SIMULATION' : ''}
+          {mode === 'HISTORICAL' ? 'HISTORICAL DATA SIMULATION'
+           : mode === 'BACKTEST' ? 'STRATEGY BACKTESTER'
+           : ''}
         </div>
 
         <button
@@ -82,12 +87,28 @@ export default function App() {
           {showLogs ? '✕ Logs' : '📋 Logs'}
         </button>
 
-        <button 
-          className="btn-mode-toggle-dark" 
-          onClick={() => setMode(mode === 'LIVE' ? 'HISTORICAL' : 'LIVE')}
-        >
-          {mode === 'LIVE' ? '↻ Historical Simulation' : '↻ Switch to Live'}
-        </button>
+        {/* 3-way mode segmented control */}
+        <div style={{
+          display: 'inline-flex', background: '#0d1421',
+          border: '1px solid #1a2d42', borderRadius: 6, overflow: 'hidden',
+        }}>
+          {(['LIVE', 'HISTORICAL', 'BACKTEST'] as AppMode[]).map(m => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              style={{
+                padding: '6px 14px', fontSize: 12, fontWeight: 600,
+                background: mode === m ? '#1f6feb' : 'transparent',
+                color: mode === m ? '#fff' : '#7a9bb5',
+                border: 'none', cursor: 'pointer',
+              }}
+            >
+              {m === 'LIVE' ? 'Live'
+               : m === 'HISTORICAL' ? 'Historical'
+               : 'Backtest'}
+            </button>
+          ))}
+        </div>
 
 
         {mode === 'LIVE' && (
@@ -136,7 +157,9 @@ export default function App() {
 
       {/* Main */}
       <main className="main">
-        {mode === 'HISTORICAL' ? (
+        {mode === 'BACKTEST' ? (
+          <BacktestDashboard />
+        ) : mode === 'HISTORICAL' ? (
           <HistoricalDashboard />
         ) : (
           <section className="chain-panel" style={{ width: '100%' }}>

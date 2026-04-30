@@ -323,3 +323,172 @@ c0c38a3 feat: Greeks time series in MTM download — per-leg + net portfolio
 ?? scripts/
 ?? "../../new platform arch/"
 ```
+
+---
+## Snapshot — 2026-04-30 09:41 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+bb5adab feat: per-leg margin lookup, compare-mode margin, payoff slider-only, ATM IV fallback
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+
+```
+
+### Git Status
+```
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-04-30 09:51 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+bb5adab feat: per-leg margin lookup, compare-mode margin, payoff slider-only, ATM IV fallback
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   | 33 ++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-04-30 13:34 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+bb5adab feat: per-leg margin lookup, compare-mode margin, payoff slider-only, ATM IV fallback
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   | 68 ++++++++++++++++++++++
+ .../src/components/historical/StrategyPanel.tsx    | 67 +++++++++++++++++++++
+ 2 files changed, 135 insertions(+)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+ M frontend/src/components/historical/StrategyPanel.tsx
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? backend/app/api/backtest.py
+?? backend/app/services/backtest.py
+?? backend/app/services/backtest_jobs.py
+?? backend/app/services/costs.py
+?? backend/app/services/margin_v2.py
+?? backend/app/services/option_data.py
+?? frontend/src/utils/slippage_v2.ts
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-04-30 18:44 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+bb5adab feat: per-leg margin lookup, compare-mode margin, payoff slider-only, ATM IV fallback
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+73dbc4d feat: unified MultiPaneChart (MTM + IV + Delta) + chartsOnly focus mode
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/backend/app/main.py                |   3 +-
+ .../btc-options/docs/memories/session_end_log.md   | 112 ++++++++++++++++++
+ .../btc-options/frontend/src/App.tsx               |  41 +++++--
+ .../src/components/historical/StrategyPanel.tsx    |  67 +++++++++++
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 129 ++++++++++++++++++++-
+ 5 files changed, 337 insertions(+), 15 deletions(-)
+```
+
+### Git Status
+```
+ M backend/app/main.py
+ M docs/memories/session_end_log.md
+ M frontend/src/App.tsx
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/pages/HistoricalDashboard.tsx
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? backend/app/api/backtest.py
+?? backend/app/services/backtest.py
+?? backend/app/services/backtest_jobs.py
+?? backend/app/services/costs.py
+?? backend/app/services/margin_engine_v2.py
+?? backend/app/services/margin_engine_v2_constants.json
+?? backend/app/services/margin_v2.py
+?? backend/app/services/option_data.py
+?? frontend/src/components/backtest/
+?? frontend/src/hooks/usePersistedState.ts
+?? frontend/src/pages/BacktestDashboard.tsx
+?? frontend/src/services/backtest_api.ts
+?? frontend/src/types/backtest.ts
+?? frontend/src/utils/slippage_v2.ts
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```

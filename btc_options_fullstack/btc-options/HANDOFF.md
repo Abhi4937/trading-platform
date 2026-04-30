@@ -2,71 +2,107 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-03-22
-**Branch:** `mainbranch-gemini`
-**GitHub:** Branch is UP TO DATE with origin — all committed work is pushed
+**Date:** 2026-04-30 (later session)
+**Branch:** `mainbranch-gemini_claude`
+**GitHub:** Pushed at end of session — see latest commit on origin
 
 ---
 
-## What Was Done (since last handoff 2026-03-13)
+## What Was Done This Session
 
-### Committed (pushed to GitHub)
-- `2576a9c` — style: compact historical dashboard top bar (merge spot+search inline, reduce padding)
-- `2baaf30` — style: maximize chart real estate (flush axes, dynamic height, subtle crosshair)
-- `3eaccd9` — **feat: Strategy Builder** with MTM P&L chart for historical simulation
-- `b7bb854` — fix: zero out Greeks when mark price is 0 (no more phantom Greeks)
-- `0f6125e` — **feat: portfolio margin engine** + live margin display in Strategy Builder
-- `502bdea` — fix: skip zero-IV legs in margin engine (was fabricating 50% IV, now excluded)
-- `d0a2904` — style: clarify lot size in strategy builder (show BTC equivalent per leg)
+### Built: Multi-day Backtester (AlgoTest-style) — committed end-to-end
+Pick a date window + strategy template → equity curve + per-trade table.
 
-### Uncommitted Changes (working tree dirty — NOT yet committed)
-- `backend/app/api/historical.py` — removed stale in-memory caches for `_cached_data_range` and `_cached_latest_data` (they were causing stale data issues; filesystem scan is fast enough without them)
-- `frontend/src/pages/HistoricalDashboard.tsx` — UTC timezone fix: use `simDate + 'T00:00:00Z'` to avoid local-timezone date shifts when generating expiry dates
-- `frontend/src/components/historical/StrategyPanel.tsx` — minor tweak (likely lot-size display or margin display polish)
-- `frontend/src/utils/marginEngine.ts` — minor tweak (likely related to zero-IV leg skip display)
+**Backend (new):**
+- `backend/app/services/backtest.py` — day-loop simulator. Resolves expiry per leg, picks strike (Strike Type / Closest Premium / Closest Delta), reads exact mark at entry/exit timestamps from parquet (no bucket drift), samples 1m bars between entry & exit for max/min MTM tracking.
+- `backend/app/services/backtest_jobs.py` — in-memory async job registry with `asyncio.Event` cancellation
+- `backend/app/api/backtest.py` — POST submit / GET status / DELETE cancel + Pydantic models
+- `backend/app/services/option_data.py` — DuckDB helpers extracted from `historical.py`. Strike resolvers, `resolve_expiry()` with Friday-of-week date matching, `get_mark_at_or_before()` for exact-timestamp pricing
+- `backend/app/services/costs.py` — Python port of `frontend/src/utils/slippage.ts` + `brokerage.ts`. Round-trip slip = `2 × entry_slip` (matches historical viewer). **Moneyness multiplier removed 2026-04-30** to align with frontend recalibration
+- `backend/app/services/margin_v2.py` + `margin_engine_v2.py` + `margin_engine_v2_constants.json` — copies from `scripts/` so docker has them. Used per-trade for portfolio margin
+- `backend/app/main.py` — `SESSION_ID` UUID at startup + `GET /api/v1/session-id`
 
-**These 4 files need to be reviewed and committed.**
+**Frontend (new):**
+- `frontend/src/pages/BacktestDashboard.tsx` — top-level page, polling loop
+- `frontend/src/components/backtest/` — BacktestForm, BacktestEquityChart, BacktestDailyPnlBars, BacktestStatsPanel, BacktestTradeLogTable, BacktestProgressBar
+- `frontend/src/services/backtest_api.ts` — submit/poll/cancel
+- `frontend/src/types/backtest.ts` — request/result/trade types + AlgoTest enum maps
+- `frontend/src/hooks/usePersistedState.ts` — localStorage-backed `useState`
+- `frontend/src/utils/sessionGuard.ts` — checks backend session ID on mount, wipes auto-persisted state if backend restarted
+
+**Frontend (modified):**
+- `frontend/src/App.tsx` — 3-way mode toggle: Live / Historical / Backtest
+- `frontend/src/main.tsx` — runs sessionGuard before React mount
+- `frontend/src/pages/HistoricalDashboard.tsx` — date/time/expiry/strategyMode now persisted; named save/load/delete strategy UI floating top-right
+- `frontend/src/components/historical/StrategyPanel.tsx` — MTM data persisted (buildMtmData, buildLegGreeks, buildExitLegData, buildMaxPnlExitData, buildAtmData); reset-on-legs-change skips first render
+
+### Trade log enhancements
+- Backend tracks `max_mtm` + `min_mtm` with timestamps; computes `max_pnl_net` / `min_pnl_net` (net P&L if exited at peak/trough)
+- Frontend split CE/PE into separate columns: `CE Leg / CE Entry / CE Exit / PE Leg / PE Entry / PE Exit` plus `Max MTM @ time / Max Net / Min MTM @ time / Min Net`
+- CSV export updated with all new fields
+
+### Slippage alignment with historical viewer ($4 → $2 fix)
+- Root cause: moneyness multiplier in `costs.py` was stale (returned 1.6 for ~13% OTM). Frontend `slippage.ts` had it removed on 2026-04-30 per real-fill calibration but Python port wasn't updated.
+- Fix: `_moneyness_mult()` in `costs.py` now always returns 1.0. Backtest matches historical viewer to the cent.
+
+### Auto-state reset on backend restart
+- Backend generates `SESSION_ID` at process start; frontend wipes `historical:*` + `backtest:*` localStorage keys (preserves named saves) when ID changes
+- Effect: `docker compose up --build -d backend` + browser reload = clean slate. Mode switches still preserve state within a session.
 
 ---
 
 ## Current Architecture State
-- **Strategy Builder** is live: add legs (strike, expiry, type, qty), see live margin + MTM P&L chart
-- **Margin Engine** (`marginEngine.ts`): SPAN-style portfolio margin, skips legs with IV=0
-- **Historical simulation**: date picker, expiry selector, time scrubber, option chain, MTM P&L chart
-- **Backend** single uvicorn worker (no Redis, in-memory ticker_store)
+- **Live Dashboard:** unchanged
+- **Historical Dashboard:** date/time/expiry/strategyMode/MTM all persist across mode switches
+- **Backtest Dashboard:** new top-level mode. Async-job + 1Hz polling. Form persists across switches/reloads. Result persists only on `status === "done"`. AlgoTest-aligned UI.
+- **Backend:** still single uvicorn worker, in-memory job registry. Backtest jobs lost on backend restart (acceptable; jobs typically <60s).
 
 ---
 
 ## Pending / Next Up
-- [ ] **Commit the 4 uncommitted files** — review diffs, write commit message
-- [ ] Partial updates implementation (Gemini's plan in `docs/partial-updates-plan.md`)
-  - `ticker_store.py` — add pub/sub (subscribe/unsubscribe per expiry)
-  - `ws.py` — send snapshot once, then tick diffs only
-  - `useOptionChain.ts` — Map<strike, row> state + React.memo per row
-- [ ] Historical auto-play (play button with setInterval)
-- [ ] Spot price via WS (add BTCUSDT to existing Delta WS subscription)
+- [ ] **Phase 3 of plan** — wire SL/TG/Trailing/Per-leg SL/Re-entry/Spot trigger/IV trigger into the day loop. Form fields exist but aren't sent to backend yet.
+- [ ] **Phase 4 of plan** — capital sizing (`max_at_capital` mode), cost-sensitivity strip in stats panel
+- [ ] **Compare-mode MTM persistence** — only build-mode MTM is persisted in StrategyPanel. Compare mode still wipes on remount.
+- [ ] **Slippage v2 integration** (from earlier session — see prior section below). User decided to keep current model + remove moneyness mult. v2 file still sitting unused.
+- [ ] (Pre-existing) Partial updates implementation, Historical auto-play, Spot via WS
 
 ---
 
 ## Key Decisions Made
-- Partial updates plan approved in principle — implement when ready
-- Single worker constraint stays (in-memory ticker_store, no Redis)
-- India region endpoints only
-- Zero-IV legs are EXCLUDED from margin calc (not faked with 50% IV) — UI shows warning count
+- **Slippage canonical model**: `frontend/src/utils/slippage.ts` is source of truth. `backend/app/services/costs.py` is a port. **Keep them in sync** — change one, mirror the other, verify with one-day backtest.
+- **Backend session ID** clears auto-persisted state on container restart but preserves explicit named saves
+- **Backtest strikes use `get_mark_at_or_before`** (exact timestamp), NOT bucketed `last()` — eliminates up-to-4-minute drift
+- **Round-trip slip = `2 × entry_slip`** — matches historical viewer's `slipRoundTripUsd` formula
+- 3-way App mode toggle is preferable to bolting backtest into StrategyPanel.tsx (already 2100+ lines)
 
 ---
 
 ## Note for Gemini
-- Strategy Builder is new — see `frontend/src/components/historical/StrategyPanel.tsx` and `frontend/src/utils/marginEngine.ts`
-- Uncommitted changes in 4 files above — check `git diff` before touching them
-- UTC timezone fix in HistoricalDashboard.tsx is uncommitted — don't revert it
+- Backtest mode is BIG and new. Read `frontend/src/pages/BacktestDashboard.tsx` and `backend/app/services/backtest.py` first.
+- The frontend slippage model and Python port MUST stay in sync. The moneyness multiplier was already de-synced once — re-aligning fixed a $4 vs $2 user-visible discrepancy.
+- `backend/app/main.py` has new `SESSION_ID` and `/api/v1/session-id` endpoint. Don't remove these — `frontend/src/utils/sessionGuard.ts` depends on them.
+- localStorage keys to know:
+  - Auto-state (wiped on backend restart): `historical:simulationDate/Time/selectedExpiry/strategyMode/strategyLegs/panelMode/compareStrategies/activeCompareStratId/buildMtmData/buildLegGreeks/buildExitLegData/buildMaxPnlExitData/buildAtmData`, `backtest:lastResult`, `backtest_v1:*`
+  - Preserved across restarts: `historical:savedStrategies`, `historical:strategy:<name>`
+  - Tracking: `app:backendSessionId`
 
 ---
 
 ## Quick Commands
 ```bash
-# Check what's uncommitted
-git diff --stat
+# Submit a backtest from CLI
+curl -XPOST http://localhost:8000/api/v1/historical/backtest \
+  -H "Content-Type: application/json" \
+  -d '{"start_date":"2026-02-06","end_date":"2026-02-06",
+       "legs":[{"strike_offset":0,"type":"PE","action":"SELL","qty":100,"expiry_selector":"weekly","strike_criteria":"closest_delta","strike_value":0.10},
+               {"strike_offset":0,"type":"CE","action":"SELL","qty":100,"expiry_selector":"weekly","strike_criteria":"closest_delta","strike_value":0.10}],
+       "entry_time_ist":"23:30","weekday_mask":[4],
+       "forced_exit_time_ist":"10:00","exit_day_offset":1,"timeframe":"5m",
+       "slippage":{"enabled":true,"mode":"smart","mult":1.0,"flat_value":5},
+       "brokerage":{"enabled":true,"rate":"offer","referral":false}}'
+
+# Verify session ID changes after rebuild
+curl -s http://localhost:8000/api/v1/session-id
 
 # Rebuild backend after any backend change
 cd docker && docker compose up --build -d backend
@@ -74,3 +110,20 @@ cd docker && docker compose up --build -d backend
 # Restart frontend
 fuser -k 3000/tcp && cd frontend && npm run dev
 ```
+
+---
+
+# Earlier Session — 2026-04-30 (slippage v2 fit, archived)
+
+### A. Data-driven slippage model (built side-by-side)
+Fit a new model from actual historical fills.
+
+**New files (in `Back Testing/` repo-external folder)**:
+- `extract_fills.py`, `fit_slippage.py`, `slippage_comparison.py`, plus generated CSVs and `slippage_calibration.json`
+
+**New file (in repo)**: `frontend/src/utils/slippage_v2.ts` — parallel implementation, NOT imported. Lives side-by-side for A/B.
+
+**Status:** This session superseded the v2 question by removing the moneyness multiplier from the existing model (fixed a real $4 vs $2 user-visible discrepancy). `slippage_v2.ts` is still uncommitted; it can be deleted or revisited if a future fit is desired.
+
+### B. Excel download — Exit & Peak Marks sheet
+Added a per-leg summary sheet to both download buttons in `StrategyPanel.tsx` (Build + Compare modes). One row per leg with Entry/Exit/Peak-MTM mark+spot+P&L. Reuses existing `buildExitLegData` / `buildMaxPnlExitData`.

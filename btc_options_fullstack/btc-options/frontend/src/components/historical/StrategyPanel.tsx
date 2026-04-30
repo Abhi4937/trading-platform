@@ -8,6 +8,7 @@ import { computePortfolioMargin, buildMarginLegs } from '../../utils/marginEngin
 import { computeSlippagePerSide, dteFromEntry, istHour, isWeekendIst } from '../../utils/slippage';
 import type { SlippageMode, SlippageInputs } from '../../utils/slippage';
 import { computeBrokerage, BROKERAGE_RATE_LABELS } from '../../utils/brokerage';
+import { usePersistedState } from '../../hooks/usePersistedState';
 import type { BrokerageRate } from '../../utils/brokerage';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow, AtmIvPoint } from '../../types/historical';
@@ -305,14 +306,23 @@ export const StrategyPanel: React.FC<Props> = ({
   maximized, onToggleMaximize,
   chartsOnly, onToggleChartsOnly,
 }) => {
-  // Build mode MTM
-  const [buildMtmData, setBuildMtmData] = useState<MtmPoint[]>([]);
+  // Build mode MTM — persisted across mode switches & reloads.
+  // legGreeks is a Map at use-sites; on disk we store it as a plain Record so
+  // JSON.stringify works. Boundary conversion happens at the get/set sites.
+  const [buildMtmData, setBuildMtmData] = usePersistedState<MtmPoint[]>('historical:buildMtmData', []);
   const [buildLoading, setBuildLoading] = useState(false);
   const [buildError, setBuildError] = useState('');
-  const [buildLegGreeks, setBuildLegGreeks] = useState<Map<string, LegGreeksPoint[]>>(new Map());
-  const [buildExitLegData,    setBuildExitLegData]    = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
-  const [buildMaxPnlExitData, setBuildMaxPnlExitData] = useState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>([]);
-  const [buildAtmData, setBuildAtmData] = useState<AtmIvPoint[]>([]);
+  const [buildLegGreeksObj, setBuildLegGreeksObj] = usePersistedState<Record<string, LegGreeksPoint[]>>('historical:buildLegGreeks', {});
+  const buildLegGreeks = useMemo(
+    () => new Map(Object.entries(buildLegGreeksObj)),
+    [buildLegGreeksObj],
+  );
+  const setBuildLegGreeks = useCallback((m: Map<string, LegGreeksPoint[]>) => {
+    setBuildLegGreeksObj(Object.fromEntries(m));
+  }, [setBuildLegGreeksObj]);
+  const [buildExitLegData,    setBuildExitLegData]    = usePersistedState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>('historical:buildExitLegData', []);
+  const [buildMaxPnlExitData, setBuildMaxPnlExitData] = usePersistedState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>('historical:buildMaxPnlExitData', []);
+  const [buildAtmData, setBuildAtmData] = usePersistedState<AtmIvPoint[]>('historical:buildAtmData', []);
 
   // Compare mode MTM
   const [compareMtmData, setCompareMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
@@ -381,9 +391,20 @@ export const StrategyPanel: React.FC<Props> = ({
   }, [chartHeightPx, statsHeightPx]);
 
 
-  // Clear MTM when legs or compare strategies change
-  useEffect(() => { setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); setBuildExitLegData([]); setBuildMaxPnlExitData([]); }, [legs]);
-  useEffect(() => { setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); setCompareExitLegData(new Map()); setCompareMaxPnlExitData(new Map()); }, [compareStrategies]);
+  // Clear MTM when legs or compare strategies change.
+  // Skip the very first render so persisted MTM data survives the mount —
+  // otherwise switching modes and coming back would wipe the chart even though
+  // legs are unchanged.
+  const buildResetSkipRef = useRef(false);
+  useEffect(() => {
+    if (!buildResetSkipRef.current) { buildResetSkipRef.current = true; return; }
+    setBuildMtmData([]); setBuildError(''); setBuildLegGreeks(new Map()); setBuildExitLegData([]); setBuildMaxPnlExitData([]);
+  }, [legs]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const compareResetSkipRef = useRef(false);
+  useEffect(() => {
+    if (!compareResetSkipRef.current) { compareResetSkipRef.current = true; return; }
+    setCompareMtmData(new Map()); setCompareError(''); setCompareLegGreeks(new Map()); setCompareExitLegData(new Map()); setCompareMaxPnlExitData(new Map());
+  }, [compareStrategies]);
 
   // ── Chain helpers ──────────────────────────────────────────────────────────
   const getChainForLeg = (leg: StrategyLeg): HistoricalChainRow[] =>
@@ -658,6 +679,34 @@ export const StrategyPanel: React.FC<Props> = ({
       const s = computeMtmStats(buildMtmData);
       if (s) {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statsToRows(s)), 'MTM Stats');
+      }
+      // Exit & Peak Marks — per-leg mark/P&L at exit AND at the peak-strategy-MTM bar
+      if (buildExitLegData.length || buildMaxPnlExitData.length) {
+        const exitPeakRows = legs.map(leg => {
+          const dir = leg.action === 'BUY' ? 1 : -1;
+          const exitD = buildExitLegData.find(e => e.leg.id === leg.id);
+          const peakD = buildMaxPnlExitData.find(e => e.leg.id === leg.id);
+          const exitPnl = exitD ? (exitD.exitMark - leg.entryPremium) * leg.qty * dir * 0.001 : null;
+          const peakPnl = peakD ? (peakD.exitMark - leg.entryPremium) * leg.qty * dir * 0.001 : null;
+          return {
+            'Leg':                    `${leg.action} ${leg.strike}${leg.type}`,
+            'Action':                 leg.action,
+            'Type':                   leg.type,
+            'Strike':                 leg.strike,
+            'Lots':                   leg.qty,
+            'Entry Time (IST)':       toIst(leg.entryTimestamp),
+            'Entry Mark':             +leg.entryPremium.toFixed(4),
+            'Exit Time (IST)':        exitD ? toIst(exitD.exitTs) : '',
+            'Exit Mark':              exitD ? +exitD.exitMark.toFixed(4) : '',
+            'Exit Spot':              exitD ? +exitD.exitSpot.toFixed(2) : '',
+            'Exit Leg P&L (USD)':     exitPnl !== null ? +exitPnl.toFixed(4) : '',
+            'Peak-MTM Time (IST)':    peakD ? toIst(peakD.exitTs) : '',
+            'Peak-MTM Mark':          peakD ? +peakD.exitMark.toFixed(4) : '',
+            'Peak-MTM Spot':          peakD ? +peakD.exitSpot.toFixed(2) : '',
+            'Peak-MTM Leg P&L (USD)': peakPnl !== null ? +peakPnl.toFixed(4) : '',
+          };
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(exitPeakRows), 'Exit & Peak Marks');
       }
       // Slippage sensitivity sheet — Final P&L at multipliers 0.5×–3×
       if ((slipEnabled || brokerageEnabled) && s) {
@@ -1363,6 +1412,45 @@ export const StrategyPanel: React.FC<Props> = ({
       });
       if (sensRows.length) {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sensRows), 'Slippage Sensitivity');
+      }
+    }
+
+    // Sheet 3c: Exit & Peak Marks — per-leg mark/P&L at exit AND at peak-strategy-MTM
+    if (compareExitLegData.size > 0 || compareMaxPnlExitData.size > 0) {
+      const exitPeakRows: Record<string, unknown>[] = [];
+      compareStrategies.forEach(strat => {
+        const exitLegs = compareExitLegData.get(strat.id) ?? [];
+        const peakLegs = compareMaxPnlExitData.get(strat.id) ?? [];
+        if (!exitLegs.length && !peakLegs.length) return;
+        strat.legs.forEach(leg => {
+          const dir = leg.action === 'BUY' ? 1 : -1;
+          const exitD = exitLegs.find(e => e.leg.id === leg.id);
+          const peakD = peakLegs.find(e => e.leg.id === leg.id);
+          const exitPnl = exitD ? (exitD.exitMark - leg.entryPremium) * leg.qty * dir * 0.001 : null;
+          const peakPnl = peakD ? (peakD.exitMark - leg.entryPremium) * leg.qty * dir * 0.001 : null;
+          exitPeakRows.push({
+            'Strategy':               strat.label,
+            'Leg':                    `${leg.action} ${leg.strike}${leg.type}`,
+            'Action':                 leg.action,
+            'Type':                   leg.type,
+            'Strike':                 leg.strike,
+            'Lots':                   leg.qty,
+            'Entry Time (IST)':       toIst(leg.entryTimestamp),
+            'Entry Mark':             +leg.entryPremium.toFixed(4),
+            'Exit Time (IST)':        exitD ? toIst(exitD.exitTs) : '',
+            'Exit Mark':              exitD ? +exitD.exitMark.toFixed(4) : '',
+            'Exit Spot':              exitD ? +exitD.exitSpot.toFixed(2) : '',
+            'Exit Leg P&L (USD)':     exitPnl !== null ? +exitPnl.toFixed(4) : '',
+            'Peak-MTM Time (IST)':    peakD ? toIst(peakD.exitTs) : '',
+            'Peak-MTM Mark':          peakD ? +peakD.exitMark.toFixed(4) : '',
+            'Peak-MTM Spot':          peakD ? +peakD.exitSpot.toFixed(2) : '',
+            'Peak-MTM Leg P&L (USD)': peakPnl !== null ? +peakPnl.toFixed(4) : '',
+          });
+        });
+        exitPeakRows.push({} as Record<string, unknown>); // blank row between strategies
+      });
+      if (exitPeakRows.length) {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(exitPeakRows), 'Exit & Peak Marks');
       }
     }
 
