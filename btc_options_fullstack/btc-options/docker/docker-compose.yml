@@ -15,7 +15,10 @@ services:
         condition: service_healthy
     restart: unless-stopped
     volumes:
-      - /home/abhis/btc-data:/home/abhis/btc-data:ro
+      - /home/abhis/btc-data/data:/home/abhis/btc-data/data:ro
+      - /home/abhis/btc-data/derived:/home/abhis/btc-data/derived
+      - ../backend/tests:/app/tests:ro
+      - ../backend/app:/app/app:ro
 
   #  frontend:
   #    build:
