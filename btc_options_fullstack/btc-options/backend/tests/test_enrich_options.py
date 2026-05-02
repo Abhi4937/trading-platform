@@ -161,3 +161,86 @@ def test_ts_to_ist_known_unix():
     out = _ts_to_ist(ts)
     # `_ts_to_ist` returns a DatetimeIndex; first element is a Timestamp.
     assert out[0].strftime("%Y-%m-%d %H:%M") == "2025-01-01 17:30"
+
+
+# ── Stage A checkpoint round-trip ─────────────────────────────────────────────
+# These exercise the on-disk schema only — verifying that what Stage A persists
+# can be read back into the same shape `aggregate_snapshots` expects (DataFrame
+# indexed by `timestamp_unix`).
+
+def test_checkpoint_roundtrip_preserves_index_and_columns(tmp_path):
+    """Write summary → read back → both shape and values match."""
+    summary = pd.DataFrame(
+        {"atm_iv_7d": [0.4, 0.42], "oi_total": [1_000.0, 1_100.0]},
+        index=pd.Index([1700000000, 1700000060], name="timestamp_unix"),
+    )
+
+    ckpt = tmp_path / "2025-01-31.parquet"
+    out = summary.reset_index().rename(columns={"index": "timestamp_unix"})
+    out.to_parquet(ckpt, compression="snappy", index=False)
+
+    cached = pd.read_parquet(ckpt)
+    assert "timestamp_unix" in cached.columns
+    cached = cached.set_index("timestamp_unix")
+    pd.testing.assert_frame_equal(cached, summary, check_names=False)
+
+
+def test_checkpoint_empty_dataframe_roundtrip(tmp_path):
+    """Empty stub (expiry had no live window or no chain) writes + reads cleanly.
+
+    The Stage A loop writes an empty parquet so the next run skips this expiry
+    instead of recomputing-then-discarding.
+    """
+    ckpt = tmp_path / "2025-01-31.parquet"
+    pd.DataFrame().to_parquet(ckpt, compression="snappy", index=False)
+
+    cached = pd.read_parquet(ckpt)
+    assert cached.empty
+
+
+def test_checkpoint_resume_skips_existing(tmp_path, monkeypatch):
+    """Simulate the Stage A skip path: existing checkpoint → no compute call."""
+    from app.analytics import enrich_options as eo
+
+    # Two fake expiries; one already has a checkpoint, one does not.
+    monkeypatch.setattr(eo, "CHECKPOINT_DIR", str(tmp_path))
+    done = pd.DataFrame(
+        {"atm_iv_7d": [0.5]},
+        index=pd.Index([1700000000], name="timestamp_unix"),
+    )
+    out = done.reset_index().rename(columns={"index": "timestamp_unix"})
+    out.to_parquet(tmp_path / "2025-01-31.parquet", compression="snappy", index=False)
+
+    # Inline reproduction of the Stage A skip+load decision (single expiry).
+    # We assert: when a non-empty checkpoint exists, we load it without ever
+    # calling the (heavy) chain reader / compute_expiry_summary.
+    expiries = ["2025-01-31", "2025-02-07"]
+    per_expiry = {}
+    compute_calls = []
+
+    def fake_compute(_chain, exp, *_a, **_kw):
+        compute_calls.append(exp)
+        return pd.DataFrame(
+            {"atm_iv_7d": [0.6]},
+            index=pd.Index([1700000060], name="timestamp_unix"),
+        )
+
+    for exp in expiries:
+        ckpt_path = str(tmp_path / f"{exp}.parquet")
+        if os.path.exists(ckpt_path):
+            cached = pd.read_parquet(ckpt_path)
+            if not cached.empty:
+                if "timestamp_unix" in cached.columns:
+                    cached = cached.set_index("timestamp_unix")
+                per_expiry[exp] = cached
+            continue
+        per_expiry[exp] = fake_compute(None, exp)
+
+    assert "2025-01-31" in per_expiry  # came from checkpoint
+    assert "2025-02-07" in per_expiry  # was computed
+    assert compute_calls == ["2025-02-07"]  # 31st was skipped (no compute)
+
+
+# Add `os` import only if not already present in this file. This sits at the
+# bottom so we don't disturb the existing import block.
+import os  # noqa: E402

@@ -50,6 +50,11 @@ SPOT_RAW_PATH = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
 OUTPUT_PATHS = {tf: os.path.join(DERIVED_DIR, f"options_enriched_{tf}.parquet")
                 for tf in ("1m", "5m", "15m", "30m")}
 
+# Per-expiry Stage A checkpoint directory. One small parquet per expiry, written
+# the moment its summary is computed — so a kill mid-run loses only the in-flight
+# expiry, and a relaunch resumes by skipping any expiry with a checkpoint on disk.
+CHECKPOINT_DIR = os.path.join(DERIVED_DIR, "_m2_checkpoints")
+
 ALL_GRIDS = ("1m", "5m", "15m", "30m")
 GRID_SECS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800}
 
@@ -920,26 +925,58 @@ def run_pipeline(*, rebuild: bool = False,
             relevant_expiries.append(e)
     log.info(f"Relevant expiries: {len(relevant_expiries)}")
 
-    # Process per expiry; collect summaries
+    # Process per expiry; collect summaries.
+    # Per-expiry checkpoints survive process kills: any expiry whose parquet
+    # already exists in CHECKPOINT_DIR is loaded from disk instead of recomputed.
     log.info("Stage A — per-expiry summaries...")
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     per_expiry: dict[date, pd.DataFrame] = {}
     gex_compute_mask = pd.Series(dtype=bool)  # placeholder; compute_expiry_summary uses ts % 300 == 0
+    n_resumed = 0
+    n_computed = 0
 
     for i, exp in enumerate(relevant_expiries, 1):
+        ckpt_path = os.path.join(CHECKPOINT_DIR, f"{exp.isoformat()}.parquet")
+        if os.path.exists(ckpt_path):
+            try:
+                cached = pd.read_parquet(ckpt_path)
+                if not cached.empty:
+                    if "timestamp_unix" in cached.columns:
+                        cached = cached.set_index("timestamp_unix")
+                    per_expiry[exp] = cached
+                n_resumed += 1
+                if i % 25 == 0 or i == len(relevant_expiries):
+                    log.info(f"  [{i}/{len(relevant_expiries)}] resumed={n_resumed} computed={n_computed} non-empty={len(per_expiry)}")
+                continue
+            except Exception as ce:
+                log.warning(f"  checkpoint {ckpt_path} unreadable ({ce}); recomputing")
+
         e_unix = expiry_dt_unix(exp)
         # Live window for this expiry: [warmup_start, min(src_max, e_unix-60)]
         e_load_start = max(warmup_start, e_unix - 70 * 86400)  # max 70 days back from expiry
         e_load_end = min(src_max, e_unix - 60)
         if e_load_start >= e_load_end:
+            # Touch an empty checkpoint so we don't reattempt next run
+            pd.DataFrame().to_parquet(ckpt_path, compression="snappy", index=False)
             continue
         chain = load_chain_for_expiry(conn, exp, e_load_start, e_load_end)
         if chain.empty:
+            pd.DataFrame().to_parquet(ckpt_path, compression="snappy", index=False)
             continue
         summary = compute_expiry_summary(chain, exp, spot_lookup, gex_compute_mask)
-        if not summary.empty:
+        # Persist atomically: write tmp + rename so a kill mid-write doesn't
+        # leave a corrupt parquet that the next run would happily skip.
+        tmp_path = ckpt_path + ".tmp"
+        if summary.empty:
+            pd.DataFrame().to_parquet(tmp_path, compression="snappy", index=False)
+        else:
+            out = summary.reset_index().rename(columns={"index": "timestamp_unix"})
+            out.to_parquet(tmp_path, compression="snappy", index=False)
             per_expiry[exp] = summary
+        os.replace(tmp_path, ckpt_path)
+        n_computed += 1
         if i % 25 == 0 or i == len(relevant_expiries):
-            log.info(f"  [{i}/{len(relevant_expiries)}] processed; {len(per_expiry)} non-empty summaries")
+            log.info(f"  [{i}/{len(relevant_expiries)}] resumed={n_resumed} computed={n_computed} non-empty={len(per_expiry)}")
 
     if not per_expiry:
         log.error("No per-expiry summaries; aborting.")
@@ -985,6 +1022,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--through", type=str, default=None, help="YYYY-MM-DD end (IST inclusive)")
     p.add_argument("--grids", type=str, default=None,
                    help="Comma-separated grid list, e.g. '1m,5m'. Default: all 4.")
+    p.add_argument("--clear-checkpoint", action="store_true",
+                   help="Wipe Stage A per-expiry checkpoint dir before running")
     return p.parse_args()
 
 
@@ -1005,6 +1044,11 @@ def main() -> int:
         if bad:
             log.error(f"Unknown grids: {bad}. Valid: {list(ALL_GRIDS)}")
             return 1
+
+    if args.clear_checkpoint and os.path.isdir(CHECKPOINT_DIR):
+        import shutil
+        shutil.rmtree(CHECKPOINT_DIR)
+        log.info(f"Cleared checkpoint dir: {CHECKPOINT_DIR}")
 
     try:
         run_pipeline(rebuild=args.rebuild,
