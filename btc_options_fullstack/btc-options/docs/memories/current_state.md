@@ -1,22 +1,73 @@
 # Current Project State
 
 ## Active Projects
-- **Short-strangle backtest stack (M1+M2+M3 done 2026-05-02; M4-M6 pending):**
-  Plan at `/home/abhis/.claude/plans/sparkling-pondering-plum.md`, spec at
+- **Short-strangle backtest stack (M1-M3 + analytics layer + live recorder
+  done 2026-05-02; M4 + LiveSignal pending):** Plan at
+  `/home/abhis/.claude/plans/sparkling-pondering-plum.md`, spec at
   `UI ss/new feature/SHORT_STRANGLE_INDICATORS_SPEC.md`.
   - **M1** (committed): `enrich_spot.py` →
     `/home/abhis/btc-data/derived/spot_enriched.parquet` (246k 5m rows × 246
     cols, ~150 MB).
-  - **M2** (code complete, 15 tests passing, full backfill running in background
-    ETA ~4h): `enrich_options.py` → 4 grids at 1m/5m/15m/30m.
-    50 cols incl. constant-maturity ATM IV, IVP, skew, term, OI walls, GEX,
-    strangle synthetic IV.
+  - **M2** (code complete, 15 tests passing, **backfill running in background
+    ~225/849 done, ETA ~4h** at session pause): `enrich_options.py` → 4 grids.
   - **M3** (code complete, 13 tests passing, awaiting M2 backfill for E2E):
-    `enrich_derived.py` joins M1+M2, adds Spec §5 derived (VRP family,
-    expected move, vol-of-vol) + pattern detection A/B/C/D/Other.
-    Outputs 4 grids `full_enriched_{1m,5m,15m,30m}.parquet`. Run with
-    `python -m app.analytics.enrich_derived [--rebuild] [--since/--through] [--grids]`.
-  - **M4-M6** (pending): strangle backtest engine, calibration, dashboard.
+    `enrich_derived.py` joins M1+M2, adds VRP family / expected move /
+    vol-of-vol / pattern A/B/C/D/Other. Outputs 4 grids.
+  - **Strangle analytics layer** (committed `7377822`): per-trade ratios,
+    decomposition, z-scores, quality_score baked into `BacktestTrade`;
+    `<StrangleAnalyticsPanel />` mounts in Strategy Builder + Backtest
+    Dashboard. M5 calibration parquet (`calibration_builder.py`) built
+    from chain snapshots (NOT trade outcomes) — DTE × spot × Δ × IVP buckets +
+    universal fallback curve. **Untested E2E** because calibration parquet
+    not yet built (needs M3 done first).
+  - **Live WS recorder + nightly merge** (code complete this session, NOT
+    yet running): see HANDOFF for design. Key files
+    `backend/app/services/{live_recorder,merge_live_to_main}.py`. Wired into
+    backend lifespan. Backend restart blocked on M2 finishing.
+  - **M4 batch backtester (`strangle_backtest.py`)** — original spec, ~1500
+    LOC pending. Walks history at hourly cadence, generates synthetic
+    strangles, hourly path snapshots, 110-col per-trade output.
+  - **M5 backfill_attribution.py** — ~400 LOC pending. Reads M4 output,
+    computes personal mean/std/winrate per (pattern × bucket) from
+    simulated outcomes. Replaces v1 quality_score (which drops the
+    `pattern_winrate` term) with the full v2 formula.
+  - **LiveSignal page** — design locked, NOT built. Hybrid read: latest
+    M3 row for slow-moving cols + `ticker_store` live chain for fast-moving
+    values. Reuses existing `<StrangleAnalyticsPanel />`. ~1000 LOC.
+  - **M6 Batch Results dashboard** — frontend page with credit% × IVP
+    scatter, win-rate heatmap, MFE/MAE distribution. Pending.
+
+### Pipeline flow when running fresh
+```
+1. python -m app.analytics.enrich_spot --rebuild              # ~16s, M1 output
+2. python -m app.analytics.enrich_options --rebuild           # ~4h, M2 outputs
+3. python -m app.analytics.enrich_derived --rebuild           # ~5-10 min, M3 outputs
+4. python -m app.analytics.calibration_builder --rebuild      # ~15 min, calibration parquets
+```
+
+### Live data flow (NEW this session, pending backend restart)
+```
+[Delta WS candlestick_1m]                  [btc-collector REST]
+     │                                          │
+     ▼                                          ▼
+backend live_recorder         /mnt/c/Users/Abhis/btc-collector/
+     │                                          │
+     ▼                                          ▼
+data_live/{spot,options}/        ~/btc-data/data/{spot,options}/
+     │                                          │
+     ▼ nightly merge (folds live → main)        │
+     └──────────────────────────────────────────┘
+                          │
+                          ▼
+                   M1/M2/M3 enrichment
+                          │
+                          ▼
+              full_enriched_5m.parquet
+                          │
+                          ▼
+              /api/v1/live-signal endpoint (TBD)
+                  + StrangleAnalyticsPanel
+```
 
 ### Pipeline flow when running fresh
 ```

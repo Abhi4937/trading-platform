@@ -16,6 +16,8 @@ from app.cache.redis_cache import init_cache, close_cache
 from app.core.config import settings
 from app.core.logging_middleware import LoggingMiddleware
 from app.services.delta_ws_client import run_delta_ws
+from app.services.live_recorder import start_recorder, stop_recorder
+from app.services.merge_live_to_main import schedule_loop as merge_schedule_loop
 from app.api.historical import _build_strike_index
 
 import os
@@ -59,7 +61,17 @@ async def lifespan(app: FastAPI):
     logger.info("Startup — Strike index built")
     ws_task = asyncio.create_task(run_delta_ws())
     logger.info("Startup — Delta WebSocket client started")
+    await start_recorder()
+    merge_task = asyncio.create_task(merge_schedule_loop())
+    logger.info("Startup — live recorder + merge scheduler started")
     yield
+    logger.info("Shutdown — stopping live recorder + merge scheduler...")
+    await stop_recorder()
+    merge_task.cancel()
+    try:
+        await merge_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Shutdown — stopping Delta WebSocket...")
     ws_task.cancel()
     try:

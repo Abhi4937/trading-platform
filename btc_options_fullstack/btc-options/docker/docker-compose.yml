@@ -15,8 +15,12 @@ services:
         condition: service_healthy
     restart: unless-stopped
     volumes:
-      - /home/abhis/btc-data/data:/home/abhis/btc-data/data:ro
+      # `data` is writable now so the nightly merge can fold data_live/ → data/.
+      # Live recorder writes to data_live/; merge consolidates into data/.
+      - /home/abhis/btc-data/data:/home/abhis/btc-data/data
+      - /home/abhis/btc-data/data_live:/home/abhis/btc-data/data_live
       - /home/abhis/btc-data/derived:/home/abhis/btc-data/derived
+      - /home/abhis/btc-data/logs:/home/abhis/btc-data/logs
       - ../backend/tests:/app/tests:ro
       - ../backend/app:/app/app:ro
 

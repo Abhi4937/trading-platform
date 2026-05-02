@@ -1,5 +1,84 @@
 # Claude's Work Log
 
+## Session 9 (2026-05-02 PM) — Live WS recorder + nightly merge
+
+### What was done
+Built end-to-end live data capture from Delta's WS, separate from the existing
+REST collector at `/mnt/c/Users/Abhis/btc-collector/`. Goal: 1-min OHLC for
+both **MARK** and **OI** for every option in ATM±40 across all live expiries
+(plus spot), plus a nightly merge that folds live writes into the main data
+tree so the rest of the platform sees fresh data with no other changes.
+
+**New files:**
+- `backend/app/services/live_recorder.py` — ~400 LOC. `candlestick_1m`
+  WS subscriber (both MARK: and OI: prefixes) + per-symbol bar-close detector
+  + 30s flush-cadence parquet writer. Discovery loop refreshes subscriptions
+  on (a) 5-min heartbeat, (b) immediate when |Δspot| > $2k, (c) 1h full
+  product refresh for new expiries.
+- `backend/app/services/merge_live_to_main.py` — ~250 LOC. Idempotent
+  consolidator (dedupe on `timestamp_unix`, sort, atomic write+rename).
+  Archives live files under `data_live/archive/<YYYY-MM-DD>/` for 7-day
+  rollback. Self-scheduled background loop (runs if last-merge >20h ago,
+  rechecks hourly). Also CLI: `python -m app.services.merge_live_to_main
+  [--dry-run|--status]`.
+- `backend/tests/test_live_recorder.py` — 10 unit tests passing.
+- `backend/tests/test_merge_live_to_main.py` — 6 unit tests passing.
+
+**Files modified:**
+- `backend/app/main.py` — `lifespan` launches recorder + merge scheduler
+  alongside `run_delta_ws`, stops cleanly.
+- `docker/docker-compose.yml` — `data` mount made writable; new `data_live`
+  + `logs` mounts.
+
+**Output dirs (pre-created):**
+- `/home/abhis/btc-data/data_live/{spot,options,archive}/`
+- Schema matches `btc-collector/parquet_writer.py` byte-for-byte so
+  pa.concat_tables works in the merge.
+
+### Key decisions
+- **One-file recorder** (~400 LOC vs split into 3 modules). Keeps WS handler,
+  writer, and discovery cohesive; aligns with project's CLAUDE.md "concise"
+  preference.
+- **Buffer = 0**: ATM±40 is what we subscribe to AND what we persist. Sharp
+  moves handled by the spot-triggered re-discovery (`|Δspot|>$2k`), not by a
+  wider subscribe band. Keeps WS subs at minimum.
+- **`pq.ParquetFile(path).read()` vs `pq.read_table(path)`**: bypasses
+  pyarrow's hive-partition column auto-detection from the
+  `expiry=.../strike=.../` directory names. Without this fix, every read
+  injected phantom `expiry`/`strike` columns into the schema and broke
+  `pa.concat_tables`.
+- **Bar-close detection**: only persist bars where a NEWER `candle_start_time`
+  has been seen — prevents writing in-progress bars.
+- **`data_live/` separate from `data/`**: avoids concurrent-write conflicts
+  with the REST collector. Nightly merge folds live → main.
+- **`ticker_store`-based LiveSignal architecture (locked in, not built yet)**:
+  use the latest M3 row for slow-moving cols (IVP, RV, ADX, pattern, vrp_pct);
+  recompute fast-moving values (spot, ATM IV, skew, GEX) on-the-fly from the
+  existing live chain in `ticker_store`. No incremental enrichment loop
+  needed — saves ~400 LOC.
+
+### Open / next
+- **M2 backfill still running** (~225/849 expiries at session pause; ETA ~4h).
+  Restart of backend container is blocked on this — restart kills the M2
+  process and forces re-running ~1.5h of work. User chose to wait.
+- After M2: `docker compose up --build -d backend` to restart with recorder
+  active. First bars in `data_live/` ~60s later.
+- **Tail gap (Apr 22 → today)**: `python main.py resume` exits without
+  fetching because workers skip blindly on registry `done` status; `backfill-
+  all` only handles early-lifetime gaps. User said they'll handle the tail
+  fill themselves; no `tail_fill.py` written.
+- LiveSignal page still pending (~1000 LOC plan locked in).
+- M4 batch backtester still pending (the original spec; ~1500 LOC).
+
+### Lessons
+- Always use `ParquetFile(...).read()` for files inside hive-partitioned
+  trees when the partition cols are NOT actual stored columns. The default
+  `pq.read_table` triggers dataset discovery that adds them.
+- Python's `round()` is banker's rounding (round half to even); avoid testing
+  the .5 boundary in unit tests for ATM rounding helpers.
+
+---
+
 ## Session 8 (2026-05-02) — Module 3: derived metrics + pattern detection
 
 ### What was done

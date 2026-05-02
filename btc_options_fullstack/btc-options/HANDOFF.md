@@ -2,10 +2,129 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-02 (Modules 1 + 2 + 3 — enrichment pipelines)
+**Date:** 2026-05-02 (Live WS recorder + nightly merge — code-only, not yet running)
 **Branch:** `mainbranch-gemini_claude`
-**Status:** M1 committed; M2 code complete + 15 tests passing, backfill running in background;
-M3 code complete + 13 tests passing, awaiting M2 backfill completion to verify E2E
+**Status:** Recorder + merge code complete + 16 tests passing. Backend NOT yet
+restarted because M2 backfill (Session 7's leftover) is still mid-run. Once M2
+finishes, restart backend → recorder begins capturing 1-min mark+OI bars to
+`/home/abhis/btc-data/data_live/`.
+
+---
+
+## What Was Done — 2026-05-02 (Session 9: live WS recorder + nightly merge)
+
+### Files created
+- `backend/app/services/live_recorder.py` — ~400 LOC. WS subscriber that
+  captures **1-min OHLC for both MARK and OI** for every option in the
+  ATM±40 band across all live expiries, plus spot. Architecture:
+  - **Discovery** loop: REST `/v2/products` every 5 min (heartbeat) AND
+    immediately on `|spot_atm − last_atm| ≥ $2k` AND every 1h for new-expiry
+    refresh. Diffs target subscription set against current → sub new, unsub
+    expired.
+  - **WS subscriber** uses `candlestick_1m` channel against
+    `wss://socket.india.delta.exchange`. Subscribes to both `MARK:` and
+    `OI:` prefixes for every option. Reconnect-with-backoff loop.
+  - **Bar-close detection**: per-symbol in-flight bar tracked; when a newer
+    `candle_start_time` arrives, the previous bar is closed and pushed to
+    the writer queue. Prevents persisting in-progress bars.
+  - **Writer**: in-memory ts→row buckets, flushes every 30s to parquet via
+    append+dedupe-on-`timestamp_unix`+sort. Uses `pq.ParquetFile().read()`
+    to bypass hive-partition column auto-detection from the
+    `expiry=.../strike=.../` directory names.
+  - Toggle via env `BTC_LIVE_RECORDER=0`.
+
+- `backend/app/services/merge_live_to_main.py` — ~250 LOC. Nightly job that
+  consolidates `data_live/ → data/` so the existing pipeline (M1/M2/M3,
+  backtester, historical chain) sees fresh data. Idempotent: dedupe on
+  `timestamp_unix`, sort, atomic write+rename. Archives merged live files
+  under `data_live/archive/<YYYY-MM-DD>/` for 7-day rollback. Self-scheduled
+  via `schedule_loop()` background task (runs if last merge >20h ago,
+  re-checks hourly). Also runnable as CLI:
+  ```
+  docker compose exec backend python -m app.services.merge_live_to_main
+  docker compose exec backend python -m app.services.merge_live_to_main --status
+  docker compose exec backend python -m app.services.merge_live_to_main --dry-run
+  ```
+
+- `backend/tests/test_live_recorder.py` — 10 tests (symbol parsing,
+  ATM rounding, writer append+dedupe, recorder bar-roll close logic, spot
+  handling). All passing.
+- `backend/tests/test_merge_live_to_main.py` — 6 tests (create-when-main-
+  missing, dedupe-overlap-keeps-live, dry-run safety, archive-subtree-skip,
+  state-file-records-last-run, archive-pruning-7d). All passing.
+
+### Files modified
+- `backend/app/main.py` — `lifespan` now starts `live_recorder` +
+  `merge_schedule_loop` background tasks alongside `run_delta_ws`. Stops
+  cleanly on shutdown.
+- `docker/docker-compose.yml` —
+  - `data` mount switched from `:ro` → writable (so the nightly merge can
+    write into it).
+  - New mount: `/home/abhis/btc-data/data_live:/home/abhis/btc-data/data_live`
+  - New mount: `/home/abhis/btc-data/logs:/home/abhis/btc-data/logs`
+
+### New output dirs (pre-created)
+```
+/home/abhis/btc-data/data_live/spot/
+/home/abhis/btc-data/data_live/options/
+/home/abhis/btc-data/data_live/archive/
+```
+Schema matches `btc-collector/parquet_writer.py` exactly:
+- spot: `timestamp_ist + timestamp_unix + mark_o/h/l/c + ltp_volume + oi_o/h/l/c`
+- options: `timestamp_ist + timestamp_unix + mark_o/h/l/c + oi_o/h/l/c`
+
+### Coexistence with `btc-collector/`
+The btc-collector at `/mnt/c/Users/Abhis/btc-collector/` is REST-based
+(historical fetcher). It writes to `~/btc-data/data/`. The live recorder
+writes to `~/btc-data/data_live/` to avoid concurrent-write conflicts. The
+nightly merge folds live into main. **`backfill.py` only handles
+early-lifetime gaps**, NOT tail gaps. The Apr 22 → today tail gap won't
+auto-fill via `python main.py resume` (workers skip on registry
+status=`done`). User chose to handle the tail-fill manually.
+
+### Architecture (LiveSignal — not yet built; design locked in)
+For LiveSignal, do NOT build incremental enrichment. Use a hybrid read:
+- **Slow-moving cols** (IVP_90d, RV_7d/14d/30d, ADX_4h, pattern, vrp_pct_90d)
+  read from latest M3 row in `full_enriched_5m.parquet`. These don't shift
+  minute-to-minute — staleness of even hours is fine.
+- **Fast-moving values** (spot, ATM IV @7/14/30d, skew RR/BF, GEX, current
+  strangle leg marks) computed on-the-fly from `ticker_store` (already
+  populated tick-by-tick by existing `delta_ws_client.py`). BS solver runs
+  server-side.
+- Merge them, run existing `strangle_analytics.compute_trade_analytics`,
+  return JSON.
+- Reuses existing `<StrangleAnalyticsPanel />` on a new
+  `LiveSignalDashboard.tsx`. ~1000 LOC total. No incremental enrichment
+  loop. No 5-min scheduler.
+
+### Open / next
+- **Wait for M2 backfill to finish** (~225/849 at session pause; ETA ~4h).
+- **Restart backend** with `docker compose up --build -d backend`. Recorder
+  begins capturing live bars within seconds; first parquet writes ~60s
+  later in `data_live/`.
+- **Verify**: `ls -la /home/abhis/btc-data/data_live/options/expiry=*/strike=*/`
+  should show files growing minute-by-minute. `docker compose exec backend
+  python -m app.services.merge_live_to_main --status` shows merge state.
+- **Build LiveSignal** (Layer 1 + Layer 2 dropped per the hybrid design above).
+- **Build M4 batch backtester** (`strangle_backtest.py` — original spec, biggest
+  remaining piece).
+
+### Commit
+Pushed strangle analytics + recorder + merge selectively. See `git log` for
+the exact commit hash on the recorder/merge work.
+
+---
+
+## What Was Done — 2026-05-02 (Session 8: strangle analytics layer)
+*(Earlier session, still relevant — kept intact in commits 7377822/etc.)*
+
+Implemented per-trade ratios from spec §7.8 (credit%, ROC, theta/vega, gamma/theta_dollar,
+annualized_credit, etc.), §8 master ratio table, §7.9 decomposition (structural / IV-regime /
+excess), §M5 calibration (`calibration_builder.py` from chain snapshots, NOT trade outcomes —
+DTE × spot × Δ × IVP buckets, universal fallback curve), z-scores, quality_score
+v1 = 0.40·z_credit_pct + 0.60·IVP. Same numbers in Strategy Builder + Backtest Dashboard
+because both call the same util. Backend bakes analytics into `BacktestTrade` rows;
+frontend shows new Pattern/Credit%/Quality columns + click-to-expand `<StrangleAnalyticsPanel />`.
 
 ---
 
