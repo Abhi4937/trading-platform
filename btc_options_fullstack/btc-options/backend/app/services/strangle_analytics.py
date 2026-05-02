@@ -28,7 +28,7 @@ _DTE_BUCKETS = [(0, 3), (3, 7), (7, 14), (14, 30), (30, 60)]
 _SPOT_BUCKETS = [(0, 60_000), (60_000, 90_000), (90_000, 120_000),
                  (120_000, 150_000), (150_000, 10_000_000)]
 _IVP_BUCKETS = [(0, 20), (20, 40), (40, 60), (60, 80), (80, 100.0001)]
-_STD_DELTAS = (0.05, 0.10, 0.15, 0.25)
+_STD_DELTAS = (0.05, 0.10, 0.15, 0.25, 0.30, 0.50)
 
 # Loaded lazily and cached for the lifetime of the process.
 _calibration_df: Optional[pd.DataFrame] = None

@@ -19,7 +19,7 @@ Run:
     python -m app.analytics.calibration_builder                     # incremental aggregate-only if raw exists
     python -m app.analytics.calibration_builder --rebuild           # full rebuild
     python -m app.analytics.calibration_builder --since 2025-01-01 --through 2026-04-30
-    python -m app.analytics.calibration_builder --sample-cadence 1h --target-deltas 0.05,0.10,0.15,0.25
+    python -m app.analytics.calibration_builder --sample-cadence 1h --target-deltas 0.05,0.10,0.15,0.25,0.30,0.50
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ RAW_OUT_PATH = os.path.join(DERIVED_DIR, "calibration_raw.parquet")
 CALIB_OUT_PATH = os.path.join(DERIVED_DIR, "calibration.parquet")
 UNIVERSAL_OUT_PATH = os.path.join(DERIVED_DIR, "calibration_universal.parquet")
 
-DEFAULT_TARGET_DELTAS = (0.05, 0.10, 0.15, 0.25)
+DEFAULT_TARGET_DELTAS = (0.05, 0.10, 0.15, 0.25, 0.30, 0.50)
 
 # Bucket axes (closed-on-left, open-on-right convention; last bucket is open-ended)
 DTE_BUCKETS = [(0, 3), (3, 7), (7, 14), (14, 30), (30, 60)]
