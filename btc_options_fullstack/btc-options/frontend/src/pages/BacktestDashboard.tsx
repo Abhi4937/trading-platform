@@ -314,6 +314,7 @@ export const BacktestDashboard: React.FC = () => {
                       ctx={selectedTradeAnalytics.ctx}
                       calibration={selectedTradeAnalytics.calibration}
                       loading={selectedTradeAnalytics.loading}
+                      marketContext={selectedTrade.market_context ?? null}
                       title=""
                     />
                   </CardLight>

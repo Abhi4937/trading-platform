@@ -1125,24 +1125,81 @@ async def get_snapshot_context(
                                   "run `python -m app.analytics.enrich_derived --rebuild`.")
 
     cols = [
+        # ── Identity ─────────────────────────────────────────────────────────
         "timestamp_unix", "close",
+
+        # ── M2: ATM IV constant maturity ─────────────────────────────────────
         "atm_iv_7d", "atm_iv_14d", "atm_iv_30d", "atm_iv_60d",
-        "ivp_atm_7d_90d", "ivp_atm_14d_90d", "ivp_atm_30d_90d",
-        "ivp_4h", "ivp_1d",
-        "rv_7d", "rv_14d", "rv_30d",
-        "iv_rv_spread_7d", "iv_rv_spread_30d", "iv_rv_ratio_7d",
-        "vrp_pct_7d", "vrp_pct_30d",
-        "risk_reversal_25d", "butterfly_25d", "wing_atm_ratio",
-        "term_slope_7_30",
-        "rvp_4h", "rvp_1d",
-        "adx_14_4h", "atr_pct_4h", "rsi_14_4h",
-        "spot_ret_1d", "spot_ret_7d_5m_base",
-        "pcr_oi", "max_oi_call_strike", "max_oi_put_strike",
-        "dist_to_call_wall_pct", "dist_to_put_wall_pct",
-        "total_gex", "gex_regime", "dist_to_flip_pct",
-        "expected_move_1sigma_7d", "expected_move_1sigma_14d",
-        "iv_change_stdev_7d", "vov_ratio",
+        "strangle_synth_iv",
+
+        # ── M2: IVP ─────────────────────────────────────────────────────────
+        "ivp_atm_7d_90d", "ivp_atm_14d_90d", "ivp_atm_30d_90d", "ivp_atm_60d_90d",
+        "ivp_1m", "ivp_5m", "ivp_15m", "ivp_30m", "ivp_1h", "ivp_4h", "ivp_1d",
         "ivp_4h_delta_24h", "ivp_4h_delta_48h",
+
+        # ── M2: skew + term ──────────────────────────────────────────────────
+        "risk_reversal_25d", "risk_reversal_15d", "risk_reversal_10d",
+        "butterfly_25d", "butterfly_15d", "butterfly_10d",
+        "wing_atm_ratio",
+        "term_slope_7_30", "term_slope_14_60", "term_slope_30_60",
+
+        # ── M2: OI walls + PCR ───────────────────────────────────────────────
+        "pcr_oi", "pcr_volume",
+        "max_oi_call_strike", "max_oi_call_oi", "dist_to_call_wall_pct",
+        "max_oi_put_strike",  "max_oi_put_oi",  "dist_to_put_wall_pct",
+
+        # ── M2: GEX ─────────────────────────────────────────────────────────
+        "total_gex", "gex_regime", "dist_to_flip_pct", "gex_flip_level",
+
+        # ── M1: RSI multi-TF (7 windows) ─────────────────────────────────────
+        "rsi_14_1m", "rsi_14_5m", "rsi_14_15m", "rsi_14_30m",
+        "rsi_14_1h", "rsi_14_4h", "rsi_14_1d",
+
+        # ── M1: ATR multi-TF (% scale) ───────────────────────────────────────
+        "atr_pct_5m", "atr_pct_15m", "atr_pct_30m",
+        "atr_pct_1h", "atr_pct_4h", "atr_pct_1d",
+
+        # ── M1: ADX multi-TF ─────────────────────────────────────────────────
+        "adx_14_5m", "adx_14_15m", "adx_14_30m",
+        "adx_14_1h", "adx_14_4h", "adx_14_1d",
+
+        # ── M1: MACD ────────────────────────────────────────────────────────
+        "macd_hist_1h", "macd_hist_4h", "macd_signal_4h",
+
+        # ── M1: realized vol + RVP ──────────────────────────────────────────
+        "rv_7d", "rv_14d", "rv_30d",
+        "rv_parkinson_7d", "rv_garman_klass_7d",
+        "rvp_7d", "rvp_14d", "rvp_30d", "rvp_4h", "rvp_1d",
+
+        # ── M1: MA distances ─────────────────────────────────────────────────
+        "ma50_distance_pct", "ma100_distance_pct", "ma200_distance_pct",
+
+        # ── M1: ATR compression + Bollinger ──────────────────────────────────
+        "atr_compression_ratio",
+        "bb_position_1h", "bb_position_4h",
+        "bb_width_1h", "bb_width_4h",
+
+        # ── M1: SuperTrend / Aroon (signals) ─────────────────────────────────
+        "supertrend_signal_4h", "aroon_up_4h", "aroon_down_4h",
+
+        # ── M1: returns ──────────────────────────────────────────────────────
+        "spot_ret_5m", "spot_ret_1h", "spot_ret_4h",
+        "spot_ret_1d", "spot_ret_7d_5m_base",
+
+        # ── M3: VRP family ──────────────────────────────────────────────────
+        "iv_rv_spread_7d", "iv_rv_spread_14d", "iv_rv_spread_30d",
+        "iv_rv_ratio_7d", "iv_rv_ratio_14d", "iv_rv_ratio_30d",
+        "vrp_pct_7d", "vrp_pct_30d", "vrp_pct_90d",
+
+        # ── M3: vol-of-vol ──────────────────────────────────────────────────
+        "iv_change_stdev_7d", "iv_change_stdev_14d", "iv_change_stdev_30d",
+        "vov_ratio",
+
+        # ── M3: expected move (1σ + 2σ at 7/14/30d) ─────────────────────────
+        "expected_move_1sigma_7d", "expected_move_1sigma_14d", "expected_move_1sigma_30d",
+        "expected_move_2sigma_7d", "expected_move_2sigma_14d", "expected_move_2sigma_30d",
+
+        # ── M3: pattern ─────────────────────────────────────────────────────
         "pattern",
     ]
 

@@ -705,9 +705,15 @@ def _simulate_day(
 
     # Strangle analytics — credit_pct, decomposition, z-scores, quality_score.
     # Mirrors frontend/src/utils/strangleAnalytics.ts exactly.
+    # Plus market_context: wide M1+M2+M3 snapshot at entry, displayed in the
+    # trade-log detail panel for cross-trade comparison later.
     analytics_fields: dict = {}
+    market_context: dict = {}
     try:
-        from app.services.strangle_analytics import compute_trade_analytics, TradeLeg
+        from app.services.strangle_analytics import (
+            compute_trade_analytics, TradeLeg, get_market_context,
+        )
+        market_context = get_market_context(entry_ts)
         ta_legs: list[TradeLeg] = []
         for leg, em in zip(resolved_legs, entry_marks):
             expiry_ts_utc = int(datetime.strptime(leg["expiry"], "%Y-%m-%d")
@@ -788,6 +794,8 @@ def _simulate_day(
         "skipped":         False,
         # ── Strangle analytics fields (NaN/None when calibration unavailable) ──
         **analytics_fields,
+        # ── Wide M1+M2+M3 snapshot at entry (for trade-log detail panel) ──
+        "market_context": market_context,
     }
 
 
@@ -820,7 +828,8 @@ def _skipped(d: date, reason: str, entry_ts: Optional[int] = None) -> dict:
         "theta_vega_ratio": None, "gamma_theta_dollar": None,
         "position_delta": None, "position_gamma": None,
         "position_vega": None, "position_theta": None,
-        "calibration_source": None,
+        "calibration_source": None, "quality_source": None,
+        "market_context": {},
     }
 
 

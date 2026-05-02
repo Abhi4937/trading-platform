@@ -189,6 +189,98 @@ _M3_WANT_COLS = [
     "pattern",
 ]
 
+# Wider set baked into each backtest trade's `market_context` so the trade-log
+# detail panel can show M1+M2+M3 details at entry without re-querying the
+# parquet. Mirrors `/historical/snapshot-context`'s superset. Defensive: any
+# col not present in M3 is silently skipped at fetch time.
+_M3_FULL_CTX_COLS = [
+    # ATM IV constant maturity
+    "atm_iv_7d", "atm_iv_14d", "atm_iv_30d", "atm_iv_60d", "strangle_synth_iv",
+    # IVP — by tenor + by TF
+    "ivp_atm_7d_90d", "ivp_atm_14d_90d", "ivp_atm_30d_90d", "ivp_atm_60d_90d",
+    "ivp_1m", "ivp_5m", "ivp_15m", "ivp_30m", "ivp_1h", "ivp_4h", "ivp_1d",
+    "ivp_4h_delta_24h", "ivp_4h_delta_48h",
+    # Skew + term
+    "risk_reversal_25d", "risk_reversal_15d", "risk_reversal_10d",
+    "butterfly_25d", "butterfly_15d", "butterfly_10d",
+    "wing_atm_ratio",
+    "term_slope_7_30", "term_slope_14_60", "term_slope_30_60",
+    # OI walls + PCR
+    "pcr_oi", "pcr_volume",
+    "max_oi_call_strike", "max_oi_call_oi", "dist_to_call_wall_pct",
+    "max_oi_put_strike",  "max_oi_put_oi",  "dist_to_put_wall_pct",
+    # GEX
+    "total_gex", "gex_regime", "dist_to_flip_pct", "gex_flip_level",
+    # M1 — RSI / ATR / ADX multi-TF
+    "rsi_14_1m", "rsi_14_5m", "rsi_14_15m", "rsi_14_30m",
+    "rsi_14_1h", "rsi_14_4h", "rsi_14_1d",
+    "atr_pct_5m", "atr_pct_15m", "atr_pct_30m",
+    "atr_pct_1h", "atr_pct_4h", "atr_pct_1d",
+    "adx_14_5m", "adx_14_15m", "adx_14_30m",
+    "adx_14_1h", "adx_14_4h", "adx_14_1d",
+    # MACD / Bollinger / SuperTrend / Aroon
+    "macd_hist_1h", "macd_hist_4h", "macd_signal_4h",
+    "bb_position_1h", "bb_position_4h", "bb_width_1h", "bb_width_4h",
+    "supertrend_signal_4h", "aroon_up_4h", "aroon_down_4h",
+    # RV / RVP / MA distances / ATR compression
+    "rv_7d", "rv_14d", "rv_30d", "rv_parkinson_7d", "rv_garman_klass_7d",
+    "rvp_7d", "rvp_14d", "rvp_30d", "rvp_4h", "rvp_1d",
+    "ma50_distance_pct", "ma100_distance_pct", "ma200_distance_pct",
+    "atr_compression_ratio",
+    # Returns
+    "spot_ret_5m", "spot_ret_1h", "spot_ret_4h",
+    "spot_ret_1d", "spot_ret_7d_5m_base",
+    # M3 — VRP family + vol-of-vol + expected move + pattern
+    "iv_rv_spread_7d", "iv_rv_spread_14d", "iv_rv_spread_30d",
+    "iv_rv_ratio_7d",  "iv_rv_ratio_14d",  "iv_rv_ratio_30d",
+    "vrp_pct_7d", "vrp_pct_30d", "vrp_pct_90d",
+    "iv_change_stdev_7d", "iv_change_stdev_14d", "iv_change_stdev_30d", "vov_ratio",
+    "expected_move_1sigma_7d", "expected_move_1sigma_14d", "expected_move_1sigma_30d",
+    "expected_move_2sigma_7d", "expected_move_2sigma_14d", "expected_move_2sigma_30d",
+    "pattern",
+]
+
+_market_ctx_cache: dict[int, dict] = {}
+
+
+def get_market_context(ts: int) -> dict:
+    """Wide M1+M2+M3 snapshot at-or-before `ts`. Cached separately from the
+    narrow `get_snapshot` cache because this fetches ~100 cols vs 22.
+    Defensive: silently drops cols not present in the parquet.
+    """
+    if not os.path.exists(FULL_ENRICHED_5M_PATH):
+        return {}
+    bucket = (int(ts) // 300) * 300
+    if bucket in _market_ctx_cache:
+        return _market_ctx_cache[bucket]
+    avail = _m3_columns_available()
+    cols = [c for c in _M3_FULL_CTX_COLS if c in avail]
+    if not cols:
+        _market_ctx_cache[bucket] = {}
+        return {}
+    cols_sql = ", ".join(cols)
+    try:
+        res = duckdb.sql(
+            f"SELECT {cols_sql} FROM read_parquet('{FULL_ENRICHED_5M_PATH}') "
+            f"WHERE timestamp_unix <= {int(ts)} "
+            f"ORDER BY timestamp_unix DESC LIMIT 1"
+        ).df()
+    except Exception:
+        _market_ctx_cache[bucket] = {}
+        return {}
+    if res.empty:
+        _market_ctx_cache[bucket] = {}
+        return {}
+    row = res.iloc[0].to_dict()
+    for k, v in list(row.items()):
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            row[k] = None
+        elif hasattr(v, "item"):
+            try: row[k] = v.item()
+            except Exception: pass
+    _market_ctx_cache[bucket] = row
+    return row
+
 
 def get_snapshot(ts: int) -> dict:
     """Fetch the M3 row at-or-before `ts`. Cached. Returns {} if M3 missing."""
@@ -285,8 +377,23 @@ def compute_trade_analytics(
 
     quality = None
     size_band = None
+    quality_source: Optional[str] = None
     if z_credit_pct_pct is not None:
+        # Calibrated quality (v1): blend bucket-z and IVP.
         quality = 0.40 * z_credit_pct_pct + 0.60 * float(ivp)
+        quality_source = "calibrated"
+    elif math.isfinite(credit_pct) and dte > 0:
+        # Fallback when calibration parquet not yet built. Uses IVP +
+        # √DTE-normalized credit_pct as a rough richness proxy. Map cpn → 0-100
+        # via cpn * 10000 (e.g. 0.5%/√DTE = 50, 1%/√DTE = 100, clamped). Same
+        # band thresholds as calibrated path so backtest/UI behaviour is
+        # consistent.
+        cpn = credit_pct / math.sqrt(max(dte, 1e-6))
+        cpn_score = max(0.0, min(100.0, cpn * 10000.0))
+        quality = 0.60 * float(ivp) + 0.40 * cpn_score
+        quality_source = "fallback_ivp_credit"
+
+    if quality is not None:
         if quality >= 75: size_band = "strong"
         elif quality >= 60: size_band = "standard"
         elif quality >= 45: size_band = "marginal"
@@ -316,5 +423,6 @@ def compute_trade_analytics(
         "position_vega": round(pos_vega, 4),
         "position_theta": round(pos_theta, 4),
         "calibration_source": calib.get("source") if calib else None,
+        "quality_source": quality_source,
     }
     return out

@@ -365,6 +365,29 @@ export function computeQualityScore(
 }
 
 /**
+ * Fallback quality when calibration parquet isn't built yet. Mirrors
+ * backend `strangle_analytics.py` fallback path. Blends IVP with a
+ * √DTE-normalized credit_pct heuristic so the Quality column / panel chip
+ * shows a plausible value before calibration runs.
+ */
+export function computeQualityScoreFallback(
+  credit: CreditMetrics, ctx: AnalyticsContext,
+): QualityScore {
+  const ivp = Number.isFinite(ctx.ivp_atm_7d_90d) ? ctx.ivp_atm_7d_90d : 50;
+  const cpn = Number.isFinite(credit.credit_pct_normalized)
+    ? credit.credit_pct_normalized : 0;
+  // 0.5%/√DTE → 50; 1%/√DTE → 100; clamp to [0, 100].
+  const cpnScore = Math.max(0, Math.min(100, cpn * 10000));
+  const score = 0.60 * ivp + 0.40 * cpnScore;
+  let band: QualityBand;
+  if (score >= 75) band = 'strong';
+  else if (score >= 60) band = 'standard';
+  else if (score >= 45) band = 'marginal';
+  else band = 'skip';
+  return { quality_score: score, size_band: band };
+}
+
+/**
  * Hard pre-entry filters from convo §16. All must pass for an A-grade entry.
  */
 export function checkHardFilters(ctx: AnalyticsContext): HardFilters {
@@ -474,8 +497,11 @@ export function computeAll(
   const ratios = computeMasterRatios(legs, ctx, credit);
   const filters = checkHardFilters(ctx);
   if (!calibration) {
+    // Fallback quality so the Quality chip/column still has a value while
+    // calibration parquet hasn't been built yet. Decomposition/z still null.
+    const quality = computeQualityScoreFallback(credit, ctx);
     return { credit, ratios, decomposition: null, z: null,
-             quality: null, filters };
+             quality, filters };
   }
   const decomposition = computeDecomposition(credit, ctx, calibration);
   const z = computeZScores(credit, ctx, calibration);

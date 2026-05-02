@@ -219,6 +219,13 @@ export interface BacktestTrade {
   position_vega?: number | null;
   position_theta?: number | null;
   calibration_source?: 'specific_bucket' | 'universal_fallback' | null;
+  // Set when calibration parquet not built — quality_score uses IVP+credit
+  // fallback so the column isn't blank.
+  quality_source?: 'calibrated' | 'fallback_ivp_credit' | null;
+  // Wide M1+M2+M3 snapshot at trade entry. Sparse — any col not in the
+  // current M3 schema is silently absent. Used by MarketContextPanel in
+  // the trade-log detail panel.
+  market_context?: Record<string, number | string | null>;
 }
 
 export interface BacktestSummary {

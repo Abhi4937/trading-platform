@@ -19,6 +19,7 @@ import {
   type FullAnalytics,
   type QualityBand,
 } from '../../utils/strangleAnalytics';
+import MarketContextPanel from './MarketContextPanel';
 
 interface Props {
   legs: AnalyticsLeg[];
@@ -27,6 +28,10 @@ interface Props {
   loading?: boolean;
   /** Title shown in the panel header. */
   title?: string;
+  /** Wide M1+M2+M3 snapshot at entry. Strategy Builder fetches via
+   * /historical/snapshot-context; Backtest receives via trade.market_context.
+   * When provided, mounts the MarketContextPanel section at the bottom. */
+  marketContext?: Record<string, number | string | null> | null;
 }
 
 const fmtPct = (v: number, d = 2) =>
@@ -382,6 +387,7 @@ const Skeleton: React.FC<{ msg: string }> = ({ msg }) => (
 
 export const StrangleAnalyticsPanel: React.FC<Props> = ({
   legs, ctx, calibration, loading, title = 'Strangle Analytics',
+  marketContext,
 }) => {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -428,9 +434,14 @@ export const StrangleAnalyticsPanel: React.FC<Props> = ({
                 <div style={{ fontSize: 11, color: 'var(--gold, #f0b429)',
                               padding: 8, background: 'rgba(240, 180, 41, 0.1)',
                               borderRadius: 4 }}>
-                  Calibration unavailable — decomposition / quality use placeholders.
-                  Run `python -m app.analytics.calibration_builder --rebuild`.
+                  Calibration unavailable — decomposition / z-scores hidden;
+                  Quality column uses an IVP+credit fallback formula until
+                  calibration runs. Build with
+                  <code style={{ marginLeft: 4 }}>python -m app.analytics.calibration_builder --rebuild</code>.
                 </div>
+              )}
+              {marketContext && (
+                <MarketContextPanel context={marketContext} defaultOpen={false} />
               )}
             </>
           )}

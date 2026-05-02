@@ -371,6 +371,9 @@ export const StrategyPanel: React.FC<Props> = ({
   const [analyticsCtx, setAnalyticsCtx] = useState<AnalyticsContext | null>(null);
   const [analyticsCalib, setAnalyticsCalib] = useState<CalibrationBucket | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  // Raw M3 row — superset passed to MarketContextPanel for the wide M1+M2+M3
+  // detail view (multi-TF RSI/ADX/ATR, OI walls, GEX, vol-of-vol, etc.).
+  const [analyticsRawSnapshot, setAnalyticsRawSnapshot] = useState<Record<string, number | string | null> | null>(null);
 
   // Helper: build AnalyticsLeg[] from current legs + chain marks/Greeks
   const buildAnalyticsLegs = useCallback((legsArr: StrategyLeg[]): AnalyticsLeg[] => {
@@ -454,6 +457,7 @@ export const StrategyPanel: React.FC<Props> = ({
           expected_move_1sigma_7d: num('expected_move_1sigma_7d'),
         };
         setAnalyticsCtx(ctx);
+        setAnalyticsRawSnapshot(row);
         // Trigger calibration fetch with derived bucket params
         const targetDelta = (Math.abs(ce.delta) + Math.abs(pe.delta)) / 2;
         return historicalApi.getCalibration(
@@ -2313,6 +2317,7 @@ export const StrategyPanel: React.FC<Props> = ({
                       ctx={analyticsCtx}
                       calibration={analyticsCalib}
                       loading={analyticsLoading}
+                      marketContext={analyticsRawSnapshot}
                     />
                   </div>
                 )}
