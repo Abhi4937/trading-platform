@@ -1,5 +1,89 @@
 # Claude's Work Log
 
+## Session 8 (2026-05-02) — Module 3: derived metrics + pattern detection
+
+### What was done
+Implemented Module 3. Plan: `/home/abhis/.claude/plans/sparkling-pondering-plum.md`.
+
+**New files:**
+- `backend/app/analytics/enrich_derived.py` — ~400 LOC pipeline. Joins M1's
+  spot_enriched.parquet + M2's options_enriched_5m.parquet on
+  timestamp_unix; computes Spec Section 5 derived metrics (VRP family,
+  expected move, vol-of-vol); applies pattern detection (A/B/C/D/Other)
+  per build prompt's "move pattern detection here" directive. Writes 4
+  output grids at 1m/5m/15m/30m matching M2's pattern.
+- `backend/tests/test_enrich_derived.py` — 13 unit tests, all passing.
+
+**Output**: `/home/abhis/btc-data/derived/full_enriched_{1m,5m,15m,30m}.parquet`
+- ~310 columns per row (M1 + M2 + new derived + pattern)
+- Sizes: 1m ~1.2 GB, 5m ~250 MB, 15m ~85 MB, 30m ~45 MB
+- IV stays decimal fractions; RV from M1 stays percent (converted on the
+  fly in the spread/ratio formulas)
+
+### Key decisions
+- 4 grids (1m/5m/15m/30m) matches M2's pattern; native compute at 5m
+- Pattern detection uses M1+M2 columns directly (`ivp_4h`, `spot_ret_1d`,
+  `adx_14_4h`); priority order A→B→C→D→Other
+- pandas + pd.read_parquet (no DuckDB needed for the join — both inputs
+  are parquets, in-memory join is fine at 240k × 310-col scale)
+- Idempotent append + overwrite-last-1-day (95-day warm-up read for VRP
+  90d percentile)
+
+### Open / next
+- E2E verification blocked on M2 backfill (was ~6% at end of session;
+  ETA 4h). Once M2 finishes, run `python -m app.analytics.enrich_derived
+  --rebuild` for M3 backfill (~5-10 min).
+- Commit + push (awaiting user approval per CLAUDE.md Rule #1).
+- Plan Module 4 (strangle backtest engine) in fresh session after M3 is verified.
+
+---
+
+## Session 7 (2026-05-02) — Module 2: options enrichment pipeline
+
+### What was done
+Implemented Module 2. Plan: `/home/abhis/.claude/plans/sparkling-pondering-plum.md`.
+
+**New files:**
+- `backend/app/analytics/enrich_options.py` — ~900 LOC pipeline computing
+  Spec Section 4 metrics from the 1-min options parquets. Stages:
+  - A) per-expiry chain bulk-load + per-5m-bar summary (ATM IV, OI, max-OI
+       strikes, top-30 skew/GEX strikes with vectorized Greek compute)
+  - B) cross-expiry aggregation per snapshot (const-maturity interp, term,
+       OI walls, GEX sum, strangle synthetic IV)
+  - C) rolling 90d IVP per tenor + multi-TF IVP (1m/5m/15m/30m/1h/4h/1d)
+  - D) write 4-grid parquets (1m via ffill, 5m native, 15m/30m end-of-bucket)
+  - Vectorized BS price + IV solver + gamma helpers (numpy bisection)
+- `backend/tests/test_enrich_options.py` — 15 tests, all passing.
+
+**Output**: `/home/abhis/btc-data/derived/options_enriched_{1m,5m,15m,30m}.parquet`
+- 4 grids at 1m / 5m / 15m / 30m sampling
+- ~50 columns per row (constant-maturity ATM IV, IVP per tenor + multi-TF,
+  skew + RR/BF/wing-atm, term slopes, OI walls + PCR, total GEX + regime,
+  strangle synthetic IV + IVP)
+- IV stored as decimal fractions (0.55 = 55%) for greeks.py consistency
+
+### Key decisions (locked in plan)
+- Compute natively at 5m, output 4 grids via ffill/end-of-bucket
+- pandas + DuckDB (matches M1)
+- IV/IVP/skew/GEX live HERE; spot indicators live in M1 (M3 will join)
+- 1m granularity not actually computed — options metrics don't move at 1m
+- gex_flip_level: NaN in v1 (proper computation = 21-point grid, v2 work)
+- gex_per_strike nested column dropped (summary cols sufficient for backtest)
+- pcr_volume: NaN (no volume column in options parquets)
+- Constant-maturity outside expiry range: NaN (no extrapolation)
+
+### Performance
+- Smoke run (2 days, 10 expiries): 60s
+- Full backfill: kicked off as background task ~11:25 UTC; estimated ~7 hours
+  for 880 days × 849 expiries. Watch `/tmp/m2_backfill.log`.
+
+### Open / next
+- Full backfill verification once it completes
+- Commit + push (only after user reviews backfill results)
+- Plan Module 3 (joins M1+M2, adds VRP family / expected move / pattern detection)
+
+---
+
 ## Session 6 (2026-05-02) — Module 1: spot enrichment pipeline
 
 ### What was done

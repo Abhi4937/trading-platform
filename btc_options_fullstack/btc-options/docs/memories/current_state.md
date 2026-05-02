@@ -1,13 +1,30 @@
 # Current Project State
 
 ## Active Projects
-- **Short-strangle backtest stack (Module 1 done 2026-05-02; Modules 2-6 pending):**
+- **Short-strangle backtest stack (M1+M2+M3 done 2026-05-02; M4-M6 pending):**
   Plan at `/home/abhis/.claude/plans/sparkling-pondering-plum.md`, spec at
-  `UI ss/new feature/SHORT_STRANGLE_INDICATORS_SPEC.md`. Module 1 = spot enrichment
-  pipeline, builds `/home/abhis/btc-data/derived/spot_enriched.parquet` (246k 5m
-  rows × 245 cols, ~150 MB). Run via `python -m app.analytics.enrich_spot
-  [--rebuild]`. Modules 2-6 (options enrichment → derived → backtest engine →
-  calibration → dashboard) to be planned in fresh sessions per spec gates.
+  `UI ss/new feature/SHORT_STRANGLE_INDICATORS_SPEC.md`.
+  - **M1** (committed): `enrich_spot.py` →
+    `/home/abhis/btc-data/derived/spot_enriched.parquet` (246k 5m rows × 246
+    cols, ~150 MB).
+  - **M2** (code complete, 15 tests passing, full backfill running in background
+    ETA ~4h): `enrich_options.py` → 4 grids at 1m/5m/15m/30m.
+    50 cols incl. constant-maturity ATM IV, IVP, skew, term, OI walls, GEX,
+    strangle synthetic IV.
+  - **M3** (code complete, 13 tests passing, awaiting M2 backfill for E2E):
+    `enrich_derived.py` joins M1+M2, adds Spec §5 derived (VRP family,
+    expected move, vol-of-vol) + pattern detection A/B/C/D/Other.
+    Outputs 4 grids `full_enriched_{1m,5m,15m,30m}.parquet`. Run with
+    `python -m app.analytics.enrich_derived [--rebuild] [--since/--through] [--grids]`.
+  - **M4-M6** (pending): strangle backtest engine, calibration, dashboard.
+
+### Pipeline flow when running fresh
+```
+1. python -m app.analytics.enrich_spot --rebuild              # ~16s, M1 output
+2. python -m app.analytics.enrich_options --rebuild           # ~4h, M2 outputs
+3. python -m app.analytics.enrich_derived --rebuild           # ~5-10 min, M3 outputs
+```
+Incremental runs (default mode without --rebuild) are fast: append + overwrite-last-1-day.
 
 ## Active Projects (older)
 - **Margin model calibration (active 2026-04-30 → 2026-05-01):** v2 grid running every

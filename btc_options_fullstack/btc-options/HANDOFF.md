@@ -2,9 +2,91 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-02 (Module 1 — spot enrichment pipeline)
+**Date:** 2026-05-02 (Modules 1 + 2 + 3 — enrichment pipelines)
 **Branch:** `mainbranch-gemini_claude`
-**Status:** Module 1 complete + verified; uncommitted (per RULE #1, awaiting user approval to commit)
+**Status:** M1 committed; M2 code complete + 15 tests passing, backfill running in background;
+M3 code complete + 13 tests passing, awaiting M2 backfill completion to verify E2E
+
+---
+
+## What Was Done — 2026-05-02 (Module 3: derived metrics + pattern detection)
+
+Implemented Module 3. Plan: `/home/abhis/.claude/plans/sparkling-pondering-plum.md`.
+
+### Files created
+- `backend/app/analytics/enrich_derived.py` — ~400 LOC pipeline:
+  - Stage A: inner-join M1's spot_enriched.parquet + M2's options_enriched_5m.parquet
+    on `timestamp_unix`
+  - Stage B: VRP family (iv_rv_spread/ratio @ 7d/14d/30d, vrp_pct @ 90d),
+    expected move (1σ + 2σ at 7d/14d/30d), vol-of-vol
+    (iv_change_stdev @ 7d/14d/30d, vov_ratio)
+  - Stage C: pattern detection — A "Fresh Spike", B "Post-Crash",
+    C "Stale", D "Active Trend", Other (priority A→B→C→D→Other,
+    vectorized via boolean masks)
+  - Stage D: write 4 grids (1m via ffill, 5m native, 15m/30m end-of-bucket)
+  - CLI: `python -m app.analytics.enrich_derived [--rebuild] [--since/--through] [--grids]`
+- `backend/tests/test_enrich_derived.py` — 13 unit tests all passing:
+  VRP formula correctness, expected-move math, pattern A/B/C/D detection,
+  pattern priority (A overrides D), vol-of-vol smoke, threshold constants
+
+### Output schema
+~310 cols per row (M1 246 + M2 50 - 1 dup + ~16 new). 4 output grids:
+- `full_enriched_1m.parquet` (~1.2 GB est)
+- `full_enriched_5m.parquet` (~250 MB)
+- `full_enriched_15m.parquet` (~85 MB)
+- `full_enriched_30m.parquet` (~45 MB)
+
+### Open
+- **M2 backfill still running** at ~50/849 expiries (~6%) when M3 work
+  finished. M3 cannot run E2E verification until M2 produces
+  `options_enriched_5m.parquet`. Wait ~4 hours for the M2 backfill, then run
+  `python -m app.analytics.enrich_derived --rebuild` for M3 backfill (~5–10 min).
+- M3 code + 13 unit tests committed-ready but uncommitted (per RULE #1,
+  awaiting user "commit and push" instruction).
+
+---
+
+## What Was Done — 2026-05-02 (Module 2: options enrichment)
+
+Implemented Module 2 of the short-strangle backtest spec. Plan at
+`/home/abhis/.claude/plans/sparkling-pondering-plum.md`.
+
+### Files created
+- `backend/app/analytics/enrich_options.py` — ~900 LOC pipeline:
+  - Per-expiry chain bulk loader via DuckDB hive partitioning
+  - Per-snapshot summary computation (ATM IV, OI sums, max-OI strikes,
+    skew at .25/.15/.10Δ, GEX with vectorized Greek compute)
+  - Cross-expiry aggregation: constant-maturity ATM IV interp (7/14/30/60d),
+    term structure, OI walls, total GEX, strangle synthetic IV
+  - Rolling IVP at 90-day window (per tenor) + multi-TF (1m/5m/15m/30m/1h/4h/1d)
+  - 4-grid parquet writer (1m via ffill, 5m as-is, 15m/30m end-of-bucket)
+  - Vectorized BS price + IV solver + gamma functions (numpy)
+  - CLI: `python -m app.analytics.enrich_options [--rebuild] [--since/--through] [--grids]`
+- `backend/tests/test_enrich_options.py` — 15 unit tests (BS round-trip,
+  vectorized gamma ATM-max, constant-maturity interp, GEX regime,
+  IST timestamp), all passing.
+
+### Architecture
+Computes natively at **5-minute granularity** (matches M1's pattern; options
+metrics don't move meaningfully at 1m). Outputs 4 grids:
+- `options_enriched_1m.parquet` (5m values forward-filled to 1m)
+- `options_enriched_5m.parquet` (native compute granularity)
+- `options_enriched_15m.parquet` (end-of-bucket from 5m)
+- `options_enriched_30m.parquet` (end-of-bucket from 5m)
+
+### Smoke verified (2-day window)
+- 4 grids written with consistent values
+- Sample (BTC@$74k, 2026-04-20): ATM IV 7d/14d/30d/60d ≈ 40-44%,
+  RR_25d = -0.07 (put skew ✓), BF_25d = +0.04 (smile ✓), Wing/ATM = 1.13,
+  PCR_OI = 0.42, walls at ±2-2.5%
+- GEX: -7M to -610M USD (NEGATIVE regime — BTC short-gamma, expected)
+- Cross-grid consistency verified
+
+### Open
+- **Full backfill running in background** (~7h for 880 days × 849 expiries).
+  Watch `/tmp/m2_backfill.log` or use the Monitor tool on the bash background task.
+- `gex_flip_level` deferred to v2 (would need 21-point spot grid recompute).
+- `gex_per_strike` nested column dropped per plan.
 
 ---
 
