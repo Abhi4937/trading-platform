@@ -242,13 +242,14 @@ async def get_historical_chain(
             return {}
         path_list = "['" + "','".join(paths) + "']"
         q = f"""
-        SELECT strike, mark_close as mark_price
+        SELECT strike, mark_close as mark_price, oi_close
         FROM read_parquet({path_list}, hive_partitioning=true)
         WHERE timestamp_unix = {timestamp}
         """
         try:
             df = conn.execute(q).df()
-            return dict(zip(df['strike'].astype(int), df['mark_price']))
+            return dict(zip(df['strike'].astype(int),
+                            zip(df['mark_price'], df['oi_close'])))
         except Exception as e:
             logger.error(f"Error querying {opt_type} legs: {e}")
             return {}
@@ -263,7 +264,7 @@ async def get_historical_chain(
     if not spot or spot == atm_strike:
         min_diff = float('inf')
         for s in filtered_strikes:
-            diff = abs(calls.get(s, 0) - puts.get(s, 0))
+            diff = abs((calls.get(s, (0, 0))[0] or 0) - (puts.get(s, (0, 0))[0] or 0))
             if diff < min_diff:
                 min_diff = diff
                 atm_strike = s
@@ -282,9 +283,19 @@ async def get_historical_chain(
         return {"chain": [], "atm_strike": 0, "spot_actual": spot or 0}
 
     from app.core.greeks import implied_vol
+    import math as _math
+
+    def _safe(x) -> float:
+        try:
+            v = float(x)
+        except Exception:
+            return 0.0
+        return 0.0 if _math.isnan(v) else v
 
     def compute_strike(s: int) -> dict:
-        c_price = float(calls.get(s, 0))
+        c_tuple = calls.get(s, (0, 0))
+        c_price = _safe(c_tuple[0])
+        c_oi    = _safe(c_tuple[1])
         if c_price > 0:
             c_iv = implied_vol(c_price, spot, s, T, r, "call")
             cg = compute_greeks(spot, s, T, r, c_iv if c_iv > 0 else 0.5, "call")
@@ -292,13 +303,20 @@ async def get_historical_chain(
             c_iv = 0.0
             cg = None
 
-        p_price = float(puts.get(s, 0))
+        p_tuple = puts.get(s, (0, 0))
+        p_price = _safe(p_tuple[0])
+        p_oi    = _safe(p_tuple[1])
         if p_price > 0:
             p_iv = implied_vol(p_price, spot, s, T, r, "put")
             pg = compute_greeks(spot, s, T, r, p_iv if p_iv > 0 else 0.5, "put")
         else:
             p_iv = 0.0
             pg = None
+
+        # OI in USD: parquet `oi_close` is BTC-notional (contracts already × 0.001),
+        # so multiply by spot directly to get USD value (matches Delta's oi_value_usd).
+        c_oi_usd = c_oi * spot
+        p_oi_usd = p_oi * spot
 
         return {
             "strike": s,
@@ -309,6 +327,8 @@ async def get_historical_chain(
                 "gamma": cg.gamma if cg else 0.0,
                 "theta": cg.theta if cg else 0.0,
                 "vega": cg.vega if cg else 0.0,
+                "open_interest": round(c_oi, 2),
+                "oi_usd": round(c_oi_usd, 2),
             },
             "put": {
                 "strike": s, "last_price": p_price, "iv_pct": round(p_iv * 100, 2),
@@ -316,6 +336,8 @@ async def get_historical_chain(
                 "gamma": pg.gamma if pg else 0.0,
                 "theta": pg.theta if pg else 0.0,
                 "vega": pg.vega if pg else 0.0,
+                "open_interest": round(p_oi, 2),
+                "oi_usd": round(p_oi_usd, 2),
             }
         }
 
@@ -700,3 +722,456 @@ async def get_atm_iv_series(
     except Exception as e:
         logger.error(f"Error fetching ATM IV series for {expiry}: {e}")
         return {"data": []}
+
+
+# ── Spot OHLC + technical indicators ─────────────────────────────────────────
+
+# Maps timeframe strings → (DuckDB INTERVAL, bucket_seconds)
+_TF_TO_INTERVAL = {
+    '1m':  ('1 minute',   60),
+    '5m':  ('5 minutes',  300),
+    '15m': ('15 minutes', 900),
+    '30m': ('30 minutes', 1800),
+    '1h':  ('1 hour',     3600),
+    '4h':  ('4 hours',    14400),
+    '1d':  ('1 day',      86400),
+}
+
+
+def _bucketed_spot_ohlc(start_ts: int, end_ts: int, timeframe: str, lookback_extra_sec: int = 0) -> 'pd.DataFrame':
+    """Pull bucketed spot OHLCV from the parquet for the given range.
+
+    Returns DataFrame with columns: time, open, high, low, close, volume.
+    `lookback_extra_sec` extends the start backwards (warm-up for indicators).
+    """
+    import pandas as pd
+    interval, _ = _TF_TO_INTERVAL.get(timeframe, _TF_TO_INTERVAL['5m'])
+    fetch_start = max(0, int(start_ts) - max(0, int(lookback_extra_sec)))
+    conn = get_conn()
+    q = f"""
+    SELECT
+        time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+        first(mark_open  ORDER BY timestamp_unix) AS o,
+        max(mark_high)                            AS h,
+        min(mark_low)                             AS l,
+        last(mark_close  ORDER BY timestamp_unix) AS c,
+        sum(ltp_volume)                            AS v
+    FROM read_parquet('{SPOT_DATA_PATH}')
+    WHERE timestamp_unix >= {fetch_start} AND timestamp_unix <= {int(end_ts)}
+    GROUP BY bucket ORDER BY bucket ASC
+    """
+    try:
+        df = conn.execute(q).df()
+    except Exception as e:
+        logger.error(f"_bucketed_spot_ohlc failed: {e}")
+        return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+    if df.empty:
+        return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+    df['time']   = df['bucket'].apply(lambda x: int(x.timestamp()))
+    df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'})
+    return df[['time', 'open', 'high', 'low', 'close', 'volume']].sort_values('time').reset_index(drop=True)
+
+
+def _bucketed_leg_ohlc(expiry: str, strike: int, opt_type: str,
+                        start_ts: int, end_ts: int, timeframe: str,
+                        lookback_extra_sec: int = 0) -> 'pd.DataFrame':
+    """Same as _bucketed_spot_ohlc but for a single leg's premium parquet."""
+    import pandas as pd
+    interval, _ = _TF_TO_INTERVAL.get(timeframe, _TF_TO_INTERVAL['5m'])
+    fetch_start = max(0, int(start_ts) - max(0, int(lookback_extra_sec)))
+    path = f"/home/abhis/btc-data/data/options/expiry={expiry}/strike={int(strike)}/{opt_type.upper()}.parquet"
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+    conn = get_conn()
+    q = f"""
+    SELECT
+        time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+        first(mark_open  ORDER BY timestamp_unix) AS o,
+        max(mark_high)                            AS h,
+        min(mark_low)                             AS l,
+        last(mark_close  ORDER BY timestamp_unix) AS c,
+        last(oi_close    ORDER BY timestamp_unix) AS v
+    FROM read_parquet('{path}')
+    WHERE timestamp_unix >= {fetch_start} AND timestamp_unix <= {int(end_ts)}
+    GROUP BY bucket ORDER BY bucket ASC
+    """
+    try:
+        df = conn.execute(q).df()
+    except Exception as e:
+        logger.error(f"_bucketed_leg_ohlc failed: {e}")
+        return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+    if df.empty:
+        return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+    df['time'] = df['bucket'].apply(lambda x: int(x.timestamp()))
+    df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'})
+    # Leg parquets don't carry trade volume; v above is oi_close — keep it for OI-flavored
+    # indicators or set to NaN for VWAP. For now, treat as 0 so VWAP won't run on legs.
+    df['volume'] = 0
+    return df[['time', 'open', 'high', 'low', 'close', 'volume']].sort_values('time').reset_index(drop=True)
+
+
+def _parse_indicators_param(raw: Optional[str]) -> list[dict]:
+    """Parse `indicators` query param. Accepts JSON array or empty/None."""
+    if not raw:
+        return []
+    import json
+    try:
+        v = json.loads(raw)
+        if isinstance(v, list):
+            return [c for c in v if isinstance(c, dict)]
+    except Exception:
+        pass
+    return []
+
+
+def _max_indicator_lookback_bars(configs: list[dict]) -> int:
+    """Estimate the warm-up bars needed for the longest-window indicator."""
+    n = 0
+    for cfg in configs:
+        p = cfg.get("params", {}) or {}
+        t = (cfg.get("type") or "").lower()
+        if t in ("sma", "ema", "rsi", "atr"):
+            n = max(n, int(p.get("period", 20)))
+        elif t == "bbands":
+            n = max(n, int(p.get("period", 20)))
+        elif t == "macd":
+            n = max(n, int(p.get("slow", 26)) + int(p.get("signal", 9)))
+        elif t == "vwap":
+            n = max(n, 0)  # cumulative — no warm-up
+    # Add a 50% buffer to ensure the first visible bar has stable values.
+    return int(n * 1.5)
+
+
+@router.get("/spot-ohlc")
+async def get_spot_ohlc(
+    start_ts: int = Query(..., description="unix sec"),
+    end_ts:   int = Query(..., description="unix sec"),
+    timeframe: str = Query("5m"),
+):
+    """Return bucketed spot OHLC (+ volume) for the requested range.
+
+    Powers the historical/backtest spot candlestick chart.
+    """
+    df = _bucketed_spot_ohlc(start_ts, end_ts, timeframe)
+    if df.empty:
+        return {"data": []}
+    df = df[(df['time'] >= int(start_ts)) & (df['time'] <= int(end_ts))]
+    return {"data": df.to_dict(orient='records')}
+
+
+@router.get("/spot-indicators")
+async def get_spot_indicators(
+    start_ts: int = Query(...),
+    end_ts:   int = Query(...),
+    timeframe: str = Query("5m"),
+    indicators: str = Query("[]", description="JSON array of indicator configs"),
+):
+    """Compute technical indicators on the spot price series."""
+    from app.services.indicators import compute_indicators
+    configs = _parse_indicators_param(indicators)
+    if not configs:
+        return {"indicators": {}}
+    _, bucket_secs = _TF_TO_INTERVAL.get(timeframe, _TF_TO_INTERVAL['5m'])
+    warmup_bars = _max_indicator_lookback_bars(configs)
+    lookback_sec = warmup_bars * bucket_secs
+    df = _bucketed_spot_ohlc(start_ts, end_ts, timeframe, lookback_extra_sec=lookback_sec)
+    if df.empty:
+        return {"indicators": {}}
+    series = compute_indicators(df, configs)
+    # Slice each indicator's series to the requested visible window.
+    out = {
+        iid: [pt for pt in pts if int(pt["time"]) >= int(start_ts) and int(pt["time"]) <= int(end_ts)]
+        for iid, pts in series.items()
+    }
+    return {"indicators": out}
+
+
+@router.get("/leg-indicators")
+async def get_leg_indicators(
+    expiry: str = Query(...),
+    strike: int = Query(...),
+    type:   str = Query(..., description="CE or PE"),
+    start_ts: int = Query(...),
+    end_ts:   int = Query(...),
+    timeframe: str = Query("5m"),
+    indicators: str = Query("[]"),
+):
+    """Compute indicators on a single leg's premium series."""
+    from app.services.indicators import compute_indicators
+    configs = _parse_indicators_param(indicators)
+    if not configs:
+        return {"indicators": {}}
+    _, bucket_secs = _TF_TO_INTERVAL.get(timeframe, _TF_TO_INTERVAL['5m'])
+    warmup_bars = _max_indicator_lookback_bars(configs)
+    lookback_sec = warmup_bars * bucket_secs
+    df = _bucketed_leg_ohlc(expiry, int(strike), type, start_ts, end_ts, timeframe,
+                              lookback_extra_sec=lookback_sec)
+    if df.empty:
+        return {"indicators": {}}
+    series = compute_indicators(df, configs)
+    out = {
+        iid: [pt for pt in pts if int(pt["time"]) >= int(start_ts) and int(pt["time"]) <= int(end_ts)]
+        for iid, pts in series.items()
+    }
+    return {"indicators": out}
+
+
+@router.get("/leg-ohlc")
+async def get_leg_ohlc(
+    expiry: str = Query(...),
+    strike: int = Query(...),
+    type:   str = Query(...),
+    start_ts: int = Query(...),
+    end_ts:   int = Query(...),
+    timeframe: str = Query("5m"),
+):
+    """Return bucketed OHLC for one option leg (premium series)."""
+    df = _bucketed_leg_ohlc(expiry, int(strike), type, start_ts, end_ts, timeframe)
+    if df.empty:
+        return {"data": []}
+    df = df[(df['time'] >= int(start_ts)) & (df['time'] <= int(end_ts))]
+    return {"data": df.to_dict(orient='records')}
+
+
+# ── Strangle calibration + snapshot-context endpoints ────────────────────────
+
+import json
+import math as _math
+
+CALIBRATION_PATH = "/home/abhis/btc-data/derived/calibration.parquet"
+CALIBRATION_UNIVERSAL_PATH = "/home/abhis/btc-data/derived/calibration_universal.parquet"
+FULL_ENRICHED_5M_PATH = "/home/abhis/btc-data/derived/full_enriched_5m.parquet"
+
+# In-process cache: {(dte, spot, delta, ivp) bucket key → response dict}.
+# Cleared on process restart; the parquets rarely change.
+_calibration_cache: dict[str, Any] = {}
+_calibration_loaded = {"specific": None, "universal": None}
+
+
+def _load_calibration_specific():
+    if _calibration_loaded["specific"] is not None:
+        return _calibration_loaded["specific"]
+    if not os.path.exists(CALIBRATION_PATH):
+        _calibration_loaded["specific"] = "missing"
+        return "missing"
+    import pandas as _pd
+    df = _pd.read_parquet(CALIBRATION_PATH)
+    _calibration_loaded["specific"] = df
+    return df
+
+
+def _load_calibration_universal():
+    if _calibration_loaded["universal"] is not None:
+        return _calibration_loaded["universal"]
+    if not os.path.exists(CALIBRATION_UNIVERSAL_PATH):
+        _calibration_loaded["universal"] = "missing"
+        return "missing"
+    import pandas as _pd
+    df = _pd.read_parquet(CALIBRATION_UNIVERSAL_PATH)
+    _calibration_loaded["universal"] = df
+    return df
+
+
+_DTE_BUCKETS = [(0, 3), (3, 7), (7, 14), (14, 30), (30, 60)]
+_SPOT_BUCKETS = [(0, 60_000), (60_000, 90_000), (90_000, 120_000),
+                 (120_000, 150_000), (150_000, 10_000_000)]
+_IVP_BUCKETS = [(0, 20), (20, 40), (40, 60), (60, 80), (80, 100.0001)]
+_STD_DELTAS = (0.05, 0.10, 0.15, 0.25)
+
+
+def _label_dte(v: float) -> str:
+    for lo, hi in _DTE_BUCKETS:
+        if lo <= v < hi:
+            return f"{int(lo)}-{int(hi)}"
+    return "nan"
+
+
+def _label_spot(v: float) -> str:
+    for lo, hi in _SPOT_BUCKETS:
+        if lo <= v < hi:
+            if hi >= 10_000_000:
+                return f"{int(lo / 1000)}k+"
+            return f"{int(lo / 1000)}-{int(hi / 1000)}k"
+    return "nan"
+
+
+def _label_ivp(v: float) -> str:
+    for lo, hi in _IVP_BUCKETS:
+        if lo <= v < hi:
+            return f"{int(lo)}-{int(hi)}"
+    return "nan"
+
+
+def _label_delta(v: float) -> str:
+    snapped = min(_STD_DELTAS, key=lambda x: abs(x - v))
+    return f"{snapped:.2f}"
+
+
+@router.get("/calibration")
+async def get_calibration(
+    dte: float = Query(..., description="Days to expiry"),
+    spot: float = Query(..., description="Spot price (USD)"),
+    delta_target: float = Query(..., description="Target leg delta, e.g. 0.10"),
+    ivp: float = Query(..., description="IVP percentile 0-100"),
+):
+    """Return bucketed calibration stats (median credit%, IV, std, ...).
+
+    If the specific (DTE × spot × delta × IVP) bucket has n_samples < 30, falls
+    back to the universal (delta × IVP) curve scaled by sqrt(DTE).
+    """
+    dte_b = _label_dte(dte)
+    spot_b = _label_spot(spot)
+    delta_b = _label_delta(delta_target)
+    ivp_b = _label_ivp(ivp)
+
+    cache_key = f"{dte_b}|{spot_b}|{delta_b}|{ivp_b}"
+    if cache_key in _calibration_cache:
+        return _calibration_cache[cache_key]
+
+    spec = _load_calibration_specific()
+    if isinstance(spec, str) and spec == "missing":
+        raise HTTPException(503, "Calibration not built yet — "
+                                  "run `python -m app.analytics.calibration_builder`.")
+
+    hit = spec[(spec["dte_bucket"] == dte_b)
+               & (spec["spot_bucket"] == spot_b)
+               & (spec["delta_target"] == delta_b)
+               & (spec["ivp_bucket"] == ivp_b)]
+
+    response: dict
+    if not hit.empty and int(hit.iloc[0]["n_samples"]) >= 30:
+        row = hit.iloc[0]
+        response = {
+            "bucket": {"dte_bucket": dte_b, "spot_bucket": spot_b,
+                       "delta_target": delta_b, "ivp_bucket": ivp_b},
+            "source": "specific_bucket",
+            "n_samples": int(row["n_samples"]),
+            "credit_pct_median": float(row["credit_pct_median"]),
+            "credit_pct_mean":   float(row["credit_pct_mean"]),
+            "credit_pct_std":    float(row["credit_pct_std"]) if row["credit_pct_std"] is not None else 0.0,
+            "credit_pct_p25":    float(row["credit_pct_p25"]),
+            "credit_pct_p75":    float(row["credit_pct_p75"]),
+            "credit_pct_normalized_median": float(row["credit_pct_normalized_median"]),
+            "atm_iv_median": float(row["atm_iv_median"]) if row["atm_iv_median"] is not None else None,
+            "atm_iv_mean":   float(row["atm_iv_mean"])   if row["atm_iv_mean"]   is not None else None,
+            "atm_iv_std":    float(row["atm_iv_std"])    if row["atm_iv_std"]    is not None else None,
+            "strangle_iv_median":     float(row["strangle_iv_median"])     if row["strangle_iv_median"] is not None else None,
+            "risk_reversal_25d_median": float(row["risk_reversal_25d_median"]) if row["risk_reversal_25d_median"] is not None else None,
+            "butterfly_25d_median":   float(row["butterfly_25d_median"])   if row["butterfly_25d_median"] is not None else None,
+            "term_slope_7_30_median": float(row["term_slope_7_30_median"]) if row["term_slope_7_30_median"] is not None else None,
+            "iv_rv_spread_7d_median": float(row["iv_rv_spread_7d_median"]) if row["iv_rv_spread_7d_median"] is not None else None,
+            "pcr_oi_median":          float(row["pcr_oi_median"]) if row["pcr_oi_median"] is not None else None,
+            "structural_baseline":    float(row["structural_baseline"]) if not (row["structural_baseline"] is None or _math.isnan(float(row["structural_baseline"]))) else None,
+            "pattern_distribution":   json.loads(row["pattern_distribution"]) if isinstance(row["pattern_distribution"], str) else None,
+        }
+    else:
+        # Fall back to universal curve
+        univ = _load_calibration_universal()
+        if isinstance(univ, str) and univ == "missing":
+            raise HTTPException(503, "Calibration universal curve not built yet.")
+        u_hit = univ[(univ["delta_target"] == delta_b) & (univ["ivp_bucket"] == ivp_b)]
+        if u_hit.empty:
+            raise HTTPException(404, f"No calibration data for {cache_key}")
+        u_row = u_hit.iloc[0]
+        sqrt_dte = _math.sqrt(max(dte, 1e-6))
+        # Scale the normalized median back up by sqrt(dte) for display
+        scaled_credit_pct = float(u_row["credit_pct_normalized_median"]) * sqrt_dte
+        scaled_credit_std = float(u_row["credit_pct_normalized_std"]) * sqrt_dte if u_row["credit_pct_normalized_std"] is not None else 0.0
+
+        # Structural baseline = same delta_target, IVP=40-60, scaled
+        struct_hit = univ[(univ["delta_target"] == delta_b) & (univ["ivp_bucket"] == "40-60")]
+        struct_pct = (float(struct_hit.iloc[0]["credit_pct_normalized_median"]) * sqrt_dte
+                      if not struct_hit.empty else scaled_credit_pct * 0.7)
+
+        response = {
+            "bucket": {"dte_bucket": dte_b, "spot_bucket": spot_b,
+                       "delta_target": delta_b, "ivp_bucket": ivp_b},
+            "source": "universal_fallback",
+            "n_samples": int(u_row["n_samples"]),
+            "credit_pct_median": scaled_credit_pct,
+            "credit_pct_mean":   scaled_credit_pct,
+            "credit_pct_std":    scaled_credit_std,
+            "credit_pct_p25":    scaled_credit_pct - scaled_credit_std,
+            "credit_pct_p75":    scaled_credit_pct + scaled_credit_std,
+            "credit_pct_normalized_median": float(u_row["credit_pct_normalized_median"]),
+            "atm_iv_median": float(u_row["atm_iv_median"]) if u_row["atm_iv_median"] is not None else None,
+            "atm_iv_std":    float(u_row["atm_iv_std"])    if u_row["atm_iv_std"]    is not None else None,
+            "atm_iv_mean":   None,
+            "strangle_iv_median":     None,
+            "risk_reversal_25d_median": None,
+            "butterfly_25d_median":   None,
+            "term_slope_7_30_median": None,
+            "iv_rv_spread_7d_median": None,
+            "pcr_oi_median":          None,
+            "structural_baseline":    struct_pct,
+            "pattern_distribution":   None,
+        }
+
+    _calibration_cache[cache_key] = response
+    return response
+
+
+@router.get("/snapshot-context")
+async def get_snapshot_context(
+    ts: int = Query(..., description="Unix timestamp (seconds)"),
+):
+    """Return the M3 enriched-snapshot row at-or-before `ts`.
+
+    Selects only the analytics-relevant context columns (IVP, ATM IV, skew,
+    pattern, etc.) — not the full ~310-col row.
+    """
+    if not os.path.exists(FULL_ENRICHED_5M_PATH):
+        raise HTTPException(503, "Enriched snapshot table not built yet — "
+                                  "run `python -m app.analytics.enrich_derived --rebuild`.")
+
+    cols = [
+        "timestamp_unix", "close",
+        "atm_iv_7d", "atm_iv_14d", "atm_iv_30d", "atm_iv_60d",
+        "ivp_atm_7d_90d", "ivp_atm_14d_90d", "ivp_atm_30d_90d",
+        "ivp_4h", "ivp_1d",
+        "rv_7d", "rv_14d", "rv_30d",
+        "iv_rv_spread_7d", "iv_rv_spread_30d", "iv_rv_ratio_7d",
+        "vrp_pct_7d", "vrp_pct_30d",
+        "risk_reversal_25d", "butterfly_25d", "wing_atm_ratio",
+        "term_slope_7_30",
+        "rvp_4h", "rvp_1d",
+        "adx_14_4h", "atr_pct_4h", "rsi_14_4h",
+        "spot_ret_1d", "spot_ret_7d_5m_base",
+        "pcr_oi", "max_oi_call_strike", "max_oi_put_strike",
+        "dist_to_call_wall_pct", "dist_to_put_wall_pct",
+        "total_gex", "gex_regime", "dist_to_flip_pct",
+        "expected_move_1sigma_7d", "expected_move_1sigma_14d",
+        "iv_change_stdev_7d", "vov_ratio",
+        "ivp_4h_delta_24h", "ivp_4h_delta_48h",
+        "pattern",
+    ]
+
+    # Read schema once to drop unknown cols (M3 may evolve)
+    avail = duckdb.sql(
+        f"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet('{FULL_ENRICHED_5M_PATH}'))"
+    ).df()["column_name"].tolist()
+    cols = [c for c in cols if c in avail]
+    cols_sql = ", ".join(cols)
+
+    res = duckdb.sql(
+        f"SELECT {cols_sql} FROM read_parquet('{FULL_ENRICHED_5M_PATH}') "
+        f"WHERE timestamp_unix <= {int(ts)} "
+        f"ORDER BY timestamp_unix DESC LIMIT 1"
+    ).df()
+
+    if res.empty:
+        raise HTTPException(404, f"No snapshot at or before ts={ts}")
+
+    row = res.iloc[0].to_dict()
+    # Convert numpy scalars to native Python for clean JSON
+    for k, v in list(row.items()):
+        if v is None:
+            continue
+        if hasattr(v, "item"):
+            try:
+                row[k] = v.item()
+            except Exception:
+                pass
+        if isinstance(row[k], float) and (_math.isnan(row[k]) or _math.isinf(row[k])):
+            row[k] = None
+    return row

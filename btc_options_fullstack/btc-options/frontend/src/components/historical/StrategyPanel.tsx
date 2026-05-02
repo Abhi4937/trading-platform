@@ -12,8 +12,10 @@ import { usePersistedState } from '../../hooks/usePersistedState';
 import type { BrokerageRate } from '../../utils/brokerage';
 import type { Strategy, StrategyLeg, MtmPoint } from '../../types/strategy';
 import type { HistoricalChainRow, AtmIvPoint } from '../../types/historical';
+import { StrangleAnalyticsPanel } from '../strangle/StrangleAnalyticsPanel';
+import type { AnalyticsContext, AnalyticsLeg, CalibrationBucket } from '../../utils/strangleAnalytics';
 
-interface LegGreeksPoint { time: number; spot: number; iv: number; rv: number; delta: number; gamma: number; theta: number; vega: number; }
+interface LegGreeksPoint { time: number; spot: number; close: number; iv: number; rv: number; delta: number; gamma: number; theta: number; vega: number; }
 
 // IV/Delta panes show 4h before trade entry, capped at 6:00 PM IST of the trade day
 // (right after 5:30 PM IST settlement — earlier data belongs to the previous expiry cycle).
@@ -95,32 +97,51 @@ const MtmStatsPanel: React.FC<{
   slipExitUsd?: number;
   brokerageEntryUsd?: number;
   brokerageExitUsd?: number;
-  maxExitPnl?: number;   // peak P&L net of exit costs at that moment
+  maxExitPnl?: number;            // peak P&L net of exit costs at that moment
+  peakExitSlipUsd?: number;       // exit slip recomputed at peak marks
+  peakExitBrkUsd?: number;        // exit brokerage recomputed at peak marks
   sensitivity?: SensitivityRow[];
 }> = ({ stats, color = 'var(--accent)', slipEntryUsd = 0, slipExitUsd = 0,
-        brokerageEntryUsd = 0, brokerageExitUsd = 0, maxExitPnl, sensitivity }) => {
+        brokerageEntryUsd = 0, brokerageExitUsd = 0, maxExitPnl,
+        peakExitSlipUsd = 0, peakExitBrkUsd = 0, sensitivity }) => {
   const [expanded, setExpanded] = useState(false);
-  // Chart curve already nets entry slip; brokerage (entry+exit) and exit slip are deducted here.
-  const displayFinal = stats.finalPnl - brokerageEntryUsd - slipExitUsd - brokerageExitUsd;
+  // Round each cost component to 2 decimals BEFORE summing so the displayed
+  // arithmetic always reconciles (no "11.86 vs 11.87" rounding mismatch).
+  const r = (x: number) => Math.round(x * 100) / 100;
+  const maxMtmR    = r(stats.maxPnl);                         // chart peak (entry slip already in)
+  const finalMtmR  = r(stats.finalPnl);                       // chart final (entry slip already in)
+  const entryBrkR  = r(brokerageEntryUsd);
+  const exitSlipR  = r(slipExitUsd);                          // exit slip @ end-of-sim
+  const exitBrkR   = r(brokerageExitUsd);                     // exit brk  @ end-of-sim
+  const peakSlipR  = r(peakExitSlipUsd);                      // exit slip @ peak-of-MTM
+  const peakBrkR   = r(peakExitBrkUsd);                       // exit brk  @ peak-of-MTM
+  const displayFinal = finalMtmR - entryBrkR - exitSlipR - exitBrkR;
+  // "If closed @ peak" subtracts entry brk + exit slip @peak + exit brk @peak.
+  // Entry brk was paid regardless of when you exit. Exit costs are recomputed
+  // at peak marks (different from end-of-sim marks → different from Exit slip/fee
+  // chips). The "@peak" chips below show the exact values used here.
+  const closedAtPeakNet = maxExitPnl !== undefined
+    ? maxMtmR - entryBrkR - peakSlipR - peakBrkR
+    : undefined;
   return (
     <div className="mtm-stats-panel">
       <div className="mtm-stats-row" onClick={() => setExpanded(e => !e)} style={{ cursor: 'pointer' }}>
         <span className="mtm-stats-title" style={{ color }}>MTM Stats</span>
         <div className="mtm-stat">
-          <span className="mtm-stat-key">Max P&L</span>
+          <span className="mtm-stat-key">Max MTM</span>
           <span className="mtm-stat-val" style={{ color: 'var(--green)' }}>+{stats.maxPnl.toFixed(2)}</span>
           <span className="mtm-stat-time">{fmtTs(stats.maxPnlTime)}</span>
         </div>
-        {maxExitPnl !== undefined && (
-          <div className="mtm-stat" title="Net P&L if you had closed at the peak (after exit slip + exit fee at that moment)">
+        {closedAtPeakNet !== undefined && (
+          <div className="mtm-stat" title="Net P&L if you had closed at the peak (entry brk + exit slip + exit brk at peak deducted)">
             <span className="mtm-stat-key">If closed @ peak</span>
-            <span className="mtm-stat-val" style={{ color: maxExitPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
-              {maxExitPnl >= 0 ? '+' : ''}{maxExitPnl.toFixed(2)}
+            <span className="mtm-stat-val" style={{ color: closedAtPeakNet >= 0 ? 'var(--green)' : 'var(--red)' }}>
+              {closedAtPeakNet >= 0 ? '+' : ''}{closedAtPeakNet.toFixed(2)}
             </span>
           </div>
         )}
         <div className="mtm-stat">
-          <span className="mtm-stat-key">Min P&L</span>
+          <span className="mtm-stat-key">Min MTM</span>
           <span className="mtm-stat-val" style={{ color: stats.minPnl < 0 ? 'var(--red)' : 'var(--green)' }}>{stats.minPnl.toFixed(2)}</span>
           <span className="mtm-stat-time">{fmtTs(stats.minPnlTime)}</span>
         </div>
@@ -129,7 +150,13 @@ const MtmStatsPanel: React.FC<{
           <span className="mtm-stat-val" style={{ color: 'var(--red)' }}>{stats.maxDrawdown.toFixed(2)}</span>
           <span className="mtm-stat-time">{fmtTs(stats.maxDdPeakTime)} → {fmtTs(stats.maxDdTroughTime)}</span>
         </div>
-        <div className="mtm-stat">
+        <div className="mtm-stat" title="Chart final value (entry slip already deducted; brokerage + exit slip not yet)">
+          <span className="mtm-stat-key">Final MTM</span>
+          <span className="mtm-stat-val" style={{ color: finalMtmR >= 0 ? 'var(--green)' : 'var(--red)' }}>
+            {finalMtmR >= 0 ? '+' : ''}{finalMtmR.toFixed(2)}
+          </span>
+        </div>
+        <div className="mtm-stat" title="Final MTM − entry brk − exit slip − exit brk. Math reconciles exactly with the rounded components shown.">
           <span className="mtm-stat-key">Final P&L</span>
           <span className="mtm-stat-val" style={{ color: displayFinal >= 0 ? 'var(--green)' : 'var(--red)' }}>
             {displayFinal >= 0 ? '+' : ''}{displayFinal.toFixed(2)}
@@ -139,31 +166,47 @@ const MtmStatsPanel: React.FC<{
           <div className="mtm-stat" title="Entry slippage — already deducted in chart curve">
             <span className="mtm-stat-key">Entry slip</span>
             <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
-              −{slipEntryUsd.toFixed(2)}
+              −{r(slipEntryUsd).toFixed(2)}
             </span>
           </div>
         )}
-        {slipExitUsd > 0 && (
+        {exitSlipR > 0 && (
           <div className="mtm-stat" title="Exit slippage computed at exit time (hour + mark at close)">
             <span className="mtm-stat-key">Exit slip</span>
             <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
-              −{slipExitUsd.toFixed(2)}
+              −{exitSlipR.toFixed(2)}
             </span>
           </div>
         )}
-        {brokerageEntryUsd > 0 && (
+        {entryBrkR > 0 && (
           <div className="mtm-stat" title="Entry brokerage — taker fee + 18% GST. Deducted from Final P&L (not from chart curve).">
             <span className="mtm-stat-key">Entry fee</span>
             <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
-              −{brokerageEntryUsd.toFixed(2)}
+              −{entryBrkR.toFixed(2)}
             </span>
           </div>
         )}
-        {brokerageExitUsd > 0 && (
+        {exitBrkR > 0 && (
           <div className="mtm-stat" title="Exit brokerage — taker fee + 18% GST at exit mark price">
             <span className="mtm-stat-key">Exit fee</span>
             <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
-              −{brokerageExitUsd.toFixed(2)}
+              −{exitBrkR.toFixed(2)}
+            </span>
+          </div>
+        )}
+        {closedAtPeakNet !== undefined && peakSlipR > 0 && (
+          <div className="mtm-stat" title="Exit slippage recomputed at PEAK marks/time. Used by 'If closed @ peak' (different from end-of-sim Exit slip).">
+            <span className="mtm-stat-key">Exit slip @peak</span>
+            <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
+              −{peakSlipR.toFixed(2)}
+            </span>
+          </div>
+        )}
+        {closedAtPeakNet !== undefined && peakBrkR > 0 && (
+          <div className="mtm-stat" title="Exit brokerage recomputed at PEAK marks. Used by 'If closed @ peak' (different from end-of-sim Exit fee).">
+            <span className="mtm-stat-key">Exit fee @peak</span>
+            <span className="mtm-stat-val" style={{ color: 'var(--text3)' }}>
+              −{peakBrkR.toFixed(2)}
             </span>
           </div>
         )}
@@ -324,6 +367,116 @@ export const StrategyPanel: React.FC<Props> = ({
   const [buildMaxPnlExitData, setBuildMaxPnlExitData] = usePersistedState<{ leg: StrategyLeg; exitTs: number; exitMark: number; exitSpot: number }[]>('historical:buildMaxPnlExitData', []);
   const [buildAtmData, setBuildAtmData] = usePersistedState<AtmIvPoint[]>('historical:buildAtmData', []);
 
+  // Strangle analytics — context (M3 row) + calibration bucket fetched per snapshot.
+  const [analyticsCtx, setAnalyticsCtx] = useState<AnalyticsContext | null>(null);
+  const [analyticsCalib, setAnalyticsCalib] = useState<CalibrationBucket | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+  // Helper: build AnalyticsLeg[] from current legs + chain marks/Greeks
+  const buildAnalyticsLegs = useCallback((legsArr: StrategyLeg[]): AnalyticsLeg[] => {
+    const out: AnalyticsLeg[] = [];
+    for (const leg of legsArr) {
+      const row = chain.find(r => r.strike === leg.strike);
+      if (!row) continue;
+      const opt = leg.type === 'CE' ? row.call : row.put;
+      out.push({
+        type: leg.type,
+        side: leg.action,
+        strike: leg.strike,
+        qty: leg.qty,
+        mark: leg.entryPremium > 0 ? leg.entryPremium : opt.last_price,
+        iv: opt.iv_pct / 100,
+        delta: opt.delta,
+        gamma: opt.gamma,
+        vega: opt.vega,
+        theta: opt.theta,
+      });
+    }
+    return out;
+  }, [chain]);
+
+  // Fetch snapshot-context + calibration whenever we have a recognizable
+  // strangle in build mode. Skips when no legs / not a strangle / compare mode.
+  useEffect(() => {
+    if (compareMode || legs.length !== 2) {
+      setAnalyticsCtx(null);
+      setAnalyticsCalib(null);
+      return;
+    }
+    const aLegs = buildAnalyticsLegs(legs);
+    if (aLegs.length !== 2) {
+      setAnalyticsCtx(null);
+      return;
+    }
+    const ce = aLegs.find(l => l.type === 'CE');
+    const pe = aLegs.find(l => l.type === 'PE');
+    if (!ce || !pe || ce.side !== pe.side) {
+      setAnalyticsCtx(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    setAnalyticsLoading(true);
+    historicalApi.getSnapshotContext(simulationTimestamp, controller.signal)
+      .then(row => {
+        // Map M3 row into AnalyticsContext shape
+        const expiryDate = new Date(`${selectedExpiry}T12:00:00Z`);
+        const expiry_ts = Math.floor(expiryDate.getTime() / 1000);
+        const dte = Math.max(0, (expiry_ts - simulationTimestamp) / 86400);
+        const num = (k: string): number => {
+          const v = row[k];
+          return typeof v === 'number' ? v : NaN;
+        };
+        const ctx: AnalyticsContext = {
+          ts_unix: simulationTimestamp,
+          spot,
+          dte,
+          expiry_ts,
+          atm_iv_7d: num('atm_iv_7d'),
+          atm_iv_14d: num('atm_iv_14d'),
+          atm_iv_30d: num('atm_iv_30d'),
+          ivp_atm_7d_90d: num('ivp_atm_7d_90d'),
+          ivp_4h: num('ivp_4h'),
+          rv_7d: num('rv_7d'),
+          rv_14d: num('rv_14d'),
+          risk_reversal_25d: num('risk_reversal_25d'),
+          butterfly_25d: num('butterfly_25d'),
+          wing_atm_ratio: num('wing_atm_ratio'),
+          term_slope_7_30: num('term_slope_7_30'),
+          rvp_4h: num('rvp_4h'),
+          vrp_pct_7d: num('vrp_pct_7d'),
+          adx_14_4h: num('adx_14_4h'),
+          atr_pct_4h: num('atr_pct_4h'),
+          pcr_oi: num('pcr_oi'),
+          total_gex: num('total_gex'),
+          gex_regime: typeof row.gex_regime === 'string' ? row.gex_regime : '',
+          pattern: typeof row.pattern === 'string' ? row.pattern : 'Other',
+          expected_move_1sigma_7d: num('expected_move_1sigma_7d'),
+        };
+        setAnalyticsCtx(ctx);
+        // Trigger calibration fetch with derived bucket params
+        const targetDelta = (Math.abs(ce.delta) + Math.abs(pe.delta)) / 2;
+        return historicalApi.getCalibration(
+          dte, spot, targetDelta, Number.isFinite(ctx.ivp_atm_7d_90d) ? ctx.ivp_atm_7d_90d : 50,
+          controller.signal,
+        );
+      })
+      .then(calib => {
+        if (calib) setAnalyticsCalib(calib as CalibrationBucket);
+      })
+      .catch(err => {
+        if (err?.name !== 'AbortError') {
+          console.warn('analytics fetch failed:', err.message);
+          setAnalyticsCalib(null);
+        }
+      })
+      .finally(() => setAnalyticsLoading(false));
+
+    return () => controller.abort();
+  // chain is excluded — it changes too often; we use simulationTimestamp + legs as the trigger
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simulationTimestamp, selectedExpiry, spot, legs, compareMode, buildAnalyticsLegs]);
+
   // Compare mode MTM
   const [compareMtmData, setCompareMtmData] = useState<Map<string, MtmPoint[]>>(new Map());
   const [compareLoading, setCompareLoading] = useState(false);
@@ -339,7 +492,7 @@ export const StrategyPanel: React.FC<Props> = ({
   const [compareMarginExpanded, setCompareMarginExpanded] = useState<Set<string>>(new Set());
   const [legsExpanded, setLegsExpanded] = useState(true);
   const [compareLegsExpanded, setCompareLegsExpanded] = useState(true);
-  const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('5m');
+  const [timeframe, setTimeframe] = useState<'1m'|'5m'|'15m'|'30m'|'1h'>('1m');
   const [rvWindowDays, setRvWindowDays] = useState<7|14|30|60|90>(7);
   const [endDate, setEndDate] = useState(selectedExpiry);
   const [endTime, setEndTime] = useState('17:30');
@@ -490,8 +643,15 @@ export const StrategyPanel: React.FC<Props> = ({
 
   const getLegPnl = (leg: StrategyLeg) => {
     const dir = leg.action === 'BUY' ? 1 : -1;
-    const gross = (getCurrentPrice(leg) - leg.entryPremium) * leg.qty * dir * 0.001;
-    return gross - slipRoundTripUsd(leg);
+    const currentPrice = getCurrentPrice(leg);
+    const gross = (currentPrice - leg.entryPremium) * leg.qty * dir * 0.001;
+    // Header P&L deducts entry slip + exit slip @ sim time (matching the
+    // chart's stats convention). Previously used 2× entry slip which assumed
+    // exit conditions = entry conditions and produced a small mismatch when
+    // exit hour or mark differed from entry.
+    const entrySlipUsd = slipPerSide(leg) * leg.qty * 0.001;
+    const exitSlipUsd  = slipPerSideAt(leg, simulationTimestamp, currentPrice, spot) * leg.qty * 0.001;
+    return gross - entrySlipUsd - exitSlipUsd;
   };
 
   const totalPnl = legs.reduce((s, l) => s + getLegPnl(l), 0);
@@ -545,9 +705,9 @@ export const StrategyPanel: React.FC<Props> = ({
   const statsToRows = (stats: MtmStats, label?: string): Record<string, unknown>[] => {
     const prefix = label ? `[${label}] ` : '';
     const summary: Record<string, unknown>[] = [
-      { Metric: `${prefix}Max P&L`,     Value: +stats.maxPnl.toFixed(4),      Time: fmtTs(stats.maxPnlTime) },
-      { Metric: `${prefix}Min P&L`,     Value: +stats.minPnl.toFixed(4),      Time: fmtTs(stats.minPnlTime) },
-      { Metric: `${prefix}Final P&L`,   Value: +stats.finalPnl.toFixed(4),    Time: '' },
+      { Metric: `${prefix}Max MTM`,     Value: +stats.maxPnl.toFixed(4),      Time: fmtTs(stats.maxPnlTime) },
+      { Metric: `${prefix}Min MTM`,     Value: +stats.minPnl.toFixed(4),      Time: fmtTs(stats.minPnlTime) },
+      { Metric: `${prefix}Final MTM`,   Value: +stats.finalPnl.toFixed(4),    Time: '' },
       { Metric: `${prefix}Max Drawdown`,Value: +stats.maxDrawdown.toFixed(4),
         Time: `${fmtTs(stats.maxDdPeakTime)} → ${fmtTs(stats.maxDdTroughTime)}` },
       {},
@@ -631,6 +791,11 @@ export const StrategyPanel: React.FC<Props> = ({
         legLookup.set(leg.id, m);
       });
 
+      // Entry slip total — constant across all rows (uses leg.entryTimestamp)
+      const entrySlipTotal = slipEnabled
+        ? legs.reduce((s, l) => s + slipPerSide(l) * l.qty * 0.001, 0)
+        : 0;
+
       const mtmRows = buildMtmData.map(d => {
         const row: Record<string, unknown> = { 'Time (IST)': toIst(d.time) };
         // spot + rv from first leg that has data at this time (both are underlying-only)
@@ -669,10 +834,20 @@ export const StrategyPanel: React.FC<Props> = ({
         row['Net Gamma'] = +netGamma.toFixed(6);
         row['Net Theta'] = +netTheta.toFixed(4);
         row['Net Vega']  = +netVega.toFixed(4);
-        row['Est. Slippage Cost (USD)'] = slipEnabled
-          ? +(legs.reduce((s, l) => s + 2 * slipPerSide(l) * l.qty * 0.001, 0)).toFixed(4)
-          : 0;
-        row['P&L (USD, chart entry-side)'] = +d.pnl.toFixed(4);
+        // Entry slip is constant; exit slip recomputed per row using THIS row's
+        // mark + spot per leg (matches the chart's "entry slip + exit slip @ time" model).
+        let exitSlipRow = 0;
+        if (slipEnabled) {
+          legs.forEach(leg => {
+            const pt = legLookup.get(leg.id)?.get(d.time);
+            if (!pt || pt.close <= 0) return;
+            exitSlipRow += slipPerSideAt(leg, d.time, pt.close, pt.spot) * leg.qty * 0.001;
+          });
+        }
+        row['Entry Slip (USD)'] = +entrySlipTotal.toFixed(4);
+        row['Exit Slip (USD)']  = +exitSlipRow.toFixed(4);
+        row['MTM (chart, entry-slip in)']         = +d.pnl.toFixed(4);
+        row['Net P&L (entry+exit slip)']          = +(d.pnl - exitSlipRow).toFixed(4);
         return row;
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mtmRows), 'MTM P&L');
@@ -714,17 +889,24 @@ export const StrategyPanel: React.FC<Props> = ({
         const brkEntry = legs.reduce((acc, l) => acc + brokeragePerSide(l), 0);
         const brkExit  = buildExitLegData.reduce((acc, { leg, exitMark, exitSpot }) =>
           acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
+        const peakBrk  = buildMaxPnlExitData.reduce((acc, { leg, exitMark, exitSpot }) =>
+          acc + brokeragePerSideAt(leg, exitMark, exitSpot), 0);
         const grossFinal = s.finalPnl + slipBase;
         const sensRows = [0.5, 1.0, 1.5, 2.0, 3.0].map(m => {
           const eSlip = legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
           const xSlip = buildExitLegData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
             acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+          const peakSlip = buildMaxPnlExitData.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+            acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+          const isCurrent = Math.abs(m - slipMult) < 1e-6;
           return {
-            'Slip Mult': `${m.toFixed(1)}×`,
+            'Slip Mult': `${m.toFixed(1)}×${isCurrent ? '  ← CURRENT' : ''}`,
             'Entry Slip (USD)': +eSlip.toFixed(4),
             'Exit Slip (USD)': +xSlip.toFixed(4),
+            'Peak Exit Slip (USD)': +peakSlip.toFixed(4),
             'Entry Fee (USD)': +brkEntry.toFixed(4),
             'Exit Fee (USD)': +brkExit.toFixed(4),
+            'Peak Exit Fee (USD)': +peakBrk.toFixed(4),
             'Total Costs (USD)': +(eSlip + xSlip + brkEntry + brkExit).toFixed(4),
             'Final P&L (USD)': +(grossFinal - eSlip - xSlip - brkEntry - brkExit).toFixed(4),
           };
@@ -741,19 +923,19 @@ export const StrategyPanel: React.FC<Props> = ({
     setBuildLoading(true);
     setBuildError('');
     try {
-      const tradeTs = simulationTimestamp;
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
 
       // Fetch full contract lifetime (start_time=0) so IV/RV/Delta panes show end-to-end.
-      // MTM P&L is still anchored to tradeTs via mtmData (the `data` subset).
-      // `allData` extends through the contract's lifetime, NOT capped at endTs.
+      // Each leg's MTM data is anchored to its OWN entryTimestamp — legs added later
+      // in the simulation step in at their own entry time (chart shows incremental
+      // P&L as legs are added).
       const seriesResults = await Promise.all(
         legs.map(leg =>
           historicalApi.getChartDataWithGreeks(leg.expiry, leg.strike, leg.type, 0, timeframe, rvWindowDays)
             .then(res => ({
               leg,
               allData: res.data,
-              data:    res.data.filter(d => d.time >= tradeTs && d.time <= endTs),
+              data:    res.data.filter(d => d.time >= leg.entryTimestamp && d.time <= endTs),
             }))
         )
       );
@@ -768,8 +950,13 @@ export const StrategyPanel: React.FC<Props> = ({
       const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
       // Entry-side slip baked into every chart point (part of the realized fill price).
-      // Brokerage (entry + exit) and exit slip are shown only in the stats panel.
-      const entryDeduction = legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
+      // Per-leg slip "steps in" at each leg's entryTimestamp so the chart reflects
+      // incremental cost as legs are added during simulation.
+      const legSlipUsd = legs.map(leg => ({
+        entryTs: leg.entryTimestamp,
+        slipUsd: slipPerSide(leg) * leg.qty * 0.001,
+      }));
+      const slipUpTo = (t: number) => legSlipUsd.reduce((s, x) => x.entryTs <= t ? s + x.slipUsd : s, 0);
 
       const points: MtmPoint[] = sortedTimes.map(t => {
         let total = 0;
@@ -780,13 +967,13 @@ export const StrategyPanel: React.FC<Props> = ({
             total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
           }
         });
-        return { time: t, pnl: total - entryDeduction };
+        return { time: t, pnl: total - slipUpTo(t) };
       });
 
       const greeksMap = new Map<string, LegGreeksPoint[]>();
       seriesResults.forEach(({ leg, allData }) => {
         greeksMap.set(leg.id, allData.map(d => ({
-          time: d.time, spot: d.spot, iv: d.iv, rv: d.rv,
+          time: d.time, spot: d.spot, close: d.close, iv: d.iv, rv: d.rv,
           delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
         })));
       });
@@ -823,7 +1010,6 @@ export const StrategyPanel: React.FC<Props> = ({
     setCompareLoading(true);
     setCompareError('');
     try {
-      const tradeTs = simulationTimestamp;
       const endTs = Math.floor(new Date(`${endDate}T${endTime}:00+05:30`).getTime() / 1000);
       const map = new Map<string, MtmPoint[]>();
       const greeksMapOuter = new Map<string, Map<string, LegGreeksPoint[]>>();
@@ -837,7 +1023,7 @@ export const StrategyPanel: React.FC<Props> = ({
               .then(res => ({
                 leg,
                 allData: res.data,
-                data:    res.data.filter(d => d.time >= tradeTs && d.time <= endTs),
+                data:    res.data.filter(d => d.time >= leg.entryTimestamp && d.time <= endTs),
               }))
           )
         );
@@ -846,8 +1032,13 @@ export const StrategyPanel: React.FC<Props> = ({
         seriesResults.forEach(({ data }) => data.forEach(d => { timeSet.add(d.time); }));
         const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
-        // Entry slip only — brokerage (entry+exit) and exit slip belong to the stats panel.
-        const entryDeduction = strat.legs.reduce((s, leg) => s + slipPerSide(leg) * leg.qty * 0.001, 0);
+        // Per-leg slip steps in at each leg's entryTimestamp (legs added later in
+        // the simulation only start charging cost from when they were added).
+        const legSlipUsd = strat.legs.map(leg => ({
+          entryTs: leg.entryTimestamp,
+          slipUsd: slipPerSide(leg) * leg.qty * 0.001,
+        }));
+        const slipUpTo = (t: number) => legSlipUsd.reduce((s, x) => x.entryTs <= t ? s + x.slipUsd : s, 0);
 
         const points: MtmPoint[] = sortedTimes.map(t => {
           let total = 0;
@@ -858,13 +1049,13 @@ export const StrategyPanel: React.FC<Props> = ({
               total += (pts[pts.length - 1].close - leg.entryPremium) * leg.qty * dir * 0.001;
             }
           });
-          return { time: t, pnl: total - entryDeduction };
+          return { time: t, pnl: total - slipUpTo(t) };
         });
 
         const legGreeksMap = new Map<string, LegGreeksPoint[]>();
         seriesResults.forEach(({ leg, allData }) => {
           legGreeksMap.set(leg.id, allData.map(d => ({
-            time: d.time, spot: d.spot, iv: d.iv, rv: d.rv,
+            time: d.time, spot: d.spot, close: d.close, iv: d.iv, rv: d.rv,
             delta: d.delta, gamma: d.gamma, theta: d.theta, vega: d.vega,
           })));
         });
@@ -1389,7 +1580,7 @@ export const StrategyPanel: React.FC<Props> = ({
       }
     }
 
-    // Sheet 3b: Slippage Sensitivity — Final P&L per strategy at multipliers
+    // Sheet 3b: Slippage Sensitivity — per-strategy at multipliers (with peak-exit costs)
     if (slipEnabled && compareMtmData.size > 0) {
       const sensRows: Record<string, unknown>[] = [];
       const multipliers = [0.5, 1.0, 1.5, 2.0, 3.0];
@@ -1399,16 +1590,26 @@ export const StrategyPanel: React.FC<Props> = ({
         const st = computeMtmStats(pts);
         if (!st) return;
         const exitLegs = compareExitLegData.get(strat.id) ?? [];
+        const peakLegs = compareMaxPnlExitData.get(strat.id) ?? [];
         const baseEntry = strat.legs.reduce((acc, l) => acc + slipPerSide(l) * l.qty * 0.001, 0);
         const grossFinal = st.finalPnl + baseEntry;
-        const row: Record<string, unknown> = { 'Strategy': strat.label };
         multipliers.forEach(m => {
           const eSlip = strat.legs.reduce((acc, l) => acc + slipPerSide(l, m) * l.qty * 0.001, 0);
           const xSlip = exitLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
             acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
-          row[`Final P&L @ ${m.toFixed(1)}×`] = +(grossFinal - eSlip - xSlip).toFixed(4);
+          const peakSlip = peakLegs.reduce((acc, { leg, exitTs, exitMark, exitSpot }) =>
+            acc + slipPerSideAt(leg, exitTs, exitMark, exitSpot, m) * leg.qty * 0.001, 0);
+          const isCurrent = Math.abs(m - slipMult) < 1e-6;
+          sensRows.push({
+            'Strategy':              strat.label,
+            'Slip Mult':             `${m.toFixed(1)}×${isCurrent ? '  ← CURRENT' : ''}`,
+            'Entry Slip (USD)':      +eSlip.toFixed(4),
+            'Exit Slip (USD)':       +xSlip.toFixed(4),
+            'Peak Exit Slip (USD)':  +peakSlip.toFixed(4),
+            'Final P&L (USD)':       +(grossFinal - eSlip - xSlip).toFixed(4),
+          });
         });
-        sensRows.push(row);
+        sensRows.push({}); // blank row between strategies
       });
       if (sensRows.length) {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sensRows), 'Slippage Sensitivity');
@@ -1507,7 +1708,22 @@ export const StrategyPanel: React.FC<Props> = ({
           row['Net Gamma'] = +netGamma.toFixed(6);
           row['Net Theta'] = +netTheta.toFixed(4);
           row['Net Vega']  = +netVega.toFixed(4);
-          row['P&L (USD)'] = +d.pnl.toFixed(4);
+          // Entry+exit slip split (same model as build mode)
+          const entrySlipTotal = slipEnabled
+            ? strat.legs.reduce((s, l) => s + slipPerSide(l) * l.qty * 0.001, 0)
+            : 0;
+          let exitSlipRow = 0;
+          if (slipEnabled) {
+            strat.legs.forEach(leg => {
+              const pt = legLookup.get(leg.id)?.get(d.time);
+              if (!pt || pt.close <= 0) return;
+              exitSlipRow += slipPerSideAt(leg, d.time, pt.close, pt.spot) * leg.qty * 0.001;
+            });
+          }
+          row['Entry Slip (USD)'] = +entrySlipTotal.toFixed(4);
+          row['Exit Slip (USD)']  = +exitSlipRow.toFixed(4);
+          row['MTM (chart, entry-slip in)'] = +d.pnl.toFixed(4);
+          row['Net P&L (entry+exit slip)']  = +(d.pnl - exitSlipRow).toFixed(4);
           return row;
         });
         // Sheet name max 31 chars
@@ -1702,7 +1918,9 @@ export const StrategyPanel: React.FC<Props> = ({
                           key={s.id} stats={stats} color={STRAT_COLORS[i % STRAT_COLORS.length]}
                           slipEntryUsd={slipEntry} slipExitUsd={slipExit}
                           brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
-                          maxExitPnl={maxExitPnl} sensitivity={sens}
+                          maxExitPnl={maxExitPnl}
+                          peakExitSlipUsd={peakExitSlip} peakExitBrkUsd={peakExitBrk}
+                          sensitivity={sens}
                         />
                       );
                     })}
@@ -2086,8 +2304,16 @@ export const StrategyPanel: React.FC<Props> = ({
                       return <MtmStatsPanel stats={s}
                         slipEntryUsd={slipEntry} slipExitUsd={slipExit}
                         brokerageEntryUsd={brkEntry} brokerageExitUsd={brkExit}
-                        maxExitPnl={maxExitPnl} sensitivity={sens} />;
+                        maxExitPnl={maxExitPnl}
+                        peakExitSlipUsd={peakExitSlip} peakExitBrkUsd={peakExitBrk}
+                        sensitivity={sens} />;
                     })()}
+                    <StrangleAnalyticsPanel
+                      legs={buildAnalyticsLegs(legs)}
+                      ctx={analyticsCtx}
+                      calibration={analyticsCalib}
+                      loading={analyticsLoading}
+                    />
                   </div>
                 )}
               </>
