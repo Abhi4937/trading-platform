@@ -21,6 +21,7 @@ import pandas as pd
 CONTRACT_SIZE_BTC = 0.001
 
 CALIBRATION_PATH = "/home/abhis/btc-data/derived/calibration.parquet"
+CALIBRATION_V2_PATH = "/home/abhis/btc-data/derived/calibration_v2.parquet"
 CALIBRATION_UNIVERSAL_PATH = "/home/abhis/btc-data/derived/calibration_universal.parquet"
 FULL_ENRICHED_5M_PATH = "/home/abhis/btc-data/derived/full_enriched_5m.parquet"
 
@@ -81,12 +82,23 @@ def _label_delta(v: float) -> str:
 
 
 def _load_calibration():
-    """Load and cache the calibration parquets. Idempotent."""
+    """Load and cache the calibration parquets. Idempotent.
+
+    Loads `calibration_v2.parquet` (M4-enriched) when present — that file is
+    a left-join superset of v1's columns plus pattern_winrate/z_winners stats.
+    Falls back to `calibration.parquet` (v1) when v2 doesn't exist.
+    """
     global _calibration_df, _universal_df, _calibration_load_attempted
     if _calibration_load_attempted:
         return
     _calibration_load_attempted = True
-    if os.path.exists(CALIBRATION_PATH):
+    # Prefer v2 if present
+    if os.path.exists(CALIBRATION_V2_PATH):
+        try:
+            _calibration_df = pd.read_parquet(CALIBRATION_V2_PATH)
+        except Exception:
+            _calibration_df = None
+    if _calibration_df is None and os.path.exists(CALIBRATION_PATH):
         try:
             _calibration_df = pd.read_parquet(CALIBRATION_PATH)
         except Exception:
@@ -114,7 +126,7 @@ def lookup_calibration(dte: float, spot: float, target_delta: float, ivp: float)
                           & (_calibration_df["ivp_bucket"] == ivp_b)]
     if not hit.empty and int(hit.iloc[0]["n_samples"]) >= 30:
         row = hit.iloc[0].to_dict()
-        return {
+        out = {
             "source": "specific_bucket",
             "credit_pct_median": float(row["credit_pct_median"]),
             "credit_pct_mean": float(row["credit_pct_mean"]),
@@ -124,6 +136,16 @@ def lookup_calibration(dte: float, spot: float, target_delta: float, ivp: float)
             "structural_baseline": float(row["structural_baseline"])
                 if pd.notna(row["structural_baseline"]) else None,
         }
+        # v2 columns (present only when calibration_v2.parquet was loaded).
+        # `pattern_winrate` is JSON-encoded {pattern: winrate}; lookup happens
+        # at quality-score time using the trade's actual pattern.
+        if "z_winners_mean" in row and pd.notna(row["z_winners_mean"]):
+            out["z_winners_mean"] = float(row["z_winners_mean"])
+            out["z_winners_std"] = float(row["z_winners_std"]) if pd.notna(row.get("z_winners_std")) else 0.0
+            out["overall_winrate"] = float(row["overall_winrate"]) if pd.notna(row.get("overall_winrate")) else None
+            out["pattern_winrate"] = row.get("pattern_winrate")  # JSON string, parsed at use site
+            out["n_trades"] = int(row["n_trades"]) if pd.notna(row.get("n_trades")) else None
+        return out
 
     # Universal fallback
     if _universal_df is None:
@@ -378,12 +400,41 @@ def compute_trade_analytics(
     quality = None
     size_band = None
     quality_source: Optional[str] = None
-    if z_credit_pct_pct is not None:
-        # Calibrated quality (v1): blend bucket-z and IVP.
+    # v2 path: requires calibration row to carry pattern_winrate + z_winners stats
+    # (set when calibration_v2.parquet is present). Formula matches the spec:
+    #   0.25·z_all_pct + 0.30·z_winners_pct + 0.30·IVP + 0.15·pattern_winrate(%).
+    if (calib is not None and z_credit_pct_pct is not None
+            and calib.get("z_winners_mean") is not None
+            and calib.get("z_winners_std") is not None
+            and calib.get("z_winners_std", 0.0) > 0):
+        try:
+            z_winners = (credit_pct - calib["z_winners_mean"]) / calib["z_winners_std"]
+            z_winners_pct = _z_to_pct(z_winners)
+            # Pull pattern_winrate for THIS trade's pattern (JSON map per bucket).
+            import json as _json
+            pat_map = calib.get("pattern_winrate") or "{}"
+            if isinstance(pat_map, str):
+                try:
+                    pat_dict = _json.loads(pat_map)
+                except Exception:
+                    pat_dict = {}
+            else:
+                pat_dict = dict(pat_map)
+            pattern_wr = float(pat_dict.get(str(pattern), pat_dict.get("Other", 0.5)))
+            # Blend (all in 0..100 scale; pattern_wr is 0..1 so ×100).
+            quality = (0.25 * z_credit_pct_pct
+                       + 0.30 * z_winners_pct
+                       + 0.30 * float(ivp)
+                       + 0.15 * pattern_wr * 100.0)
+            quality_source = "calibrated_v2"
+        except Exception:
+            quality = None
+    if quality is None and z_credit_pct_pct is not None:
+        # v1 calibrated fallback: blend bucket-z and IVP.
         quality = 0.40 * z_credit_pct_pct + 0.60 * float(ivp)
         quality_source = "calibrated"
-    elif math.isfinite(credit_pct) and dte > 0:
-        # Fallback when calibration parquet not yet built. Uses IVP +
+    if quality is None and math.isfinite(credit_pct) and dte > 0:
+        # Last-resort fallback when calibration parquet not yet built. Uses IVP +
         # √DTE-normalized credit_pct as a rough richness proxy. Map cpn → 0-100
         # via cpn * 10000 (e.g. 0.5%/√DTE = 50, 1%/√DTE = 100, clamped). Same
         # band thresholds as calibrated path so backtest/UI behaviour is
