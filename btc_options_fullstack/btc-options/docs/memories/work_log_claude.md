@@ -1,5 +1,45 @@
 # Claude's Work Log
 
+## Session 10 (2026-05-03) — M2/M3/M5v1 backfill + M4 batch backtester + M5 v2 enrichment
+
+### Pipeline data built
+- M2 backfill: 859 expiries / 4.6h (with per-expiry checkpoint to survive container restarts). Output: 4 grids 49–104 MB.
+- M3 backfill: 30s. Output: 4 grids 65–367 MB, 316 cols.
+- M5 v1 calibration: 25 min. 600 buckets, 30 universal.
+- M4 batch backtester: 6.4h. 5,274 trades, 49,475 path snapshots. Win rate 58.2%.
+- M5 v2 enrichment: 2.1s. 600 buckets v2 (450 with M4 data).
+
+### Code shipped
+- `backend/app/services/trade_simulator.py` (NEW, ~430 LOC) — extracted `simulate_trade_path()` from `_simulate_day`. Reusable bar-walk + per-leg SL + cost + margin + optional path snapshots. Used by both M4 and (planned) future per-job refactor.
+- `backend/app/analytics/m4_batch_backtester.py` (NEW, ~430 LOC) — Friday 23:00 IST × all live expiries × 6 deltas × 100 lots/leg. Exit Sat 10:00 IST or earlier on per-leg 100% loss. Outputs `m4_trades.parquet` + `m4_paths.parquet`.
+- `backend/app/analytics/backfill_attribution.py` (NEW, ~155 LOC) — M5 v2 enricher. Per-bucket `pattern_winrate` (JSON), `z_winners_mean/std`, `expectancy_per_credit_pct`, `sl_hit_rate`. Writes `calibration_v2.parquet` as left-join superset of v1.
+- `backend/tests/test_trade_simulator.py` (NEW, 7 tests).
+- `backend/tests/test_backfill_attribution.py` (NEW, 4 tests).
+- `backend/app/analytics/enrich_options.py` — M2 per-expiry checkpoint (atomic .tmp+rename, `--clear-checkpoint` flag). Allowed M2 to recover from a SessionStart-hook-triggered kill at 53% without losing work.
+- `backend/app/services/strangle_analytics.py` — auto-detect v2 calibration. `_load_calibration` prefers `calibration_v2.parquet`. `lookup_calibration` surfaces v2 cols. `compute_trade_analytics` adds v2 quality formula path (`0.25·z_all + 0.30·z_winners + 0.30·IVP + 0.15·pattern_winrate`) before falling back to v1, then to fallback. `quality_source` reflects the path.
+- `frontend/src/types/backtest.ts` — `quality_source` enum gains `'calibrated_v2'`.
+
+### Verified end-to-end
+After backend rebuild: calibration loaded from V2 (38 cols), `lookup_calibration` returns v2 fields including `pattern_winrate` and `n_trades`, `compute_trade_analytics` returns `quality_source: 'calibrated_v2'`. Live recorder running and writing 488 symbols × MARK + OI to `data_live/` (507 files within 35s of restart).
+
+### Win-rate observations from M4 (cross-trade pattern detection working)
+- By delta: 0.05Δ=59%, 0.10Δ=60%, 0.15Δ=61%, 0.25Δ=60%, 0.30Δ=58%, 0.50Δ=50%. Sweet spot 0.10–0.25Δ; ATM has highest gamma risk.
+- By DTE: 3–7d=76% (sweet), 7–14d=64%, 0–3d=61%, 14–30d=54%, 30–60d=37%.
+- 0.05Δ wings have negative avg P&L due to cost/credit ratio — confirms "selling tiny wings is bad economics".
+
+### Pending / next session
+- LiveSignal page (separate plan): hybrid backend (slow cols from M3 + fast from ticker_store) + new dashboard. ~1000 LOC.
+- Refactor `_simulate_day` to call `simulate_trade_path()` (deferred from plan step 1; needs equivalence test first).
+- `/historical/calibration` endpoint hasn't been updated to surface v2 cols in the response shape; backend `compute_trade_analytics` uses v2 internally so trade rows correct.
+
+### Commits
+- `58d67c2` — M2 per-expiry checkpoint
+- `847da38` — M4 + M5 v2 + analytics auto-detect
+- `bd05f94` — backfill_attribution unit tests
+- `d9e3772` — frontend `calibrated_v2` enum
+
+---
+
 ## Session 9 (2026-05-02 PM) — Live WS recorder + nightly merge
 
 ### What was done

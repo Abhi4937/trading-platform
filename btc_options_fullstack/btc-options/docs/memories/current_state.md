@@ -1,36 +1,38 @@
 # Current Project State
 
 ## Active Projects
-- **Short-strangle backtest stack (M1-M3 + analytics layer + live recorder
-  done 2026-05-02; M4 + LiveSignal pending):** Plan at
+- **Short-strangle backtest stack (M1–M5v2 + live recorder all live as of
+  2026-05-03; LiveSignal page + M6 dashboard pending):** Plan at
   `/home/abhis/.claude/plans/sparkling-pondering-plum.md`, spec at
   `UI ss/new feature/SHORT_STRANGLE_INDICATORS_SPEC.md`.
-  - **M1** (committed): `enrich_spot.py` →
-    `/home/abhis/btc-data/derived/spot_enriched.parquet` (246k 5m rows × 246
-    cols, ~150 MB).
-  - **M2** (code complete, 15 tests passing, **backfill running in background
-    ~225/849 done, ETA ~4h** at session pause): `enrich_options.py` → 4 grids.
-  - **M3** (code complete, 13 tests passing, awaiting M2 backfill for E2E):
-    `enrich_derived.py` joins M1+M2, adds VRP family / expected move /
-    vol-of-vol / pattern A/B/C/D/Other. Outputs 4 grids.
-  - **Strangle analytics layer** (committed `7377822`): per-trade ratios,
-    decomposition, z-scores, quality_score baked into `BacktestTrade`;
-    `<StrangleAnalyticsPanel />` mounts in Strategy Builder + Backtest
-    Dashboard. M5 calibration parquet (`calibration_builder.py`) built
-    from chain snapshots (NOT trade outcomes) — DTE × spot × Δ × IVP buckets +
-    universal fallback curve. **Untested E2E** because calibration parquet
-    not yet built (needs M3 done first).
-  - **Live WS recorder + nightly merge** (code complete this session, NOT
-    yet running): see HANDOFF for design. Key files
-    `backend/app/services/{live_recorder,merge_live_to_main}.py`. Wired into
-    backend lifespan. Backend restart blocked on M2 finishing.
-  - **M4 batch backtester (`strangle_backtest.py`)** — original spec, ~1500
-    LOC pending. Walks history at hourly cadence, generates synthetic
-    strangles, hourly path snapshots, 110-col per-trade output.
-  - **M5 backfill_attribution.py** — ~400 LOC pending. Reads M4 output,
-    computes personal mean/std/winrate per (pattern × bucket) from
-    simulated outcomes. Replaces v1 quality_score (which drops the
-    `pattern_winrate` term) with the full v2 formula.
+  - **M1** ✅ — `spot_enriched.parquet` (246k 5m rows × 246 cols, 151 MB).
+  - **M2** ✅ — 859 expiries backfilled (4.6h with per-expiry checkpoint).
+    Output: 4 grids (`options_enriched_{1m,5m,15m,30m}.parquet`).
+  - **M3** ✅ — joined backfill (30s). Output: 4 grids
+    (`full_enriched_{1m,5m,15m,30m}.parquet`, 316 cols).
+  - **M5 v1 calibration** ✅ — `calibration_raw.parquet` (806k snapshot rows),
+    `calibration.parquet` (600 buckets), `calibration_universal.parquet`.
+    Captures entry-side richness only.
+  - **M4 batch backtester** ✅ NEW (`m4_batch_backtester.py`, ~430 LOC).
+    Friday 23:00 IST × 858 live expiries × 6 deltas × 100 lots/leg, exit
+    Sat 10:00 IST or earlier on per-leg 100% loss SL. Full historical
+    backfill: **5,274 trades, 49,475 hourly path snapshots, win rate 58.2%**.
+    Outputs `m4_trades.parquet` + `m4_paths.parquet`. Reuses extracted
+    `simulate_trade_path()` from `trade_simulator.py` (also new).
+  - **M5 v2 enrichment** ✅ NEW (`backfill_attribution.py`, ~155 LOC).
+    Aggregates M4 outcomes per (DTE × spot × Δ × IVP) bucket; computes
+    `pattern_winrate` (per pattern, JSON), `z_winners_mean/std`, expectancy,
+    sl_hit_rate. Writes `calibration_v2.parquet` as left-join superset of v1
+    (450/600 buckets have M4 data).
+  - **Strangle analytics layer** ✅ — auto-detects v2 calibration
+    (`compute_trade_analytics` returns `quality_source='calibrated_v2'` when
+    available, formula `0.25·z_all + 0.30·z_winners + 0.30·IVP +
+    0.15·pattern_winrate`). Falls back to v1 (`'calibrated'`), then to
+    `'fallback_ivp_credit'`.
+  - **Live WS recorder + nightly merge** ✅ NOW RUNNING. Backend rebuilt
+    today, recorder subscribed 488 symbols (MARK + OI), 507 parquet files
+    written to `data_live/` within 35s of restart. Nightly merge scheduled
+    background loop (first run after 20h).
   - **LiveSignal page** — design locked, NOT built. Hybrid read: latest
     M3 row for slow-moving cols + `ticker_store` live chain for fast-moving
     values. Reuses existing `<StrangleAnalyticsPanel />`. ~1000 LOC.
