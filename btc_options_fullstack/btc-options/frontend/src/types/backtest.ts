@@ -221,7 +221,10 @@ export interface BacktestTrade {
   calibration_source?: 'specific_bucket' | 'universal_fallback' | null;
   // Set when calibration parquet not built — quality_score uses IVP+credit
   // fallback so the column isn't blank.
-  quality_source?: 'calibrated' | 'fallback_ivp_credit' | null;
+  // 'calibrated_v2' set when M4-enriched calibration is loaded (uses
+  // pattern_winrate + z_winners stats); 'calibrated' = v1 bucket only;
+  // 'fallback_ivp_credit' = no calibration parquet at all.
+  quality_source?: 'calibrated_v2' | 'calibrated' | 'fallback_ivp_credit' | null;
   // Wide M1+M2+M3 snapshot at trade entry. Sparse — any col not in the
   // current M3 schema is silently absent. Used by MarketContextPanel in
   // the trade-log detail panel.
