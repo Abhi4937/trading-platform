@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results
 
 # Fresh ID per process — frontend uses this to detect a backend restart and
 # wipe its auto-persisted UI state on the next page load.
@@ -139,3 +139,6 @@ app.include_router(logs.router,     prefix="/api/v1", tags=["Logs"])
 app.include_router(ws.router,       tags=["WebSocket"])
 app.include_router(historical.router, prefix="/api/v1/historical", tags=["Historical"])
 app.include_router(backtest.router,   prefix="/api/v1/historical", tags=["Backtest"])
+app.include_router(live_signal.router, prefix="/api/v1/live-signal", tags=["Live Signal"])
+app.include_router(m4_results.router,  prefix="/api/v1/m4",           tags=["M4 Results"])
+app.include_router(m7_results.router,  prefix="/api/v1/m7",           tags=["M7 Sweep"])

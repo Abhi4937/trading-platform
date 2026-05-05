@@ -1,5 +1,331 @@
 # Claude's Work Log
 
+## Session 13 (2026-05-05) — M7 Friday→Saturday strangle/straddle sweep
+
+### Headline
+Built a new "M7" pipeline + dashboard that sweeps every (entry hour × expiry ×
+delta target) for short strangles/straddles on every Friday→Saturday window in
+the Dec 2023 → present dataset. The simulator records the full 1m path (no exit
+logic) so any exit rule (fixed time, % of max profit, % of margin, premium SL %,
+or anything else) is derived as a query against the saved path. Designed for
+"simulate once, query forever".
+
+### What was built
+- `backend/app/analytics/m7_batch_backtester.py` (~660 LOC) — the new sweep
+  backtester. Strike picker: same-strike for Δ=0.50 (true straddle), closest-
+  from-below for Δ<0.50. Walks 1m bars from entry → Sat 17:30 IST, records
+  rich path rows (35 cols incl. spot OHLCV+OI, leg marks/IV/OI, ATM IV at this
+  minute, all greeks per leg, net greeks, theta/vega ratio, gross PnL,
+  pnl_pct_of_credit, pnl_pct_of_margin). Atomic writes (incremental every
+  5 fridays) to `m7_trades.parquet` + `m7_paths/friday_date=*/part.parquet`.
+- `scripts/backfill_m7_enriched.py` — joins m7_trades with calibration_v2 on
+  bucket keys to add fair_credit_at_ivp, structural_credit_pct,
+  iv_regime_premium_pct, excess_over_fair_pct, pattern_winrate, etc.
+- `backend/app/api/m7_results.py` (~430 LOC) — new API under /api/v1/m7/.
+  Endpoints: /summary, /trades, /path, /aggregate (with optional exit_rule),
+  /heatmap, /best_combo, /iv_band_summary, /cost_breakdown, /meta.
+  Exit rule derivation done via DuckDB SQL: find first-trigger ts per trade,
+  fetch P&L at that ts, hard cap = Sat 17:30 IST.
+- `frontend/src/types/m7.ts` + `services/m7_api.ts` — typed clients.
+- `frontend/src/pages/M7SweepDashboard.tsx` + `components/m7/` (7 components):
+  FilterBar with exit-rule inputs, HeadlineStrip, AggregateHeatmap (reusable),
+  IvBandSummaryTable (the "answer" headline), BestComboTable, TradeLogTable,
+  TradePathChart (1m path viewer with PnL/Premium/IV/Δ tabs).
+- New "M7 Sweep" mode added to App.tsx (6th mode).
+- Tests: 22 in test_m7_batch.py + 9 in test_m7_api.py = 31 total, all passing.
+
+### Verified end-to-end (with partial backfill data, 5 fridays = 988 trades)
+- 59% win rate at gross P&L
+- 30% max-profit rule triggered on 299/988 trades
+- Cost decomposition matches `costs.py` to the cent (entry_slip_call=$0.485,
+  entry_brk_call=$0.430 verified by hand)
+- Path endpoint returns 1230 1m rows for a full Fri 21:00 → Sat 17:30 trade
+
+### Known data limitations
+- Spot OI / volume are NaN in the historical spot parquet (only the live
+  recorder populates them); code defaults to 0 and continues.
+- Option OI is 0 for any history pre-dating the live recorder.
+
+### Files added (untracked, ready to commit)
+- `backend/app/analytics/m7_batch_backtester.py`
+- `backend/app/api/m7_results.py`
+- `backend/tests/test_m7_batch.py`
+- `backend/tests/test_m7_api.py`
+- `scripts/backfill_m7_enriched.py`
+- `frontend/src/pages/M7SweepDashboard.tsx`
+- `frontend/src/services/m7_api.ts`
+- `frontend/src/types/m7.ts`
+- `frontend/src/components/m7/M7AggregateHeatmap.tsx`
+- `frontend/src/components/m7/M7BestComboTable.tsx`
+- `frontend/src/components/m7/M7FilterBar.tsx`
+- `frontend/src/components/m7/M7HeadlineStrip.tsx`
+- `frontend/src/components/m7/M7IvBandSummaryTable.tsx`
+- `frontend/src/components/m7/M7TradeLogTable.tsx`
+- `frontend/src/components/m7/M7TradePathChart.tsx`
+
+### Files modified
+- `backend/app/main.py` — mounts /api/v1/m7 router
+- `frontend/src/App.tsx` — adds M7_SWEEP mode + nav button
+
+### Long-running backfill
+Full backfill is launched in the background (PID at /tmp/m7_backtest.pid,
+log at /tmp/m7_backtest.log). 121 Fridays × ~7 expiries × 7 entries × 8 deltas.
+~3 min/Friday → ETA ~5h. Trades-parquet written incrementally every 5 fridays
+so the dashboard shows progressively more data. After completion, run
+`python3 scripts/backfill_m7_enriched.py` to add the calibration_v2 join
+columns.
+
+---
+
+## Session 12 (2026-05-04) — M6 Attribution + summary strip extensions + IV bands
+
+### Headline
+Added a full attribution layer to the M6 dashboard so the user can see
+*per-Friday which expiry won and why*, plus *per-contract winners-vs-losers
+across 31 indicators*. Also extended the contract summary strip with
+Avg Win / Avg Loss / Best Net / Worst Net / Best MFE / Worst MAE columns.
+Split the 80-100 IV band into 80-90, 90-100, and a (always-empty) 100+
+band so the high-IV regimes are visible at granularity.
+
+### Files shipped
+- **NEW: `scripts/backfill_m4_enriched.py`** (~150 LOC) — joins
+  `m4_trades.parquet` with `calibration_v2.parquet` on
+  (`dte_bucket`,`spot_bucket`,`delta_target`,`ivp_bucket`) to add:
+  - `fair_credit_at_ivp`, `structural_credit_pct`,
+    `iv_regime_premium_pct`, `excess_over_fair_pct`
+  - per-leg `theta`/`vega`/`gamma` recomputed via
+    `app.core.greeks.compute_greeks` (T = `dte_days/365`, r = 0)
+  - `theta_per_vega_{call,put,combined}` ratios
+  Output: `/home/abhis/btc-data/derived/m4_trades_enriched.parquet`
+  (5,274 rows × 87 cols, 1.48 MB). 4,548 trades matched a calibration
+  bucket; 726 left null (ivp/dte = nan). excess_over_fair_pct mean
+  +0.0026 (near zero — sanity gate). theta_per_vega_combined median
+  3.05 (positive — short strangles get more decay than vol-risk).
+
+  **How to run:** `docker exec -i docker-backend-1 python3 - <
+  scripts/backfill_m4_enriched.py` (scripts/ is not container-mounted,
+  pipe via stdin).
+
+- **MOD: `backend/app/api/m4_results.py`**
+  - `_load_trades` now prefers `m4_trades_enriched.parquet` over
+    plain `m4_trades.parquet`
+  - 3 new endpoints (described above in HANDOFF.md)
+  - `_IV_BANDS` extended from `[…,80,100,999]` to `[…,80,90,100,999]`
+    so the dashboard can show 80-90, 90-100, 100+ separately
+  - `/contract_type_summary` returns 6 new fields:
+    `n_wins`, `n_losses`, `avg_net_win`, `avg_net_loss`,
+    `best_net_pnl`, `worst_net_pnl`, `best_max_mtm`, `worst_min_mtm`
+
+- **MOD: `frontend/src/services/m4_api.ts`** — added types
+  `IndicatorMeta`, `IndicatorComparison`, `WinnersVsLosersRow`,
+  `FridayTradeSummary`, `DecidingIndicator`, `PerFridayBestRow`,
+  `WinFrequencyRow` and 3 fetch helpers
+  (`fetchWinnersVsLosers`, `fetchPerFridayBest`, `fetchWinFrequency`).
+  Extended `ContractTypeSummaryRow` with the new fields.
+
+- **NEW: `frontend/src/components/m4/M4WinFrequency.tsx`** (~120 LOC)
+- **NEW: `frontend/src/components/m4/M4WinnersVsLosers.tsx`** (~250 LOC)
+  — collapsible per-contract tables grouping 31 indicators into 7
+  categories (IV / RV-VRP / Skew/Term / Spot regime / GEX-Flow /
+  Premium / Greeks). Discriminating rows highlighted (|gap| > 0.5σ).
+- **NEW: `frontend/src/components/m4/M4PerFridayBest.tsx`** (~200 LOC)
+  — sortable 121-row table with date / winner / net / runner-up /
+  loser / top-3 deciding indicators per Friday.
+
+- **MOD: `frontend/src/pages/M4ResultsDashboard.tsx`** — added new
+  `<AttributionSection />` mounting the 3 components below the
+  existing expiry grid; Δ chip selector lifted via
+  `usePersistedState('m6:attr_delta', 0.30)`.
+
+- **MOD: `frontend/src/components/m4/M4ExpiryGridTable.tsx`** —
+  - Removed the search-text input from the expiry-class filter (per
+    user feedback "search box not working"); kept just clickable
+    chips that toggle the entire class on/off.
+  - Added 6 new columns to the contract summary strip:
+    `Avg Win | Avg Loss | Best Net | Worst Net | Best MFE | Worst MAE`
+    with proper coloring + tooltips that show `n_wins`/`n_losses`
+    counts.
+  - Updated footer band list to mention `80-90, 90-100, 100+`.
+
+### Backfill verification (one-time run output)
+```
+reading m4_trades.parquet      → 5274 rows × 74 cols
+reading calibration_v2.parquet → 600 buckets × 38 cols
+  → 4548/5274 trades matched a calibration bucket
+  excess_over_fair_pct  mean=0.002562  median=0.001092
+  theta_per_vega_combined median=3.0462
+writing m4_trades_enriched.parquet
+  → 5274 rows × 87 cols, 1.48 MB
+```
+
+### Sanity checks ran via curl post-deploy
+- `/win_frequency?delta=0.30` → 9 contract rows summing to 121 wins ✓
+- `/per_friday_best?delta=0.50` row for `2025-03-07`:
+  winner=`current` $169.00, runner_up=`next` $160.48, loser=`bimonthly`
+  $39.04, top decider = `theta_per_vega_put` (7.19σ) ✓
+- `/winners_vs_losers?delta=0.30` returns 31 indicators × 9 rows.
+  At Δ=0.30 the workhorse contracts (current/next/next_to_next/weekly/
+  biweekly) show **0 discriminating indicators** at 0.5σ — the alpha is
+  in cross-contract selection, not single-indicator filtering.
+- `/contract_type_summary` now returns Avg Win, Avg Loss, Best/Worst
+  Net, Best MFE, Worst MAE for each of the 9 contracts.
+- `/expiry_grid?min_n=1` returns `iv_bands = ['<30','30-40','40-50',
+  '50-60','60-70','70-80','80-90','90-100','100+']`. Cells:
+  `80-90: 12 cells / 12 trades`, `90-100: 6 cells / 6 trades`,
+  `100+: 0 cells` ✓
+
+### Notable per-contract findings (now visible at-a-glance in the strip)
+| Contract     | Avg Win | Avg Loss | Best | Worst   | W:L     |
+|---           |---      |---       |---   |---      |---      |
+| current      | +$26.15 | -$12.30  | +169 | -$58    | 354:372 |
+| next         | +$24.70 | -$12.99  | +160 | -$81    | 421:293 |
+| next_to_next | +$22.25 | -$21.49  | +143 | -$102   | 546:168 |
+| weekly       | +$12.70 | -$17.15  | +119 | -$103   | 545:169 |
+| biweekly     | +$11.14 | -$12.97  |  +84 | -$250   | 458:256 |
+| three_week   | +$10.17 | -$11.73  |  +61 | -$69    | 305:247 |
+| monthly      | +$10.78 | -$12.26  |  +71 | -$224   | 244:242 |
+| **bimonthly**| +$11.36 | **-$42.71** | +69 | **-$1,143** | 188:430 |
+| quarterly    | +$8.29  | -$17.36  |  +14 | -$31    | 9:27    |
+
+Bimonthly's avg loss is 3-4× any other contract; tail loss -$1,143.
+Workhorse contracts capped at -$103 by the 100% per-leg SL.
+
+### Verification done in browser
+Frontend + backend rebuilt and restarted. M6 page renders all new
+sections; Δ chip selector responds; new IV-band rows appear; summary
+strip shows all 6 new columns. No TypeScript errors in any new files.
+
+### Known gaps carried into next session
+- **Per-trade IV-premium fields not yet shown in per_friday_best
+  deciding indicators by default.** They are sent when present but
+  the trade itself may have null `fair_credit_at_ivp` if its
+  ivp_bucket was 'nan' at entry (~14% of trades).
+- **Discriminating threshold is fixed at 0.5σ** — too strict for
+  workhorse contracts (0 discriminators at Δ=0.30 across 5 of them).
+  Possible follow-up: surface a chip selector on the frontend so user
+  can dial it down to 0.3σ or 0.25σ, or replace with Cohen's d / t-test.
+- **`pattern` and `gex_regime` are categorical**, not in the 31
+  numeric-indicator comparison. Could add a separate "regime
+  distribution per outcome" panel later.
+- **Per-Friday `deciding_indicators` are correlations only**, not
+  causal — flagged in the panel footer but worth saying out loud.
+
+---
+
+## Session 11b (2026-05-03 evening) — M6 expiry × IV × Δ grid table
+
+### What shipped (additive on top of Session 11)
+- **Backend**: `backend/app/api/m4_results.py` — added two endpoints:
+  - `GET /api/v1/m4/expiry_grid?contract_types=...&min_n=N` — returns
+    flat rows of (contract_type × IV band × Δ) cells with: n, win_rate,
+    sl_rate, max/min MTM (avg + extreme), gross/net P&L (avg + sum),
+    slippage and brokerage round-trip avg + 50/50 per-side estimate,
+    margin avg, credit_pct avg, this-expiry-ATM-IV avg.
+  - `GET /api/v1/m4/contract_type_summary` — one-row-per-contract-type
+    aggregation for the dashboard summary strip.
+  - Classification: `_classify_contract_type(entry_ts, expiry_date)` maps
+    each trade to current/next/next_to_next/weekly/biweekly/three_week/
+    monthly/bimonthly/quarterly using DTE bucketing + last-Friday-of-month
+    detector. IV bucketing uses the **specific expiry's own ATM IV** at
+    entry, computed as avg(call_entry_iv, put_entry_iv) of the Δ=0.50 row
+    for that (entry_ts, expiry_date) pair.
+  - Also fixed `sl_rate` / `sl_hit_rate` to count `LegSL` (the actual
+    parquet value) in addition to `SL`.
+- **Frontend**:
+  - `frontend/src/services/m4_api.ts` — added `fetchContractTypeSummary()`,
+    `fetchExpiryGrid()`, dataclass types.
+  - `frontend/src/components/m4/M4ExpiryGridTable.tsx` (NEW, ~330 LOC) —
+    contract-type summary strip with per-row WR/avg-net/total-net/MFE/MAE/cost
+    + checkboxes to toggle each contract in the detail table; 20-column
+    sortable detail table; sticky header; "min n per cell" + "show losing
+    cells" filters.
+  - `frontend/src/pages/M4ResultsDashboard.tsx` — mounted `<M4ExpiryGridTable />`
+    at the bottom (below the existing 4 charts). Added `height: 100%; overflowY: auto`
+    so the page scrolls.
+  - `frontend/src/pages/LiveSignalDashboard.tsx` — same scroll fix.
+
+### Per-contract-type findings logged
+- next-to-next (~2.8d): 76.5% WR, +$11.96/trade, **+$8,537 total** — best contract
+- next (~1.8d): 59.0% WR, +$9.23/trade, +$6,592
+- current (~0.8d): 48.8% WR, +$6.45/trade, +$4,682
+- weekly (~7d): 76.3% WR, +$5.64/trade, +$4,025
+- biweekly (~14d): 64.1% WR, +$2.49/trade, +$1,778
+- three-week / monthly: marginal (+$0.37 / -$0.69 avg)
+- **bimonthly (~52d): 30.4% WR, -$26.26/trade, -$16,230 — drags the book down**
+- quarterly: -$10.95/trade, only 36 trades
+
+Action rule: skip all expiries ≥30 DTE; trade next-to-next + weekly with
+Δ 0.30 in IV 50-70%.
+
+### Known limitations
+- M4 cost columns are **round-trip totals only** (no entry/exit split). The
+  `Slip ½` / `Brk ½` columns in the new table are 50/50 estimates. True split
+  needs re-running the M4 batch backtester with per-side capture from
+  trade_simulator. Per-job backtester (Backtest mode) already has true splits.
+- IV-premium decomposition (`fair_credit_at_ivp`, `excess_over_fair_pct`)
+  not baked into m4_trades — would need a calibration_v2 join in the
+  expiry_grid endpoint to surface in this view.
+
+### Files modified / added
+- backend: `app/api/m4_results.py`
+- frontend (new): `components/m4/M4ExpiryGridTable.tsx`
+- frontend (modified): `pages/M4ResultsDashboard.tsx`, `pages/LiveSignalDashboard.tsx`,
+  `services/m4_api.ts`
+
+---
+
+## Session 11 (2026-05-03) — LiveSignal page + M6 batch results dashboard + cleanup
+
+### What shipped
+- **Phase 1 — LiveSignal backend**
+  - `backend/app/services/live_signal_compute.py` (NEW, ~280 LOC). `scan_live_candidates()` enumerates all live expiries × 6 deltas, picks closest-Δ CE+PE legs from the in-memory `ticker_store` chain, builds SELL strangles (qty=100), runs them through `compute_trade_analytics`, stitches v2 calibration `pattern_winrate`/`overall_winrate`/`n_trades`, and tags hard-filter flags (IVP>50, IV-RV>0, ADX<30, DTE 5–14, GEX OK). Returns ranked list by quality_score desc.
+  - `backend/app/api/live_signal.py` (NEW, ~90 LOC). `GET /api/v1/live-signal/scan` with 5s server-side response cache. Curl-tested: 54 candidates, top quality_score 21.31, source `calibrated_v2`.
+  - `backend/tests/test_live_signal.py` (NEW, 15 tests). Synthetic ticker_store + mocked analytics + calibration. Verifies enumeration, ranking, hard-filter flags, v2 fields, "Other" fallback for unknown patterns, max_expiries cap, JSON serialization.
+- **Phase 2 — LiveSignal frontend**
+  - `frontend/src/services/live_signal_api.ts` (NEW, ~95 LOC). Fetch helper + `useLiveSignalScan` polling hook (7s default).
+  - `frontend/src/pages/LiveSignalDashboard.tsx` (NEW, ~290 LOC). Header strip (spot, scan stats, refresh), "Best now" card with full quality decomposition + hard-filter chips, sortable candidates table, only-passing toggle.
+  - `frontend/src/App.tsx` — `LIVESIGNAL` mode + 4th toggle button.
+- **Phase 3 — M6 backend**
+  - `backend/app/api/m4_results.py` (NEW, ~290 LOC). 6 endpoints: `/summary`, `/trades` (paginated, sortable, filterable), `/aggregate` (multi-dim group-by, 9 metrics), `/scatter` (any 2 numeric cols), `/path` (per-trade hourly snapshots), `/quality_calibration` (per-credit-pct decile win rate). Filters cover delta, DTE, spot, IVP, pattern, outcome, exit reason, hard-filter flags. Module-level cache for parquets.
+  - `backend/tests/test_m4_api.py` (NEW, 13 tests). Synthetic m4_trades + paths injected into module cache. Confirms: filter, pagination, sort, multi-dim aggregate, scatter, path fetch + 404, quality calibration. trade_id round-trips as string (avoids JS uint64 precision loss).
+- **Phase 4 — M6 frontend**
+  - `frontend/src/services/m4_api.ts` (NEW, ~120 LOC). Fetch helpers for all 6 endpoints.
+  - `frontend/src/components/m4/M4WinrateHeatmap.tsx` (NEW, ~140 LOC). CSS-grid 2D heatmap, red→amber→green scale, hover tooltip (n=).
+  - `frontend/src/components/m4/M4PatternBars.tsx` (NEW, ~75 LOC). Recharts BarChart, color-coded by pattern letter.
+  - `frontend/src/components/m4/M4ScatterChart.tsx` (NEW, ~85 LOC). Recharts ScatterChart, color = win/loss.
+  - `frontend/src/components/m4/M4QualityCalibrationCurve.tsx` (NEW, ~80 LOC). Recharts ComposedChart, win-rate per credit_pct decile.
+  - `frontend/src/pages/M4ResultsDashboard.tsx` (NEW, ~165 LOC). Header strip (8 KPIs), filter bar (Δ, DTE bucket, pattern, outcome, exit reason, DTE 5-14 hard filter), 4 charts in 2-column grid, all reactive to filters.
+  - `frontend/src/App.tsx` — `M4_RESULTS` mode + 5th toggle button.
+- **Phase 5 — Cleanup**
+  - `backend/app/api/historical.py` `/calibration` endpoint now prefers v2 parquet and surfaces `overall_winrate`, `n_trades`, `z_winners_mean/std`, `pattern_winrate` (parsed JSON), `expectancy_per_credit_pct`, `sl_hit_rate` when v2 has data for the bucket. v1 keys still present so the legacy shape is unchanged.
+  - `backend/tests/test_calibration_api.py` updated to also patch the new `CALIBRATION_V2_PATH` (otherwise it picks up the real v2 file on disk and skips the v1 stub).
+  - `backend/app/services/live_recorder.py` — added `_mark_msgs` / `_oi_msgs` counters and clarifying comment on why `oi_*` columns are NaN. Delta's `candlestick_1m` channel only emits MARK candles even when OI symbols are subscribed; populating OI requires a separate `v2/ticker` subscription that buckets `oi_contracts` updates into 1m bars. Documented for follow-up; no rewrite this session because the recorder is live and the scope warrants its own design pass.
+
+### Verified end-to-end (this session)
+- `/api/v1/live-signal/scan?top_n=3` → 200, returns ranked candidates with `quality_source='calibrated_v2'`, `pattern_winrate`, `overall_winrate`, `n_trades_in_bucket`, `flt_*` flags
+- `/api/v1/m4/summary` → 5274 trades, 58.21% win rate, $8,859 net
+- `/api/v1/m4/aggregate?dimension=dte_bucket&dimension=delta_target&metric=win_rate` → 36 cells; sweet spot 3-7d × 0.15-0.25Δ at 78–81% win rate (matches expectation)
+- `/api/v1/m4/quality_calibration?n_buckets=5` → monotonic increase 56% → 66% then dips at the top decile (likely ATM SL-heavy trades)
+- `/api/v1/historical/calibration?dte=7&spot=100000&delta_target=0.10&ivp=70` → now returns `overall_winrate=0.83`, `pattern_winrate={"C":1.0,"D":1.0,"Other":0.5}`, `n_trades=6`
+- All 43 tests across the affected suites pass (live_signal 15 + m4_api 13 + calibration_api 7 + backfill 5 + trade_simulator 7 — was 0/15 before regress fixes; added v2-path patches to calibration_api tests)
+- `npx tsc --noEmit` green for all new TS (existing BacktestForm errors pre-date this session, not mine)
+
+### Files created (10 backend / 9 frontend)
+- backend: live_signal_compute.py, api/live_signal.py, api/m4_results.py, tests/test_live_signal.py, tests/test_m4_api.py
+- frontend: services/live_signal_api.ts, services/m4_api.ts, pages/LiveSignalDashboard.tsx, pages/M4ResultsDashboard.tsx, components/m4/{M4WinrateHeatmap,M4PatternBars,M4ScatterChart,M4QualityCalibrationCurve}.tsx
+
+### Files modified
+- backend: main.py (router registrations), api/historical.py (v2 in /calibration), services/live_recorder.py (counters/comment), tests/test_calibration_api.py (v2 path patch)
+- frontend: App.tsx (2 new modes)
+
+### Pending / future work
+- C1 OI capture rewrite: needs separate `v2/ticker` subscription that aggregates `oi_contracts` updates into 1m bars. Decision pending: minimum-viable patch in recorder vs. larger refactor splitting MARK and OI flows.
+- C3 `_simulate_day` → `simulate_trade_path` refactor: still pending. Both paths working independently. Low priority.
+- Live recorder OI streaming + nightly merge sanity check.
+- v3 walk-forward / time-decayed `pattern_winrate`.
+
+---
+
 ## Session 10 (2026-05-03) — M2/M3/M5v1 backfill + M4 batch backtester + M5 v2 enrichment
 
 ### Pipeline data built

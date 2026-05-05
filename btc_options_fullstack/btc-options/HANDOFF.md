@@ -2,12 +2,228 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-03 (M2/M3/M5v1 backfilled + M4 batch backtester + M5 v2 enrichment + live recorder live)
+**Date:** 2026-05-05 (Session 13 — M7 Friday→Saturday strangle/straddle sweep with rich 1m path + rule-based exit derivation)
 **Branch:** `mainbranch-gemini_claude`
-**Status:** Full M1→M2→M3→M5v1→M4→M5v2 pipeline complete. Backend rebuilt & live
-recorder is capturing 1-min mark+OI bars to `data_live/` (488 symbols). Per-job
-backtester analytics now emit `quality_source="calibrated_v2"` using the new
-`0.25·z_all + 0.30·z_winners + 0.30·IVP + 0.15·pattern_winrate` formula.
+
+### Session 13 highlights
+- **New M7 batch backtester** (`backend/app/analytics/m7_batch_backtester.py`,
+  ~660 LOC). For every Friday × expiry × entry_hour (Fri 21:00 → Sat 03:00 IST,
+  7 slots) × delta_target (8 values: 0.05–0.50), simulates a SHORT strangle/
+  straddle held until Sat 17:30 IST. NO exit logic in the simulator — full 1m
+  path is recorded so any exit rule (fixed-time, max_profit %, margin %,
+  premium SL, or any future predicate) can be derived as a query against the
+  saved path.
+
+- **Strike-selection policy**:
+  - delta_target = 0.50 → true straddle (single strike closest to spot, both legs)
+  - delta_target < 0.50 → closest-from-below per leg (highest |delta| ≤ target)
+  - No qualifying strike → trade skipped (logged, not faked)
+
+- **Outputs** (`/home/abhis/btc-data/derived/m7/`):
+  - `m7_trades.parquet` — entry-context only (one row per trade), ~80 cols
+    incl. cost decomposition per leg, entry greeks, ATM IV, RV/IVP/M3 ctx
+  - `m7_paths/friday_date=YYYY-MM-DD/part.parquet` — 1m path Hive-partitioned;
+    35 cols per row (spot OHLCV+OI, leg marks/IV/OI, ATM IV, all greeks per leg,
+    net greeks, theta/vega ratio, gross PnL, pct of credit, pct of margin)
+
+- **New API** (`backend/app/api/m7_results.py`, ~430 LOC) under `/api/v1/m7/`:
+  - `/summary`, `/trades`, `/path`, `/aggregate`, `/heatmap`, `/best_combo`,
+    `/iv_band_summary`, `/cost_breakdown`, `/meta`
+  - Exit rule passed as JSON query param: `exit_rule={"max_profit_pct":30,"premium_sl_pct":50}`
+  - DuckDB walks the path parquet, finds first-trigger ts per trade, fetches the
+    P&L at that ts, returns aggregated outcomes. Hard cap = Sat 17:30 IST.
+  - Net P&L estimate = gross − 2× entry costs (round-trip approximation;
+    /cost_breakdown returns exact entry-leg costs).
+
+- **New frontend** under `frontend/src/components/m7/` and `pages/M7SweepDashboard.tsx`:
+  - `M7FilterBar`, `M7HeadlineStrip`, `M7AggregateHeatmap`, `M7IvBandSummaryTable`,
+    `M7BestComboTable`, `M7TradeLogTable`, `M7TradePathChart`
+  - New "M7 Sweep" mode added to App.tsx (6th mode after M6 Results)
+
+- **New script** `scripts/backfill_m7_enriched.py` — joins `m7_trades.parquet`
+  with `calibration_v2.parquet` on `[dte_bucket, spot_bucket, delta_target_bucket,
+  ivp_bucket]` to add `fair_credit_at_ivp`, `structural_credit_pct`,
+  `iv_regime_premium_pct`, `excess_over_fair_pct`, `pattern_winrate`,
+  `expectancy_per_credit_pct`, `n_trades_in_bucket`. Loader in `m7_results.py`
+  prefers the enriched parquet when present.
+
+- **Tests**: `backend/tests/test_m7_batch.py` (22 tests) +
+  `backend/tests/test_m7_api.py` (9 tests) — all 31 passing.
+
+- **Backfill running in background** (PID at /tmp/m7_backtest.pid, log at
+  /tmp/m7_backtest.log). 121 Fridays Dec 2023 → Apr 2026 × ~7 expiries each
+  × 7 entries × 8 deltas. Takes ~3 min/Friday → ETA ~5h. Trades-parquet
+  written incrementally every 5 Fridays so dashboard works during backfill.
+
+### Verified end-to-end (with partial data, 5 fridays):
+- 988 trades, 590 wins (59%), avg net -$3.98
+- With max_profit_pct=30 rule: 299/988 trades trigger early
+- Cost decomposition matches `costs.py` to the cent
+- Path endpoint returns 1230 1m rows per trade
+
+### Known data limitations
+- Spot OI / volume is NaN in historical spot parquet (only live recorder
+  populates these). Code handles gracefully (defaults to 0).
+- Option OI is 0 for trades older than the live recorder start. Code captures
+  whatever's there.
+
+### Pending follow-ups
+- Wait for backfill to complete (~5h), then run `scripts/backfill_m7_enriched.py`
+- Add per-friday parallelism (multiprocessing) to cut backfill time
+- Add UI rule sliders for premium-SL preset (currently typed as numbers)
+
+---
+
+## Previous Session (12)
+**Date:** 2026-05-04 (M6 Attribution: per-Friday best expiry + winners-vs-losers per contract + IV-premium decomposition + expanded summary strip + 80-90/90-100/100+ IV bands)
+
+### Session 12 highlights
+- **New `m4_trades_enriched.parquet`** (5,274 rows × 87 cols, 1.48 MB) —
+  produced by `scripts/backfill_m4_enriched.py` (~150 LOC). Joins
+  `m4_trades` with `calibration_v2` to add `fair_credit_at_ivp`,
+  `structural_credit_pct`, `iv_regime_premium_pct`, `excess_over_fair_pct`
+  per trade, and recomputes per-leg `theta`/`vega`/`gamma` via BS
+  (`app.core.greeks.compute_greeks`) plus `theta_per_vega_{call,put,combined}`
+  ratios. Loader in `m4_results.py` now prefers the enriched parquet,
+  falls back to plain `m4_trades.parquet`. 4,548 / 5,274 trades matched
+  a calibration bucket; 726 left null (their `dte_bucket` or `ivp_bucket`
+  was 'nan').
+
+- **3 new endpoints under `/api/v1/m4/`** (in `m4_results.py`):
+  - `GET /winners_vs_losers?delta=` — per-contract avg(win) vs avg(loss)
+    for **31 indicators** in 7 categories (IV / RV-VRP / Skew / Spot
+    regime / GEX-Flow / Premium / Greeks). Flags |gap| > 0.5σ as
+    "discriminating".
+  - `GET /per_friday_best?delta=` — 121-row Friday view: winner /
+    runner-up / loser contract + top 3 deciding indicators (ranked by
+    |winner − loser| / σ).
+  - `GET /win_frequency?delta=` — per-contract count of Fridays it was
+    the best performer.
+
+- **3 new frontend components in `frontend/src/components/m4/`**:
+  - `M4WinFrequency.tsx` — bar chart + table of % Fridays each contract
+    won
+  - `M4WinnersVsLosers.tsx` — collapsible per-contract sections with 31
+    indicators grouped by category; "Only discriminating" toggle
+  - `M4PerFridayBest.tsx` — sortable 121-row table with deciding
+    indicators per Friday; min-winner-net filter
+
+- **Wired** as new "Attribution analysis" section in
+  `M4ResultsDashboard.tsx` with shared Δ chip selector
+  (`0.05/0.10/0.15/0.25/0.30/0.50`, default 0.30, persisted under
+  `m6:attr_delta`).
+
+- **Contract type summary strip extended** with 6 new columns:
+  Avg Win, Avg Loss, Best Net, Worst Net, Best MFE, Worst MAE. Backend
+  `/contract_type_summary` now returns `n_wins`, `n_losses`,
+  `avg_net_win`, `avg_net_loss`, `best_net_pnl`, `worst_net_pnl`,
+  `best_max_mtm`, `worst_min_mtm`.
+
+- **IV bands split** in `_IV_BANDS` from `[…, 80, 100, 999]` to
+  `[…, 80, 90, 100, 999]`. New labels: `80-90`, `90-100`, `100+`. The
+  `100+` band exists but is **permanently empty** (max ATM IV in
+  dataset = 98.65%).
+
+- **Expiry-class filter cleaned up** — removed the search-text input
+  from `M4ExpiryGridTable.tsx`; kept only the click-to-toggle chips.
+
+### Notable findings exposed by Session 12
+- **Tail risk**: bimonthly's worst single trade is **-$1,143** with
+  -$1,121 MAE; avg loss per losing trade is **-$42.71** (3-4× any
+  other contract). Workhorse contracts (current → biweekly) cap at
+  -$103 thanks to the 100% per-leg SL.
+- **Cleanest contract = next_to_next**: avg win +$22.25 vs avg loss
+  -$21.49 (near-symmetric), 76% WR.
+- **Win-frequency at Δ=0.30**: `current` wins outright on 28% of
+  Fridays, `next_to_next` 27%, `next` 21%, `weekly` 12%. (Different
+  from "highest avg P&L" — current's smaller avg makes it less
+  attractive even though it wins more often.)
+- **At Δ=0.30 the workhorse contracts have ZERO discriminating
+  indicators at the 0.5σ threshold.** Translation: within a single Δ
+  at one contract, entry conditions for winners look very similar to
+  losers — the alpha is in *which contract you pick on which Friday*,
+  not in pre-trade indicator filtering.
+- 2025-03-07 anchor verified: at Δ=0.50, `current` wins at +$169 with
+  the top deciding indicator being `theta_per_vega_put` (7.19σ
+  separation vs the bimonthly loser).
+
+---
+
+## Prior session (kept for context)
+**Date:** 2026-05-03 (Session 11 — LiveSignal page + M6 dashboard + expiry × IV × Δ grid + scroll fix + cleanup)
+**Branch:** `mainbranch-gemini_claude`
+**Status:** Platform now M1–M6 complete with 5 dashboard modes:
+**Live | Historical | Backtest | Live Signal | M6 Results**.
+
+**LiveSignal** scans every live expiry × 6 deltas in real time and
+recommends the highest-quality (Δ, expiry) strangle using the calibrated_v2
+quality formula. **M6 Results** visualizes the 5,274-trade M4 batch
+backtest: DTE×Δ heatmap, pattern bars, credit×P&L scatter, quality
+calibration curve, **plus a per-contract-type expiry × IV × Δ grid table**
+showing MFE/MAE, gross/net P&L, slippage + brokerage, margin, and credit %
+per cell. `/historical/calibration` surfaces v2 fields (`pattern_winrate`,
+`overall_winrate`, `n_trades`, `expectancy_per_credit_pct`, etc.).
+
+### What's new since prior handoff
+- **Frontend**
+  - `frontend/src/pages/{LiveSignalDashboard,M4ResultsDashboard}.tsx` —
+    both now scrollable (`height: 100%; overflowY: auto`).
+  - `frontend/src/components/m4/M4ExpiryGridTable.tsx` (NEW, ~330 LOC) —
+    contract-type summary strip + 20-column sortable table:
+    `Contract | IV % | Δ | n | WR | SL | Avg/Best MFE | Avg/Worst MAE |
+    Avg Gross | Avg Net | Total Net | Slip RT | Slip ½ | Brk RT | Brk ½ |
+    Cost RT | Credit % | Margin`. Mounted at the bottom of M4ResultsDashboard.
+- **Backend**
+  - `backend/app/api/m4_results.py` — added `/api/v1/m4/expiry_grid` and
+    `/api/v1/m4/contract_type_summary`. Classifies each trade's expiry by
+    Delta contract type (current/next/next_to_next/weekly/biweekly/
+    three_week/monthly/bimonthly/quarterly) using `(entry_ts, expiry_date)`
+    + last-Friday-of-month detector. IV bands keyed on the **specific
+    expiry's own ATM IV** at entry (avg of CE+PE leg IVs from the Δ=0.50
+    trade for that entry × expiry pair) — not the constant-maturity 7d.
+  - `backend/app/api/m4_results.py` — `sl_rate` metric in `/aggregate`
+    + `sl_hit_rate` in `/summary` updated to count `LegSL` (the actual
+    parquet value) in addition to `SL`.
+
+### Reusable analysis snippets (this session)
+- `python3 /tmp/m4_per_expiry_iv_vs_delta.py` (re-runnable from work_log) —
+  exports per-(entry × expiry) IV vs Δ table to
+  `/home/abhis/btc-data/derived/m4_per_expiry_iv_vs_delta.{csv,xlsx}`.
+
+### Headline M4 findings (5,274 trades, Friday 23:00 → Sat 10:00 IST)
+| Contract | n | WR | Avg Net | Total Net |
+|---|---|---|---|---|
+| **next-to-next** (~2.8d) | 714 | **76.5%** | **+$11.96** | **+$8,537** |
+| next (~1.8d) | 714 | 59.0% | +$9.23 | +$6,592 |
+| current (~0.8d) | 726 | 48.8% | +$6.45 | +$4,682 |
+| weekly (~7d) | 714 | 76.3% | +$5.64 | +$4,025 |
+| biweekly (~14d) | 714 | 64.1% | +$2.49 | +$1,778 |
+| monthly (~28d) | 486 | 50.2% | -$0.69 | -$336 |
+| **bimonthly** (~52d) | 618 | **30.4%** | **-$26.26** | **-$16,230** |
+| quarterly (~70d) | 36 | 25.0% | -$10.95 | -$394 |
+
+**Skip everything ≥30 DTE.** Bimonthly alone bleeds –$16k and is dragging
+the otherwise-+$25.8k book down to +$8.9k. Sweet spot = next-to-next +
+weekly + Δ 0.30 in IV 50–70%.
+
+### Known limitations carried over
+- **OI capture** in live_recorder still NaN: instrumented (`mark_msgs` / `oi_msgs`
+  counters added) and documented but not refactored. Delta's `candlestick_1m`
+  channel only emits MARK bars; populating OI requires a parallel `v2/ticker`
+  subscription that buckets `oi_contracts` updates into 1m bars. Needs a
+  design pass; recorder is live and the change shouldn't be hacked in mid-stream.
+- **Cost split in M4 trade rows.** `slippage_usd` / `brokerage_usd` in
+  `m4_trades.parquet` are **round-trip totals** (entry + exit summed). The
+  expiry-grid table shows a 50/50 estimate (`Slip ½`, `Brk ½`). True per-side
+  capture requires re-running the M4 batch backtester with the trade_simulator's
+  per-side fields written through (~6h on 4 workers). Not blocking — the per-job
+  backtester (Backtest mode) already records true entry/exit splits.
+- **IV-premium decomposition** (`fair_credit_at_ivp`, `structural_credit_pct`,
+  `excess_over_fair_pct`) is computed live by `compute_trade_analytics` for the
+  LiveSignal page, but is **not baked into m4_trades**. Could be added to the
+  expiry-grid endpoint via a join to `calibration_v2.parquet`. Pending.
+- `_simulate_day` → `simulate_trade_path` refactor still deferred (both paths
+  working independently).
 
 ---
 
