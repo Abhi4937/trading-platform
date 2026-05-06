@@ -1,5 +1,107 @@
 # Claude's Work Log
 
+## Session 15 (2026-05-06) — 10-chunk Trade Copilot plan + M7 enrichment commit + Chunk 1 (per-leg attribution)
+
+### Headline
+Designed comprehensive 10-chunk plan to evolve the platform from a backtest
+viewer into a trade copilot (covering Phases 1–5 of the user's vision; Phase 6
+is the M7 dashboard, already built). Plan at
+`/home/abhis/.claude/plans/phase-1-defining-the-witty-dawn.md`. Each chunk has
+a quantitative pass/fail bar against the 34,166-trade dataset; failure policy
+is "block recommendations, ship visualizations". Committed pre-existing M7
+enrichment baseline as `0aa0c96`; shipped Chunk 1 (per-leg attribution) as
+`d6a9ec5`.
+
+### Chunk 1 deliverables (per-leg attribution)
+- Backend (`backend/app/api/m7_results.py`):
+  - `_add_entry_skew_columns()` derives delta_skew, iv_skew_pct,
+    premium_skew_usd, premium_skew_pct + 5-bucket categorical cuts on every
+    parquet load. Sign convention `call − put` everywhere.
+  - `_compute_all_exits()` extended: per-leg PnL via `(entry_mark − exit_mark)
+    × qty × 0.001`, per-leg max/min MTM during the actual hold window via the
+    `_trade_exits` registered DF (now carries `_c_entry`, `_p_entry`, `_qty`).
+  - `leg_winner` classification (both/call_only/put_only/neither) plus
+    boolean indicator cols `_is_*` so share metrics work in any groupby
+    context (pandas 2.x excludes group keys from `.apply()` subframes —
+    sharing-via-mean side-steps that).
+  - 8 new simple metrics (avg_call_leg_pnl, avg_put_leg_pnl, per-leg MTM,
+    avg_iv_skew_pct, etc.) + 4 share metrics (`*_share`).
+  - 2 new endpoints: `GET /leg_attribution` (paginated per-trade rows with
+    full CE/PE breakdown), `GET /leg_skew_heatmap` (configurable axes).
+  - `/meta` extended with `iv_skew_buckets`, `delta_skew_buckets`,
+    `premium_skew_buckets`, `leg_winners`.
+  - 4 new filter cols added to `_TRADE_FILTER_COLS` and `_query_filters`.
+
+- Frontend:
+  - `frontend/src/components/m7/M7LegSkewHeatmap.tsx` — configurable
+    row/col axes (skew buckets, leg_winner, delta_target, etc.) + grouped
+    metric selector. Diverging green/red for P&L metrics, sequential blue
+    for shares.
+  - `frontend/src/components/m7/M7LegAttributionTable.tsx` — CE/PE stacked
+    rows with `rowSpan=2` on shared cells (skew, leg_winner badge, totals).
+    Sortable, paginated 25/page.
+  - `frontend/src/components/m7/M7FilterBar.tsx` — added IV-skew, Δ-skew,
+    leg-winner chips.
+  - `frontend/src/pages/M7SweepDashboard.tsx` — new "Leg Attribution"
+    section below the existing IV-band stack.
+  - Types + API client extended.
+
+- Tests:
+  - 5 new unit tests in `backend/tests/test_m7_api.py` covering skew
+    column derivation (balanced / put-richer / call-richer / missing
+    inputs / filter integration). Total now 14 passing.
+  - New `backend/tests/test_m7_historical_validation.py` with 5 slow
+    Chunk-1 tests against the full 34,166-trade dataset:
+    - Sum identity (`max |call_pnl + put_pnl − gross| ≤ $0.05`)
+    - leg_winner classification consistency (zero mismatches)
+    - call_only_share monotonicity vs IV skew (call-IV-richer →
+      higher call_only_share at Δ=0.30)
+    - All 5 buckets populated for each skew column
+    - Per-leg max/min MTM bracket per-leg PnL within $0.10
+  - New `backend/tests/conftest.py` registers `slow` marker; default
+    `pytest` skips slow tests, opt in with `pytest -m slow`.
+  - 170 default + 5 slow tests pass.
+
+### Two pre-existing tests fixed
+The Session-14 commit `9211594` updated `_exit_rule_sql_predicate` to
+include entry-slippage adjustment but left two tests asserting the OLD
+predicate text. Updated those assertions to match the new predicate
+shape (e.g. `"t.credit_usd * 0.3"` instead of `"pnl_pct_of_credit >= 30"`).
+
+### Cross-validation
+Hand-computed one Friday's trade by hand against the path parquet:
+- `(347.78 − 0.10) × 100 × 0.001 = $34.77` (call leg)
+- `(389.49 − 0.10) × 100 × 0.001 = $38.94` (put leg)
+- Sum: `$73.71` matches `gross_pnl_usd = 73.7070` to 6 decimals ✓
+
+### Headline finding from the new view
+Sorting `/leg_attribution?delta_target=0.30&sort_by=net_pnl_estimate_usd&sort_dir=asc`
+shows the 5 worst losers are ALL `leg_winner=call_only`. Mechanically this
+means BTC moved sharply down, the put leg blew up, the call leg decayed
+to ~$0. The view immediately surfaces this asymmetry where the IV-band
+table just shows aggregate net P&L. Validates the chunk's diagnostic value.
+
+### Headline cross-tab finding
+At Δ=0.30 across all IV-skew buckets, `call_only_share` rises monotonically
+from 8.97% (balanced IV skew) to 30.65% (call IV ≥ +5pp) — confirming
+the historical validation gate's premise: when call IV is rich, the call
+leg decays first / fastest.
+
+### Note for Gemini collaboration
+Gemini's in-progress `m7_full_coverage` work (untracked
+`backend/app/api/m7_full_coverage.py`, `backend/tests/test_m7_full_coverage.py`,
+`frontend/src/components/m7/M7IvBandFullCoverageTable.tsx`, plus a `main.py`
+router registration) was present at session start. I left those untouched
+and temporarily removed the `M7IvBandFullCoverageTable` import + mount
+from my dashboard commit so Chunk 1 ships self-contained. Re-add when the
+m7_full_coverage work commits.
+
+### Files committed
+- `0aa0c96` — pre-existing M7 enrichment baseline (14 files, 1,803 ins)
+- `d6a9ec5` — Chunk 1 per-leg attribution (10 files, 1,322 ins)
+
+---
+
 ## Session 14 (2026-05-06) — M7 backfill complete + enrichment + exit-hour UI + commit
 
 ### Headline

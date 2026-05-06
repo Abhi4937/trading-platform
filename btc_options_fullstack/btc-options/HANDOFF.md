@@ -2,6 +2,67 @@
 
 ## Last Session
 **Who:** Claude
+**Date:** 2026-05-06 (Session 15 — Trade Copilot plan + M7 enrichment commit + Chunk 1 per-leg attribution shipped)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 15 highlights
+- **10-chunk Trade Copilot plan** designed and approved.
+  See `/home/abhis/.claude/plans/phase-1-defining-the-witty-dawn.md`.
+  Maps the user's 6-phase trading-system vision onto the existing M7 + LiveSignal
+  pages. Each chunk has a quantitative pass/fail bar against the 34,166-trade
+  dataset; failure policy = "block recommendations, ship visualizations".
+- **Pre-existing M7 enrichment baseline COMMITTED**: `0aa0c96` (14 files,
+  1,803 insertions). Exit-derivation cache, per-trade peak/trough MTM during
+  hold (not full path), exact exit costs, 30+ named metrics, missed-Fridays
+  endpoint, best-combo path-markers endpoint.
+- **Chunk 1 — Per-leg attribution SHIPPED**: `d6a9ec5` (10 files, 1,322 insertions).
+  Backend: `_add_entry_skew_columns()` (delta_skew/iv_skew_pct/premium_skew_usd
+  + 5-bucket cuts), per-leg PnL + per-leg max/min MTM in `_compute_all_exits`,
+  leg_winner classification (both/call_only/put_only/neither), 8 new metrics +
+  4 share metrics, 2 new endpoints (`/leg_attribution`, `/leg_skew_heatmap`),
+  /meta enriched. Frontend: 2 new components (M7LegSkewHeatmap +
+  M7LegAttributionTable), filter bar chips, dashboard mount. Tests: 5 new unit +
+  5 new historical validation against full 34k dataset.
+- **All 170 unit tests + 5 slow historical-validation tests pass.** Slow tests
+  opt in with `pytest -m slow` (registered in new `tests/conftest.py`).
+- **Hand-verified one trade**: `(call_entry_mark − exit_call_mark) × qty × 0.001`
+  + put-side equivalent sums to `gross_pnl_usd` to 6 decimals (formula matches
+  `m7_batch_backtester` line 680).
+- **Headline finding** from new view: at Δ=0.30, the worst single-trade losers
+  are ALL `leg_winner=call_only` outcomes — i.e. trades where BTC moved sharply
+  down, the put leg ran hard against us while the call leg decayed. Validates
+  the diagnostic value of the per-leg view.
+
+### What's on disk
+```
+/home/abhis/btc-data/derived/m7/m7_trades.parquet          8.5 MB  (34,166 trades, 82 cols)
+/home/abhis/btc-data/derived/m7/m7_trades_enriched.parquet 8.76 MB (34,166 trades, 91 cols)
+/home/abhis/btc-data/derived/m7/m7_paths/                  121 partitions (friday_date=YYYY-MM-DD)
+```
+
+### Notes for Gemini
+- I left your in-progress `m7_full_coverage` work UNTOUCHED in the working
+  tree (`backend/app/api/m7_full_coverage.py`, `backend/tests/test_m7_full_coverage.py`,
+  `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx`, plus the
+  `main.py` router registration). Specifically I temporarily reverted the
+  `M7IvBandFullCoverageTable` import + mount from `M7SweepDashboard.tsx`
+  during my commit so my Chunk 1 was self-contained, but those references
+  should be re-added when your full_coverage work commits. Not a conflict —
+  just something to put back.
+- The plan's chunks 2–10 are the natural next pieces. Chunk 2 (Baseline +
+  Theta/Vega) is the easiest from here because the enriched parquet already
+  has `theta_per_vega_combined`, `excess_over_fair_pct`,
+  `iv_regime_premium_pct`, `structural_credit_pct`.
+
+### Pending follow-ups
+- Re-add `M7IvBandFullCoverageTable` import + mount to `M7SweepDashboard.tsx`
+  when Gemini's `m7_full_coverage` work is committed.
+- Chunks 2–10 of the Trade Copilot plan.
+
+---
+
+## Previous Session (14)
+**Who:** Claude
 **Date:** 2026-05-06 (Session 14 — M7 backfill completed + enrichment + exit-hour UI + commit)
 **Branch:** `mainbranch-gemini_claude`
 

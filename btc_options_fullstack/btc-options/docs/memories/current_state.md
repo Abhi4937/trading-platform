@@ -1,6 +1,19 @@
 # Current Project State
 
 ## Active Projects
+- **BTC Trade Copilot — Chunk 1 (Per-leg attribution) SHIPPED (Session 15, 2026-05-06):**
+  10-chunk plan at `/home/abhis/.claude/plans/phase-1-defining-the-witty-dawn.md`
+  evolves the platform from backtest viewer into a trade copilot covering the
+  user's 6-phase vision (Phase 6 = M7, already built; Phases 1–5 = chunks 1–10).
+  Chunk 1 (per-leg attribution) shipped as `d6a9ec5`: per-leg PnL with sum
+  identity ≡ gross_pnl_usd to 6 decimals, leg_winner classification,
+  delta/iv/premium skew at entry + 5-bucket cuts, 2 new endpoints
+  (`/leg_attribution`, `/leg_skew_heatmap`), 2 new dashboard components,
+  5 unit tests + 5 historical-validation tests against the full 34k dataset
+  all passing. Failure policy: block recommendations, ship visualizations.
+  Chunks 2–10 are the natural follow-ons (Chunk 2 = baseline + theta/vega is
+  the easiest next step since the enriched parquet already has those cols).
+
 - **M7 Friday→Saturday strangle/straddle sweep — COMPLETE (Session 13-14, 2026-05-05/06):**
   Plan at `/home/abhis/.claude/plans/go-through-the-project-linked-dragonfly.md`.
   - Backend: `m7_batch_backtester.py` + `m7_results.py` API. 34,166 trades,
