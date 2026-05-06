@@ -3,7 +3,8 @@
 import type {
   M7AggregateResponse, M7BestComboMarkersResponse, M7BestComboRow,
   M7CostBreakdown, M7ExitRule, M7Filters,
-  M7IvBandSummaryRow, M7Meta, M7MissedFridaysResponse, M7PathResponse,
+  M7IvBandSummaryRow, M7LegAttributionResponse, M7LegSkewHeatmapResponse,
+  M7Meta, M7MissedFridaysResponse, M7PathResponse,
   M7Summary, M7TradesResponse,
 } from '../types/m7';
 
@@ -102,4 +103,33 @@ export function fetchM7BestComboMarkers(
 ): Promise<M7BestComboMarkersResponse> {
   return jsonFetch<M7BestComboMarkersResponse>(
     `${BASE}/best_combo_markers${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+}
+
+// ── Chunk 1: Per-leg attribution endpoints ──────────────────────────────────
+
+export function fetchM7LegAttribution(
+  opts: M7Filters & {
+    sort_by?: string;
+    sort_dir?: 'asc' | 'desc';
+    limit?: number;
+    offset?: number;
+  } = {},
+  exit_rule?: M7ExitRule,
+  signal?: AbortSignal,
+): Promise<M7LegAttributionResponse> {
+  return jsonFetch<M7LegAttributionResponse>(
+    `${BASE}/leg_attribution${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+}
+
+export function fetchM7LegSkewHeatmap(
+  opts: M7Filters & {
+    metric?: string;
+    row_key?: string;
+    col_key?: string;
+  } = {},
+  exit_rule?: M7ExitRule,
+  signal?: AbortSignal,
+): Promise<M7LegSkewHeatmapResponse> {
+  return jsonFetch<M7LegSkewHeatmapResponse>(
+    `${BASE}/leg_skew_heatmap${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
 }

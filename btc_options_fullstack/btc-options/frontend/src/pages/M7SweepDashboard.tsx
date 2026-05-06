@@ -5,6 +5,8 @@ import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers'
 import { M7FilterBar } from '../components/m7/M7FilterBar';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
 import { M7IvBandSummaryTable } from '../components/m7/M7IvBandSummaryTable';
+import { M7LegAttributionTable } from '../components/m7/M7LegAttributionTable';
+import { M7LegSkewHeatmap } from '../components/m7/M7LegSkewHeatmap';
 import { M7MissedFridaysTable } from '../components/m7/M7MissedFridaysTable';
 import { M7TradePathChart } from '../components/m7/M7TradePathChart';
 
@@ -175,6 +177,27 @@ export function M7SweepDashboard() {
       <M7IvBandSummaryTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
       <M7MissedFridaysTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric} />
+
+      {/* Chunk 1 — Per-leg Attribution: skew heatmap + per-trade table.
+          Section divider + heading match the visual rhythm of the rest of the dashboard. */}
+      <div style={{
+        marginTop: 18, paddingTop: 12,
+        borderTop: '1px solid #1a2d42',
+      }}>
+        <div style={{
+          fontSize: 14, fontWeight: 700, color: '#cfd9e3',
+          textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10,
+        }}>
+          Leg Attribution
+          <span style={{ fontSize: 11, fontWeight: 400, color: '#7a9bb5', marginLeft: 10 }}>
+            Why is one leg in standby while the other prints? Δ / IV / premium skew at entry +
+            per-leg P&L decomposition at exit.
+          </span>
+        </div>
+        <M7LegSkewHeatmap filters={dFilters} exitRule={dExitRule} />
+        <M7LegAttributionTable filters={dFilters} exitRule={dExitRule}
+                               onSelectTrade={setSelectedTrade} />
+      </div>
 
       {selectedTrade && (
         <M7TradePathChart tradeId={selectedTrade} onClose={() => setSelectedTrade(null)} />

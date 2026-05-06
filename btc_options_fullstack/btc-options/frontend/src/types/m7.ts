@@ -22,6 +22,11 @@ export interface M7Filters {
   ctx_pattern?: string;
   ctx_gex_regime?: string;
   friday_date_ist?: string;
+  // Chunk 1 — leg attribution skew filters
+  iv_skew_bucket?: string;
+  delta_skew_bucket?: string;
+  premium_skew_bucket?: string;
+  leg_winner?: string;            // both | call_only | put_only | neither
 }
 
 export interface M7Summary {
@@ -256,4 +261,88 @@ export interface M7Meta {
   ivp_buckets: string[];
   patterns: string[];
   gex_regimes: string[];
+  // Chunk 1 — skew bucket universes (sorted put-leaning → call-leaning)
+  delta_skew_buckets: string[];
+  iv_skew_buckets: string[];
+  premium_skew_buckets: string[];
+  leg_winners: string[];          // ["both", "call_only", "put_only", "neither"]
+}
+
+// ── Chunk 1: Per-leg attribution ─────────────────────────────────────────────
+
+export interface M7LegAttributionRow {
+  trade_id: string;
+  friday_date_ist: string;
+  entry_hour_ist: number;
+  entry_time_label?: string | null;
+  expiry_date: string;
+  expiry_bucket: string;
+  delta_target: number;
+  is_straddle: boolean;
+  entry_atm_iv_band: string;
+  entry_atm_iv_pct?: number | null;
+  // Per-leg entry context
+  call_strike: number;
+  put_strike: number;
+  quantity_lots: number;
+  call_entry_mark: number;
+  put_entry_mark: number;
+  call_entry_iv: number;
+  put_entry_iv: number;
+  call_entry_delta: number;
+  put_entry_delta: number;
+  // Per-leg exit context
+  exit_call_mark: number;
+  exit_put_mark: number;
+  exit_spot: number;
+  // Per-leg outcomes
+  call_leg_pnl_usd: number;
+  put_leg_pnl_usd: number;
+  leg_pnl_diff_usd: number;
+  call_leg_max_mtm_usd?: number | null;
+  call_leg_min_mtm_usd?: number | null;
+  put_leg_max_mtm_usd?: number | null;
+  put_leg_min_mtm_usd?: number | null;
+  leg_winner: 'both' | 'call_only' | 'put_only' | 'neither';
+  // Skew at entry
+  delta_skew: number;
+  iv_skew_pct: number;
+  premium_skew_usd: number;
+  premium_skew_pct?: number | null;
+  iv_skew_bucket: string;
+  delta_skew_bucket: string;
+  premium_skew_bucket: string;
+  // Position-level outcomes
+  credit_usd: number;
+  margin_used_usd_at_entry?: number | null;
+  total_entry_cost_usd: number;
+  total_exit_cost_usd: number;
+  gross_pnl_usd: number;
+  net_pnl_estimate_usd: number;
+  max_mtm_usd?: number | null;
+  min_mtm_usd?: number | null;
+  exit_mtm_usd?: number | null;
+  is_win: boolean;
+  exit_reason: string;
+  exit_ts: number;
+}
+
+export interface M7LegAttributionResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M7LegAttributionRow[];
+}
+
+export interface M7LegSkewHeatmapCell {
+  // The two grouping cols are dynamic; their names match `row_key` and `col_key`.
+  // Component reads them generically.
+  [key: string]: string | number | null;
+}
+
+export interface M7LegSkewHeatmapResponse {
+  rows: M7LegSkewHeatmapCell[];
+  metric: string;
+  row_key: string;
+  col_key: string;
 }

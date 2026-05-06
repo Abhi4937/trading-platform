@@ -76,9 +76,58 @@ def _load_trades() -> pd.DataFrame:
                 labels=["current (Sat)", "next (Sun)", "next_to_next (Mon)",
                         "weekly (7d)", "biweekly (14d)", "monthly (30d)", "quarterly"],
             ).astype(str)
+        _add_entry_skew_columns(_TRADES_DF)
         _TRADES_MTIME = mtime
         log.info("M7 trades reloaded: %d rows from %s", len(_TRADES_DF), path)
     return _TRADES_DF
+
+
+def _add_entry_skew_columns(df: pd.DataFrame) -> None:
+    """Add entry-time skew columns + bucketed versions in-place.
+
+    Sign conventions (call − put everywhere):
+      delta_skew      = |call_entry_delta| − |put_entry_delta|
+                        positive  → call is closer to ATM (CE leg has more directional risk)
+                        negative  → put is closer to ATM
+      iv_skew_pct     = (call_entry_iv − put_entry_iv) × 100, in IV percentage points
+                        positive  → call IV richer than put IV (rare; usually negative for BTC)
+                        negative  → put IV richer (typical "negative skew")
+      premium_skew_usd = call_entry_mark − put_entry_mark
+      premium_skew_pct = premium_skew_usd / mean(call_entry_mark, put_entry_mark)
+                        ∈ [-2, 2] roughly. Independent of absolute premium scale.
+
+    Buckets are coarse so heatmap cells have enough trades; the raw cols are
+    available for filtering at finer granularity if needed later.
+    """
+    needed = {"call_entry_delta", "put_entry_delta",
+              "call_entry_iv", "put_entry_iv",
+              "call_entry_mark", "put_entry_mark"}
+    if not needed.issubset(df.columns):
+        return  # M7 trades parquet missing per-leg cols; skew cols left absent
+
+    df["delta_skew"] = df["call_entry_delta"].abs() - df["put_entry_delta"].abs()
+    df["iv_skew_pct"] = (df["call_entry_iv"] - df["put_entry_iv"]) * 100.0
+    df["premium_skew_usd"] = df["call_entry_mark"] - df["put_entry_mark"]
+    avg_mark = (df["call_entry_mark"] + df["put_entry_mark"]) / 2.0
+    df["premium_skew_pct"] = (df["premium_skew_usd"] / avg_mark).where(avg_mark > 0)
+
+    # Coarse buckets keyed off the signed diff; "call_richer" means the CE leg
+    # carries more (delta / IV / premium) than the PE leg.
+    df["delta_skew_bucket"] = pd.cut(
+        df["delta_skew"],
+        bins=[-1.0, -0.05, -0.02, 0.02, 0.05, 1.0],
+        labels=["put_richer_strong", "put_richer", "balanced", "call_richer", "call_richer_strong"],
+    ).astype(str)
+    df["iv_skew_bucket"] = pd.cut(
+        df["iv_skew_pct"],
+        bins=[-1000, -5, -2, 2, 5, 1000],
+        labels=["put_iv_strong", "put_iv", "balanced", "call_iv", "call_iv_strong"],
+    ).astype(str)
+    df["premium_skew_bucket"] = pd.cut(
+        df["premium_skew_pct"],
+        bins=[-3, -0.30, -0.10, 0.10, 0.30, 3],
+        labels=["put_premium_strong", "put_premium", "balanced", "call_premium", "call_premium_strong"],
+    ).astype(str)
 
 
 def _duckdb_conn() -> duckdb.DuckDBPyConnection:
@@ -101,6 +150,10 @@ _TRADE_FILTER_COLS = {
     "ctx_pattern": str,
     "ctx_gex_regime": str,
     "friday_date_ist": str,
+    "iv_skew_bucket": str,
+    "delta_skew_bucket": str,
+    "premium_skew_bucket": str,
+    "leg_winner": str,
 }
 
 
@@ -142,6 +195,10 @@ def _query_filters(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     expiry_bucket: Optional[str] = None,
+    iv_skew_bucket: Optional[str] = None,
+    delta_skew_bucket: Optional[str] = None,
+    premium_skew_bucket: Optional[str] = None,
+    leg_winner: Optional[str] = None,
 ) -> dict:
     return {
         "delta_target": delta_target,
@@ -156,6 +213,10 @@ def _query_filters(
         "ctx_gex_regime": ctx_gex_regime,
         "friday_date_ist": friday_date_ist,
         "expiry_bucket": expiry_bucket,
+        "iv_skew_bucket": iv_skew_bucket,
+        "delta_skew_bucket": delta_skew_bucket,
+        "premium_skew_bucket": premium_skew_bucket,
+        "leg_winner": leg_winner,
     }
 
 
@@ -408,6 +469,13 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         "margin_used_usd_at_entry", "dte_bucket", "expiry_bucket", "spot_bucket",
         "ivp_bucket", "ctx_pattern", "ctx_gex_regime", "dte_days",
         "call_strike", "put_strike", "quantity_lots",
+        # Per-leg entry data — needed for Chunk 1 (leg attribution + skew analysis)
+        "call_entry_mark", "put_entry_mark",
+        "call_entry_iv",   "put_entry_iv",
+        "call_entry_delta","put_entry_delta",
+        # Skew cols (derived in _add_entry_skew_columns at load time)
+        "delta_skew", "iv_skew_pct", "premium_skew_usd", "premium_skew_pct",
+        "iv_skew_bucket", "delta_skew_bucket", "premium_skew_bucket",
     ]
     keep_trade_cols = [c for c in keep_trade_cols if c in trades.columns]
     merged = trades[keep_trade_cols].merge(exits, on="trade_id", how="inner")
@@ -416,23 +484,100 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
     # (entry → exit_ts), NOT over the full path to Sat 17:30. This matters
     # when an SL/profit/margin rule (or a fixed exit hour) closes the trade
     # early — the path keeps simulating after but the trader exited.
+    #
+    # Also computes per-leg max/min MTM during the same window. Per-leg MTM
+    # at minute m: leg_pnl_at_m = (entry_mark − path_mark_at_m) × qty × 0.001.
+    # Marks are already USD-per-BTC (not USD-per-contract); CONTRACT_VALUE
+    # = 0.001 BTC/contract converts to USD per leg. This matches the
+    # m7_batch_backtester gross_pnl formula at line 680 of m7_batch_backtester.py.
+    # The trades-side cols call_entry_mark / put_entry_mark / quantity_lots
+    # are passed in via the registered DataFrame so DuckDB can evaluate the
+    # formula in-SQL.
+    leg_meta_cols = ["trade_id", "exit_ts",
+                     "call_entry_mark", "put_entry_mark", "quantity_lots"]
+    have_leg_meta = all(c in merged.columns for c in leg_meta_cols)
     conn = _duckdb_conn()
-    conn.register("_trade_exits",
-                  merged[["trade_id", "exit_ts"]].rename(columns={"exit_ts": "_exit_ts"}))
-    mtm_sql = f"""
-    SELECT p.trade_id,
-           MAX(p.gross_pnl_usd) AS max_gross_pnl_usd,
-           MIN(p.gross_pnl_usd) AS min_gross_pnl_usd,
-           arg_max(p.ts, p.gross_pnl_usd) AS ts_at_max_mtm,
-           arg_min(p.ts, p.gross_pnl_usd) AS ts_at_min_mtm
-    FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
-    JOIN _trade_exits e ON p.trade_id = e.trade_id
-    WHERE p.ts <= e._exit_ts
-    GROUP BY p.trade_id
-    """
+    if have_leg_meta:
+        conn.register("_trade_exits",
+                      merged[leg_meta_cols].rename(columns={
+                          "exit_ts":         "_exit_ts",
+                          "call_entry_mark": "_c_entry",
+                          "put_entry_mark":  "_p_entry",
+                          "quantity_lots":   "_qty",
+                      }))
+        mtm_sql = f"""
+        SELECT p.trade_id,
+               MAX(p.gross_pnl_usd) AS max_gross_pnl_usd,
+               MIN(p.gross_pnl_usd) AS min_gross_pnl_usd,
+               arg_max(p.ts, p.gross_pnl_usd) AS ts_at_max_mtm,
+               arg_min(p.ts, p.gross_pnl_usd) AS ts_at_min_mtm,
+               MAX( (e._c_entry - p.call_mark) * e._qty * 0.001 )
+                   AS call_leg_max_mtm_usd,
+               MIN( (e._c_entry - p.call_mark) * e._qty * 0.001 )
+                   AS call_leg_min_mtm_usd,
+               MAX( (e._p_entry - p.put_mark)  * e._qty * 0.001 )
+                   AS put_leg_max_mtm_usd,
+               MIN( (e._p_entry - p.put_mark)  * e._qty * 0.001 )
+                   AS put_leg_min_mtm_usd
+        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        JOIN _trade_exits e ON p.trade_id = e.trade_id
+        WHERE p.ts <= e._exit_ts
+        GROUP BY p.trade_id
+        """
+    else:
+        # Fallback for old schemas without per-leg entry marks
+        conn.register("_trade_exits",
+                      merged[["trade_id", "exit_ts"]].rename(columns={"exit_ts": "_exit_ts"}))
+        mtm_sql = f"""
+        SELECT p.trade_id,
+               MAX(p.gross_pnl_usd) AS max_gross_pnl_usd,
+               MIN(p.gross_pnl_usd) AS min_gross_pnl_usd,
+               arg_max(p.ts, p.gross_pnl_usd) AS ts_at_max_mtm,
+               arg_min(p.ts, p.gross_pnl_usd) AS ts_at_min_mtm
+        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        JOIN _trade_exits e ON p.trade_id = e.trade_id
+        WHERE p.ts <= e._exit_ts
+        GROUP BY p.trade_id
+        """
     mtm_df = conn.execute(mtm_sql).df()
     conn.close()
     merged = merged.merge(mtm_df, on="trade_id", how="left")
+
+    # Per-leg P&L at exit time (Chunk 1: leg attribution).
+    # SELL premium → leg_pnl = (entry_mark − exit_mark) × qty × 0.001.
+    # Marks are USD-per-BTC, contract size = 0.001 BTC; product is USD.
+    # Matches m7_batch_backtester's `gross_pnl` formula. Sum of per-leg
+    # equals path's gross_pnl_usd within FP rounding (validated as Chunk 1
+    # historical-validation gate).
+    if have_leg_meta and "exit_call_mark" in merged.columns:
+        merged["call_leg_pnl_usd"] = (
+            (merged["call_entry_mark"] - merged["exit_call_mark"])
+            * merged["quantity_lots"] * 0.001
+        )
+        merged["put_leg_pnl_usd"] = (
+            (merged["put_entry_mark"] - merged["exit_put_mark"])
+            * merged["quantity_lots"] * 0.001
+        )
+        merged["leg_pnl_diff_usd"] = (
+            merged["call_leg_pnl_usd"] - merged["put_leg_pnl_usd"]
+        )
+        # leg_winner: which leg(s) ended in profit. SELL strangle → a leg "wins"
+        # when its premium decayed (entry_mark > exit_mark, leg_pnl > 0).
+        c_pos = merged["call_leg_pnl_usd"] > 0
+        p_pos = merged["put_leg_pnl_usd"] > 0
+        merged["leg_winner"] = np.select(
+            [c_pos & p_pos, c_pos & ~p_pos, ~c_pos & p_pos],
+            ["both", "call_only", "put_only"],
+            default="neither",
+        )
+        # Boolean indicator columns for share metrics. Pandas 2.x excludes
+        # grouping columns from subframes inside .apply(), which broke
+        # `(g["leg_winner"] == X).mean()` when leg_winner was the group axis.
+        # Boolean cols aggregated via `mean()` work in all groupby contexts.
+        merged["_is_both"]      = (c_pos & p_pos).astype(float)
+        merged["_is_call_only"] = (c_pos & ~p_pos).astype(float)
+        merged["_is_put_only"]  = (~c_pos & p_pos).astype(float)
+        merged["_is_neither"]   = (~c_pos & ~p_pos).astype(float)
 
     # Compute EXACT exit-side slippage + brokerage per leg using exit marks
     # (no longer approximating exit costs as equal to entry costs).
@@ -566,6 +711,24 @@ _SIMPLE_METRICS = {
     "avg_pct_return_on_credit":    ("pct_return_on_credit",        "mean"),
     # Exit-time MTM overall (on-screen P&L at exit, only entry costs subtracted)
     "avg_exit_mtm":                ("exit_mtm_usd",                "mean"),
+    # Per-leg P&L (Chunk 1 — leg attribution)
+    "avg_call_leg_pnl":            ("call_leg_pnl_usd",            "mean"),
+    "avg_put_leg_pnl":             ("put_leg_pnl_usd",             "mean"),
+    "avg_leg_pnl_diff":            ("leg_pnl_diff_usd",            "mean"),
+    "avg_call_leg_max_mtm":        ("call_leg_max_mtm_usd",        "mean"),
+    "avg_call_leg_min_mtm":        ("call_leg_min_mtm_usd",        "mean"),
+    "avg_put_leg_max_mtm":         ("put_leg_max_mtm_usd",         "mean"),
+    "avg_put_leg_min_mtm":         ("put_leg_min_mtm_usd",         "mean"),
+    # Skew (entry-time, useful as group-by aggregate)
+    "avg_iv_skew_pct":             ("iv_skew_pct",                 "mean"),
+    "avg_delta_skew":              ("delta_skew",                  "mean"),
+    "avg_premium_skew_usd":        ("premium_skew_usd",            "mean"),
+    # Leg-winner outcome shares (Chunk 1) — boolean cols + mean works in all
+    # groupby contexts (whether or not leg_winner is itself a group axis).
+    "both_share":                  ("_is_both",                    "mean"),
+    "call_only_share":             ("_is_call_only",               "mean"),
+    "put_only_share":              ("_is_put_only",                "mean"),
+    "neither_share":               ("_is_neither",                 "mean"),
 }
 
 # Special-case metrics that don't fit the simple "column + agg" pattern.
@@ -661,7 +824,8 @@ def _round_score(metric: str, val: float) -> float:
     if val is None or (isinstance(val, float) and (val != val)):
         return val
     if metric in ("win_rate", "avg_pct_return_on_margin", "avg_pct_return_on_credit",
-                  "avg_pct_return_on_margin_winners", "avg_pct_return_on_credit_winners"):
+                  "avg_pct_return_on_margin_winners", "avg_pct_return_on_credit_winners") \
+            or metric.endswith("_share"):  # leg-winner outcome shares
         return round(float(val), 6)
     if metric in ("count", "n_rule_trigger", "n_hard_cap", "n_losses", "n_wins",
                   "max_consec_losses", "max_consec_wins", "max_consec_sl_hits",
@@ -1210,6 +1374,179 @@ def get_best_combo(
     return {"rows": _to_records(df), "metric": metric}
 
 
+@router.get("/leg_attribution")
+def get_leg_attribution(
+    exit_rule: Optional[str] = None,
+    delta_target: Optional[str] = None,
+    is_straddle: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    expiry_bucket: Optional[str] = None,
+    entry_atm_iv_band: Optional[str] = None,
+    entry_hour_ist: Optional[str] = None,
+    dte_bucket: Optional[str] = None,
+    spot_bucket: Optional[str] = None,
+    ivp_bucket: Optional[str] = None,
+    ctx_pattern: Optional[str] = None,
+    ctx_gex_regime: Optional[str] = None,
+    friday_date_ist: Optional[str] = None,
+    iv_skew_bucket: Optional[str] = None,
+    delta_skew_bucket: Optional[str] = None,
+    premium_skew_bucket: Optional[str] = None,
+    leg_winner: Optional[str] = None,
+    sort_by: str = "friday_date_ist",
+    sort_dir: str = "desc",
+    limit: int = Query(200, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    """Per-trade leg-level breakdown — Chunk 1 of the Trade Copilot plan.
+
+    For each trade matching `filters` under `exit_rule`, return:
+      - skew at entry (delta / IV / premium)
+      - per-leg P&L at exit (call_leg_pnl_usd + put_leg_pnl_usd ≡ gross_pnl_usd)
+      - per-leg max/min MTM during the hold
+      - leg_winner classification (both / call_only / put_only / neither)
+
+    The frontend table renders CE/PE as two stacked rows per trade with
+    shared skew + classification cells, so a glance shows which leg paid
+    and which one dragged the position.
+    """
+    filters = _query_filters(
+        delta_target, is_straddle, expiry_date,
+        entry_atm_iv_band, entry_hour_ist, dte_bucket,
+        spot_bucket, ivp_bucket, ctx_pattern, ctx_gex_regime,
+        friday_date_ist, expiry_bucket,
+        iv_skew_bucket, delta_skew_bucket, premium_skew_bucket, leg_winner,
+    )
+    rule = _parse_exit_rule(exit_rule)
+    derived = _derive_exits(filters, rule)
+    if derived.empty:
+        return {"total": 0, "rows": [], "offset": offset, "limit": limit}
+
+    keep_cols = [
+        "trade_id", "friday_date_ist", "entry_hour_ist", "entry_time_label",
+        "expiry_date", "expiry_bucket", "delta_target", "is_straddle",
+        "entry_atm_iv_band", "entry_atm_iv_pct",
+        # Per-leg entry context
+        "call_strike", "put_strike", "quantity_lots",
+        "call_entry_mark", "put_entry_mark",
+        "call_entry_iv",   "put_entry_iv",
+        "call_entry_delta","put_entry_delta",
+        # Per-leg exit context
+        "exit_call_mark", "exit_put_mark", "exit_spot",
+        # Per-leg outcomes
+        "call_leg_pnl_usd", "put_leg_pnl_usd", "leg_pnl_diff_usd",
+        "call_leg_max_mtm_usd", "call_leg_min_mtm_usd",
+        "put_leg_max_mtm_usd",  "put_leg_min_mtm_usd",
+        "leg_winner",
+        # Skew
+        "delta_skew", "iv_skew_pct", "premium_skew_usd", "premium_skew_pct",
+        "iv_skew_bucket", "delta_skew_bucket", "premium_skew_bucket",
+        # Position-level outcomes
+        "credit_usd", "margin_used_usd_at_entry", "total_entry_cost_usd",
+        "total_exit_cost_usd",
+        "gross_pnl_usd", "net_pnl_estimate_usd",
+        "max_mtm_usd", "min_mtm_usd", "exit_mtm_usd",
+        "is_win", "exit_reason", "exit_ts",
+    ]
+    keep_cols = [c for c in keep_cols if c in derived.columns]
+    df = derived[keep_cols].copy()
+
+    if sort_by in df.columns:
+        df = df.sort_values(sort_by, ascending=(sort_dir == "asc"),
+                            kind="stable")
+
+    total = len(df)
+    page = df.iloc[offset:offset + limit].copy()
+
+    # Round numeric cols for wire-friendliness
+    for c in ("call_entry_mark", "put_entry_mark",
+              "call_entry_iv",   "put_entry_iv",
+              "call_entry_delta","put_entry_delta",
+              "exit_call_mark",  "exit_put_mark",
+              "delta_skew", "iv_skew_pct",
+              "premium_skew_usd", "premium_skew_pct"):
+        if c in page.columns:
+            page[c] = page[c].apply(
+                lambda v: round(float(v), 6) if pd.notna(v) else None)
+    for c in ("call_leg_pnl_usd", "put_leg_pnl_usd", "leg_pnl_diff_usd",
+              "call_leg_max_mtm_usd", "call_leg_min_mtm_usd",
+              "put_leg_max_mtm_usd",  "put_leg_min_mtm_usd",
+              "credit_usd", "margin_used_usd_at_entry",
+              "total_entry_cost_usd", "total_exit_cost_usd",
+              "gross_pnl_usd", "net_pnl_estimate_usd",
+              "max_mtm_usd", "min_mtm_usd", "exit_mtm_usd",
+              "exit_spot", "entry_atm_iv_pct"):
+        if c in page.columns:
+            page[c] = page[c].apply(
+                lambda v: round(float(v), 2) if pd.notna(v) else None)
+
+    return {
+        "total": total, "offset": offset, "limit": limit,
+        "rows": _to_records(page),
+    }
+
+
+@router.get("/leg_skew_heatmap")
+def get_leg_skew_heatmap(
+    exit_rule: Optional[str] = None,
+    metric: str = "win_rate",
+    row_key: str = "iv_skew_bucket",
+    col_key: str = "delta_skew_bucket",
+    delta_target: Optional[str] = None,
+    is_straddle: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    expiry_bucket: Optional[str] = None,
+    entry_atm_iv_band: Optional[str] = None,
+    entry_hour_ist: Optional[str] = None,
+    dte_bucket: Optional[str] = None,
+    ivp_bucket: Optional[str] = None,
+    ctx_pattern: Optional[str] = None,
+    friday_date_ist: Optional[str] = None,
+):
+    """2D heatmap on the leg-attribution dataset.
+
+    `row_key` / `col_key` accept any of:
+      - iv_skew_bucket / delta_skew_bucket / premium_skew_bucket
+      - leg_winner
+      - delta_target / entry_hour_ist / entry_atm_iv_band / expiry_bucket / dte_bucket
+      - friday_date_ist (use cautiously — 121 cells)
+
+    `metric` accepts any name in ALL_METRICS, including the new
+    leg-aware ones (avg_call_leg_pnl, avg_put_leg_pnl, both_share, etc.).
+    """
+    filters = _query_filters(
+        delta_target, is_straddle, expiry_date,
+        entry_atm_iv_band, entry_hour_ist, dte_bucket,
+        None, ivp_bucket, ctx_pattern, None,
+        friday_date_ist, expiry_bucket,
+    )
+    rule = _parse_exit_rule(exit_rule)
+    derived = _derive_exits(filters, rule)
+    if derived.empty:
+        return {"rows": [], "metric": metric,
+                "row_key": row_key, "col_key": col_key}
+
+    for k in (row_key, col_key):
+        if k not in derived.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown axis: {k}. Available: "
+                       f"{sorted(c for c in derived.columns if c.endswith('_bucket') or c == 'leg_winner')}",
+            )
+
+    grp = derived.groupby([row_key, col_key], dropna=False)
+    score = _metric_score(grp, metric)
+    out = score.reset_index(name="value")
+    out["value"] = out["value"].apply(lambda v: _round_score(metric, v))
+    out["n_trades"] = grp.size().values
+    return {
+        "rows": _to_records(out),
+        "metric": metric,
+        "row_key": row_key,
+        "col_key": col_key,
+    }
+
+
 @router.get("/cost_breakdown")
 def get_cost_breakdown(trade_id: str = Query(...)):
     """Per-leg entry cost decomposition for one trade."""
@@ -1241,6 +1578,22 @@ def get_cost_breakdown(trade_id: str = Query(...)):
 def get_meta():
     """Return the universe of dimension values for filter dropdowns."""
     df = _load_trades()
+    # Stable bucket order (left → right = put-leaning → call-leaning) so
+    # heatmap axes always sort the same way regardless of which buckets
+    # are populated in the current dataset.
+    SKEW_ORDER = {
+        "delta_skew_bucket": ["put_richer_strong", "put_richer", "balanced",
+                              "call_richer", "call_richer_strong"],
+        "iv_skew_bucket": ["put_iv_strong", "put_iv", "balanced", "call_iv",
+                           "call_iv_strong"],
+        "premium_skew_bucket": ["put_premium_strong", "put_premium", "balanced",
+                                "call_premium", "call_premium_strong"],
+    }
+    def _ordered(col: str) -> list:
+        if col not in df.columns:
+            return []
+        present = set(df[col].dropna().unique().tolist())
+        return [b for b in SKEW_ORDER[col] if b in present]
     return {
         "n_trades_total": len(df),
         "fridays": sorted(df["friday_date_ist"].dropna().unique().tolist()),
@@ -1256,4 +1609,10 @@ def get_meta():
                     if "ctx_pattern" in df.columns else [],
         "gex_regimes": sorted(df["ctx_gex_regime"].dropna().unique().tolist())
                        if "ctx_gex_regime" in df.columns else [],
+        # Chunk 1 — leg attribution: skew bucket universes
+        "delta_skew_buckets":   _ordered("delta_skew_bucket"),
+        "iv_skew_buckets":      _ordered("iv_skew_bucket"),
+        "premium_skew_buckets": _ordered("premium_skew_bucket"),
+        # leg_winner classes available post-derivation; static enum
+        "leg_winners": ["both", "call_only", "put_only", "neither"],
     }

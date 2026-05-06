@@ -97,6 +97,32 @@ export function M7FilterBar({ meta, filters, setFilters, exitRule, setExitRule }
         </select>
       </div>
 
+      {/* Chunk 1 — leg attribution skew filters */}
+      <div>
+        <span style={lab}>IV skew</span>
+        <select style={sty} value={filters.iv_skew_bucket || ''}
+                onChange={e => update('iv_skew_bucket', e.target.value)}>
+          <option value="">All</option>
+          {meta?.iv_skew_buckets?.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+      </div>
+      <div>
+        <span style={lab}>Δ skew</span>
+        <select style={sty} value={filters.delta_skew_bucket || ''}
+                onChange={e => update('delta_skew_bucket', e.target.value)}>
+          <option value="">All</option>
+          {meta?.delta_skew_buckets?.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+      </div>
+      <div>
+        <span style={lab}>Leg winner</span>
+        <select style={sty} value={filters.leg_winner || ''}
+                onChange={e => update('leg_winner', e.target.value)}>
+          <option value="">All</option>
+          {meta?.leg_winners?.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+      </div>
+
       <div style={{ borderLeft: '1px solid #1a2d42', paddingLeft: 12, marginLeft: 4 }}>
         <span style={lab}>Exit Rule</span>
       </div>
