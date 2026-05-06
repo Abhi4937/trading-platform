@@ -1,22 +1,15 @@
 # Current Project State
 
 ## Active Projects
-- **M7 Friday→Saturday strangle/straddle sweep (NEW Session 13, 2026-05-05):**
+- **M7 Friday→Saturday strangle/straddle sweep — COMPLETE (Session 13-14, 2026-05-05/06):**
   Plan at `/home/abhis/.claude/plans/go-through-the-project-linked-dragonfly.md`.
-  - Backend: `m7_batch_backtester.py` + `m7_results.py` API. Sweeps every
-    (entry_hour × expiry × delta) for Fri 21:00 → Sat 03:00 IST entries with
-    Sat 17:30 IST hard cap. NO exit logic in simulator — full 1m path stored
-    so any exit rule (max profit %, margin %, premium SL %) is derived as a
-    DuckDB query against the path parquet.
-  - Frontend: `M7SweepDashboard.tsx` + 7 components. Filter bar with exit-rule
-    inputs, headline strip, IV-band-summary headline table, aggregate heatmaps,
-    best-combo table, trade log, 1m path chart with PnL/Premium/IV/Δ tabs.
-  - Tests: 31 tests passing.
-  - Status: BACKFILL RUNNING (PID at /tmp/m7_backtest.pid, log at
-    /tmp/m7_backtest.log). 121 Fridays, ~3 min each, ETA ~5h. Trades parquet
-    written incrementally every 5 fridays so dashboard works during backfill.
-  - After backfill: run `python3 scripts/backfill_m7_enriched.py` to add
-    calibration_v2 join columns.
+  - Backend: `m7_batch_backtester.py` + `m7_results.py` API. 34,166 trades,
+    121 Fridays, 121 path partitions. Enriched with calibration_v2 join.
+  - Frontend: `M7SweepDashboard.tsx` + 7 components. Exit-hour dropdown
+    (Sat 05:00→17:30 IST) added. Filter bar, headline strip, heatmaps,
+    best-combo table, trade log, 1m path chart.
+  - Tests: 155 passing.
+  - Status: ✅ FULLY COMPLETE. Committed as `9211594`.
 
 - **Short-strangle backtest stack (M1–M5v2 + live recorder all live as of
   2026-05-03; LiveSignal + M6 dashboards live as of Session 11; M6

@@ -79,15 +79,16 @@ export function M7TradeLogTable({ filters, onSelect }: {
                   <td style={{ padding: 5 }}>{String(r.entry_hour_ist).padStart(2, '0')}:00</td>
                   <td style={{ padding: 5 }}>{r.expiry_date}</td>
                   <td style={{ padding: 5, textAlign: 'right' }}>
-                    {r.delta_target.toFixed(2)}{r.is_straddle && <span style={{ color: '#7a9bb5' }}> ⊕</span>}
+                    {r.delta_target != null ? r.delta_target.toFixed(2) : '—'}
+                    {r.is_straddle && <span style={{ color: '#7a9bb5' }}> ⊕</span>}
                   </td>
-                  <td style={{ padding: 5, textAlign: 'right' }}>{r.call_strike.toLocaleString()}</td>
-                  <td style={{ padding: 5, textAlign: 'right' }}>{r.put_strike.toLocaleString()}</td>
-                  <td style={{ padding: 5, textAlign: 'right' }}>${r.credit_usd.toFixed(2)}</td>
-                  <td style={{ padding: 5 }}>{r.entry_atm_iv_band}</td>
-                  <td style={{ padding: 5, textAlign: 'right' }}>${r.total_entry_cost_usd.toFixed(2)}</td>
+                  <td style={{ padding: 5, textAlign: 'right' }}>{r.call_strike != null ? r.call_strike.toLocaleString() : '—'}</td>
+                  <td style={{ padding: 5, textAlign: 'right' }}>{r.put_strike != null ? r.put_strike.toLocaleString() : '—'}</td>
+                  <td style={{ padding: 5, textAlign: 'right' }}>{r.credit_usd != null ? `$${r.credit_usd.toFixed(2)}` : '—'}</td>
+                  <td style={{ padding: 5 }}>{r.entry_atm_iv_band ?? '—'}</td>
+                  <td style={{ padding: 5, textAlign: 'right' }}>{r.total_entry_cost_usd != null ? `$${r.total_entry_cost_usd.toFixed(2)}` : '—'}</td>
                   <td style={{ padding: 5, textAlign: 'right' }}>
-                    {r.margin_used_usd_at_entry ? `$${r.margin_used_usd_at_entry.toFixed(0)}` : '—'}
+                    {r.margin_used_usd_at_entry != null ? `$${r.margin_used_usd_at_entry.toFixed(0)}` : '—'}
                   </td>
                 </tr>
               ))}

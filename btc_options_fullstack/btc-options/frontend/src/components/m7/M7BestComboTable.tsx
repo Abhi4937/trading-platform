@@ -2,6 +2,31 @@ import React, { useEffect, useState } from 'react';
 import { fetchM7BestCombo } from '../../services/m7_api';
 import type { M7BestComboRow, M7ExitRule, M7Filters } from '../../types/m7';
 
+// Indeterminate progress bar — defined once at module scope; uses an inline
+// keyframes animation injected via a <style> tag.
+function LoadingBar({ visible }: { visible: boolean }) {
+  return (
+    <>
+      <style>{`
+        @keyframes m7slide {
+          0%   { transform: translateX(-100%); }
+          100% { transform: translateX(400%); }
+        }
+      `}</style>
+      <div style={{
+        height: 2, width: '100%', background: '#0d1421', overflow: 'hidden',
+        borderRadius: 2, marginBottom: 8,
+        visibility: visible ? 'visible' : 'hidden',
+      }}>
+        <div style={{
+          height: '100%', width: '25%', background: '#1f6feb',
+          animation: 'm7slide 1.1s ease-in-out infinite',
+        }} />
+      </div>
+    </>
+  );
+}
+
 export function M7BestComboTable({ filters, exitRule, metric = 'avg_net_pnl', topN = 20 }: {
   filters: M7Filters; exitRule: M7ExitRule; metric?: string; topN?: number;
 }) {
@@ -11,6 +36,7 @@ export function M7BestComboTable({ filters, exitRule, metric = 'avg_net_pnl', to
 
   useEffect(() => {
     setLoading(true);
+    setErr(null);
     fetchM7BestCombo({ ...filters, metric, top_n: topN }, exitRule)
       .then(r => setRows(r.rows))
       .catch(e => setErr(String(e)))
@@ -35,9 +61,13 @@ export function M7BestComboTable({ filters, exitRule, metric = 'avg_net_pnl', to
           {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} rows`}
         </div>
       </div>
-      {!loading && !err && (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12,
-                        fontVariantNumeric: 'tabular-nums', color: '#cfd9e3' }}>
+      <LoadingBar visible={loading} />
+      {err ? null : (
+        <table style={{
+          width: '100%', borderCollapse: 'collapse', fontSize: 12,
+          fontVariantNumeric: 'tabular-nums', color: '#cfd9e3',
+          opacity: loading ? 0.4 : 1, transition: 'opacity 120ms',
+        }}>
           <thead>
             <tr style={{ color: '#7a9bb5', textAlign: 'left' }}>
               <th style={{ padding: 6 }}>Rank</th>
@@ -53,7 +83,7 @@ export function M7BestComboTable({ filters, exitRule, metric = 'avg_net_pnl', to
               <tr key={i} style={{ borderTop: '1px solid #1a2d42' }}>
                 <td style={{ padding: 6, color: '#7a9bb5' }}>{i + 1}</td>
                 <td style={{ padding: 6 }}>{String(r.entry_hour_ist).padStart(2, '0')}:00</td>
-                <td style={{ padding: 6 }}>{r.expiry_date}</td>
+                <td style={{ padding: 6 }}>{r.expiry_bucket}</td>
                 <td style={{ padding: 6 }}>{Number(r.delta_target).toFixed(2)}</td>
                 <td style={{
                   padding: 6, textAlign: 'right',

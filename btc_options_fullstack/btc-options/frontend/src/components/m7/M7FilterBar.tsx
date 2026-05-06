@@ -65,6 +65,14 @@ export function M7FilterBar({ meta, filters, setFilters, exitRule, setExitRule }
         </select>
       </div>
       <div>
+        <span style={lab}>Expiry</span>
+        <select style={sty} value={filters.expiry_bucket || ''}
+                onChange={e => update('expiry_bucket', e.target.value)}>
+          <option value="">All</option>
+          {meta?.expiry_buckets.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+      </div>
+      <div>
         <span style={lab}>DTE bucket</span>
         <select style={sty} value={filters.dte_bucket || ''}
                 onChange={e => update('dte_bucket', e.target.value)}>
@@ -78,6 +86,14 @@ export function M7FilterBar({ meta, filters, setFilters, exitRule, setExitRule }
                 onChange={e => update('ivp_bucket', e.target.value)}>
           <option value="">All</option>
           {meta?.ivp_buckets.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+      </div>
+      <div>
+        <span style={lab}>Friday</span>
+        <select style={{ ...sty, minWidth: 130 }} value={filters.friday_date_ist || ''}
+                onChange={e => update('friday_date_ist', e.target.value)}>
+          <option value="">All</option>
+          {meta?.fridays.map(f => <option key={f} value={f}>{f}</option>)}
         </select>
       </div>
 

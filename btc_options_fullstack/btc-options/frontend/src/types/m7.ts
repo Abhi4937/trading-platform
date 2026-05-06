@@ -13,6 +13,7 @@ export interface M7Filters {
   delta_target?: string;          // comma-separated values
   is_straddle?: string;           // "true" / "false"
   expiry_date?: string;
+  expiry_bucket?: string;         // e.g. "next_to_next", "weekly"
   entry_atm_iv_band?: string;     // e.g. "20-30,30-40"
   entry_hour_ist?: string;
   dte_bucket?: string;
@@ -125,18 +126,111 @@ export interface M7AggregateResponse {
 export interface M7IvBandSummaryRow {
   entry_atm_iv_band: string;
   entry_hour_ist: number;
-  expiry_date: string;
+  expiry_bucket: string;
+  delta_target: number;
+  score: number;
+  n_trades: number;
+  // Extra metrics for the chosen combo (returned regardless of active metric)
+  avg_net_pnl?: number | null;
+  win_rate?: number | null;
+  avg_loss_usd?: number | null;
+  avg_win_usd?: number | null;
+  avg_credit?: number | null;
+  avg_margin?: number | null;
+  avg_pct_return_on_margin?: number | null;
+  avg_pct_return_on_credit?: number | null;
+  // Winners-only ROI (per-trade ratio, then mean over winners)
+  avg_pct_return_on_margin_winners?: number | null;
+  avg_pct_return_on_credit_winners?: number | null;
+  // Winners-only MTM stats
+  avg_max_mtm_winners?: number | null;
+  avg_min_mtm_winners?: number | null;
+  max_mtm_winners?: number | null;
+  min_mtm_winners?: number | null;
+  // Losers-only MTM stats
+  avg_max_mtm_losers?: number | null;
+  avg_min_mtm_losers?: number | null;
+  max_mtm_losers?: number | null;
+  min_mtm_losers?: number | null;
+  // Net P&L extremes (after entry + exit costs)
+  max_loss_usd?: number | null;
+  max_win_usd?: number | null;
+  // Exit-time MTM (gross at exit minus entry costs only — what shows on screen)
+  avg_exit_mtm?: number | null;
+  avg_win_mtm?: number | null;
+  avg_loss_mtm?: number | null;
+  largest_win_mtm?: number | null;
+  largest_loss_mtm?: number | null;
+  // Counts
+  n_rule_trigger?: number | null;
+  n_hard_cap?: number | null;
+  n_losses?: number | null;
+  n_wins?: number | null;
+  // Streaks (chronological)
+  max_consec_losses?: number | null;
+  max_consec_wins?: number | null;
+  max_consec_sl_hits?: number | null;
+  // Outlier counts vs group-average MTM
+  n_winners_below_avg_min_mtm?: number | null;
+  n_losers_above_avg_max_mtm?: number | null;
+}
+
+export interface M7BestComboRow {
+  entry_hour_ist: number;
+  expiry_bucket: string;
   delta_target: number;
   score: number;
   n_trades: number;
 }
 
-export interface M7BestComboRow {
+export interface M7BestComboMarker {
+  friday_date_ist: string;
+  rel_time_max_mtm: number | null;
+  rel_time_min_mtm: number | null;
+  max_mtm_usd: number | null;
+  min_mtm_usd: number | null;
+  exit_mtm_usd: number | null;
+  net_pnl_estimate_usd: number | null;
+  is_win: boolean | null;
+  exit_reason: string | null;
+}
+export interface M7BestComboMarkersBand {
+  entry_atm_iv_band: string;
   entry_hour_ist: number;
-  expiry_date: string;
+  expiry_bucket: string;
   delta_target: number;
-  score: number;
   n_trades: number;
+  n_wins: number;
+  n_losses: number;
+  trades: M7BestComboMarker[];
+}
+export interface M7BestComboMarkersResponse {
+  metric: string;
+  bands: M7BestComboMarkersBand[];
+}
+
+export interface M7MissedFridayRow {
+  friday_date_ist: string;
+  entry_hour_ist: number;
+  expiry_bucket: string;
+  delta_target: number;
+  entry_atm_iv_band: string;
+  entry_atm_iv_pct?: number | null;
+  credit_usd?: number | null;
+  margin_used_usd_at_entry?: number | null;
+  net_pnl_estimate_usd?: number | null;
+  gross_pnl_usd?: number | null;
+  max_mtm_usd?: number | null;
+  min_mtm_usd?: number | null;
+  exit_mtm_usd?: number | null;
+  is_win?: boolean | null;
+  exit_reason?: string | null;
+}
+export interface M7MissedFridaysResponse {
+  rows: M7MissedFridayRow[];
+  n_missed: number;
+  n_total_fridays: number;
+  n_matched: number;
 }
 
 export interface M7CostBreakdown {
@@ -154,6 +248,7 @@ export interface M7Meta {
   n_trades_total: number;
   fridays: string[];
   expiries: string[];
+  expiry_buckets: string[];
   deltas: number[];
   entry_hours: number[];
   iv_bands: string[];

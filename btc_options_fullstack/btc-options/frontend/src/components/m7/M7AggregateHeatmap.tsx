@@ -28,9 +28,33 @@ export function M7AggregateHeatmap({
       .finally(() => setLoading(false));
   }, [JSON.stringify(filters), JSON.stringify(exitRule), rowKey, colKey, metric]);
 
-  // Build pivot
-  const rowVals = Array.from(new Set(rows.map(r => String(r[rowKey])))).sort();
-  const colVals = Array.from(new Set(rows.map(r => String(r[colKey])))).sort();
+  // Build pivot — smart sort that handles numeric values, IV bands ("100+" → last),
+  // and expiry buckets in chronological order.
+  const sortValues = (vals: string[]): string[] => {
+    const score = (v: string): number => {
+      // IV band like "100+" → max
+      if (v === '100+') return 1000;
+      // IV band like "30-40" → use lower bound
+      const ivMatch = v.match(/^(\d+)-(\d+)$/);
+      if (ivMatch) return Number(ivMatch[1]);
+      // Expiry bucket — chronological
+      const expOrder: Record<string, number> = {
+        'current (Sat)': 1, 'next (Sun)': 2, 'next_to_next (Mon)': 3,
+        'weekly (7d)': 4, 'biweekly (14d)': 5, 'monthly (30d)': 6, 'quarterly': 7,
+      };
+      if (v in expOrder) return expOrder[v];
+      // DTE bucket like "0-3", "3-7", "7-14"
+      const dteMatch = v.match(/^(\d+)-(\d+)$/);
+      if (dteMatch) return Number(dteMatch[1]);
+      // Pure number
+      const n = Number(v);
+      if (isFinite(n)) return n;
+      return Number.MAX_SAFE_INTEGER;
+    };
+    return [...vals].sort((a, b) => score(a) - score(b));
+  };
+  const rowVals = sortValues(Array.from(new Set(rows.map(r => String(r[rowKey])))));
+  const colVals = sortValues(Array.from(new Set(rows.map(r => String(r[colKey])))));
   const lookup = new Map<string, M7AggregateRow>();
   for (const r of rows) lookup.set(`${r[rowKey]}|${r[colKey]}`, r);
   const values = rows.map(r => Number(r.value)).filter(v => !isNaN(v));

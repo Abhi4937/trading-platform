@@ -1,5 +1,23 @@
 # Claude's Work Log
 
+## Session 14 (2026-05-06) — M7 backfill complete + enrichment + exit-hour UI + commit
+
+### Headline
+M7 pipeline fully complete. Backfill finished (34,166 trades, 121 Fridays),
+enrichment run (29,966 trades matched calibration buckets), all committed.
+
+### What was done
+- Monitored M7 backfill to completion: 34,166 trades in `m7_trades.parquet`,
+  121 path partitions in `m7_paths/friday_date=*/part.parquet`.
+- Ran `scripts/backfill_m7_enriched.py`: produced `m7_trades_enriched.parquet`
+  (91 cols, 8.76 MB) with calibration_v2 join columns. API auto-prefers enriched.
+- Exit-hour UI was already implemented in Session 13 — no changes needed.
+- Committed all outstanding M7 + M6 + indicator + live-signal changes:
+  commit `9211594`, 65 files, 18,542 insertions.
+- Updated HANDOFF.md, current_state.md, work_log_claude.md.
+
+---
+
 ## Session 13 (2026-05-05) — M7 Friday→Saturday strangle/straddle sweep
 
 ### Headline

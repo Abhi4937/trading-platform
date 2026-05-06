@@ -2,6 +2,40 @@
 
 ## Last Session
 **Who:** Claude
+**Date:** 2026-05-06 (Session 14 — M7 backfill completed + enrichment + exit-hour UI + commit)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 14 highlights
+- **M7 backfill COMPLETE**: 121/121 Fridays processed (Dec 2023 → Apr 2026).
+  34,166 trades in `m7_trades.parquet`, 121 path partitions in `m7_paths/`.
+  Runtime: ~5.3 hours (was still in progress at session start).
+- **Enrichment run**: `scripts/backfill_m7_enriched.py` executed.
+  29,966/34,166 trades matched a calibration bucket. Output:
+  `m7_trades_enriched.parquet` (34,166 rows × 91 cols, 8.76 MB).
+  API auto-prefers enriched parquet (existing code, no change needed).
+- **Exit-hour UI** (`M7FilterBar.tsx`): Added "Exit hour" dropdown with
+  13 Saturday IST options (Sat 05:00 → Sat 17:30). Uses `fixed_exit_hour_ist`
+  field in `M7ExitRule` (both TS type and Python API updated in Session 13).
+- **All 155 tests passing** (confirmed at session start).
+- **Committed**: `9211594` — 65 files changed, 18,542 insertions.
+
+### What's on disk
+```
+/home/abhis/btc-data/derived/m7/m7_trades.parquet          8.5 MB  (34,166 trades, 82 cols)
+/home/abhis/btc-data/derived/m7/m7_trades_enriched.parquet 8.76 MB (34,166 trades, 91 cols)
+/home/abhis/btc-data/derived/m7/m7_paths/                  121 partitions (friday_date=YYYY-MM-DD)
+```
+
+### Pending follow-ups
+- No blockers. M7 pipeline is complete end-to-end.
+- Optional future: add per-friday multiprocessing to cut re-run time
+- Optional future: add UI rule sliders for premium-SL presets
+- Optional future: M8 — what's the next analysis direction?
+
+---
+
+## Previous Session (13)
+**Who:** Claude
 **Date:** 2026-05-05 (Session 13 — M7 Friday→Saturday strangle/straddle sweep with rich 1m path + rule-based exit derivation)
 **Branch:** `mainbranch-gemini_claude`
 
