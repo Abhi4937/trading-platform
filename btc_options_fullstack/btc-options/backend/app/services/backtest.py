@@ -724,7 +724,6 @@ def _simulate_day(
             if iv_e <= 0:
                 continue
             try:
-                from app.core.greeks import compute_greeks
                 g = compute_greeks(spot_at_entry, leg["strike"], T, 0.0, iv_e, flag)
                 ta_legs.append(TradeLeg(
                     type=leg["type"], side=leg["action"],
@@ -749,6 +748,7 @@ def _simulate_day(
 
     return {
         "date":            d.isoformat(),
+        "exit_date":       _date_ist(actual_exit_ts),
         "entry_time":      _fmt_ist(entry_ts),
         "exit_time":       _fmt_ist(actual_exit_ts),
         "exit_reason":     exit_reason_str,
@@ -802,6 +802,7 @@ def _simulate_day(
 def _skipped(d: date, reason: str, entry_ts: Optional[int] = None) -> dict:
     return {
         "date": d.isoformat(),
+        "exit_date": None,
         "entry_time": _fmt_ist(entry_ts) if entry_ts else None,
         "exit_time": None, "exit_reason": None,
         "spot_at_entry": None, "spot_at_exit": None,
@@ -836,6 +837,11 @@ def _skipped(d: date, reason: str, entry_ts: Optional[int] = None) -> dict:
 def _fmt_ist(unix_sec: int) -> str:
     dt = datetime.fromtimestamp(int(unix_sec) + IST_OFFSET_SEC, tz=timezone.utc)
     return dt.strftime("%H:%M:%S IST")
+
+
+def _date_ist(unix_sec: int) -> str:
+    dt = datetime.fromtimestamp(int(unix_sec) + IST_OFFSET_SEC, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d")
 
 
 # ── Public entry point ────────────────────────────────────────────────────────

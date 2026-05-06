@@ -939,6 +939,7 @@ import json
 import math as _math
 
 CALIBRATION_PATH = "/home/abhis/btc-data/derived/calibration.parquet"
+CALIBRATION_V2_PATH = "/home/abhis/btc-data/derived/calibration_v2.parquet"
 CALIBRATION_UNIVERSAL_PATH = "/home/abhis/btc-data/derived/calibration_universal.parquet"
 FULL_ENRICHED_5M_PATH = "/home/abhis/btc-data/derived/full_enriched_5m.parquet"
 
@@ -949,12 +950,20 @@ _calibration_loaded = {"specific": None, "universal": None}
 
 
 def _load_calibration_specific():
+    """Load v2 (M4-enriched) calibration when present, else fall back to v1.
+    v2 is a left-join superset of v1's columns plus pattern_winrate and
+    z_winners stats — same row keys, so the bucket lookup logic is identical.
+    """
     if _calibration_loaded["specific"] is not None:
         return _calibration_loaded["specific"]
+    import pandas as _pd
+    if os.path.exists(CALIBRATION_V2_PATH):
+        df = _pd.read_parquet(CALIBRATION_V2_PATH)
+        _calibration_loaded["specific"] = df
+        return df
     if not os.path.exists(CALIBRATION_PATH):
         _calibration_loaded["specific"] = "missing"
         return "missing"
-    import pandas as _pd
     df = _pd.read_parquet(CALIBRATION_PATH)
     _calibration_loaded["specific"] = df
     return df
@@ -1063,6 +1072,42 @@ async def get_calibration(
             "pcr_oi_median":          float(row["pcr_oi_median"]) if row["pcr_oi_median"] is not None else None,
             "structural_baseline":    float(row["structural_baseline"]) if not (row["structural_baseline"] is None or _math.isnan(float(row["structural_baseline"]))) else None,
             "pattern_distribution":   json.loads(row["pattern_distribution"]) if isinstance(row["pattern_distribution"], str) else None,
+            # ── v2 (M4-enriched) fields. Present only when calibration_v2.parquet
+            #     has data for this bucket; None otherwise so the v1 shape stays valid.
+            "overall_winrate": (float(row["overall_winrate"])
+                                if "overall_winrate" in row.index
+                                   and row["overall_winrate"] is not None
+                                   and not _math.isnan(float(row["overall_winrate"]))
+                                else None),
+            "n_trades": (int(row["n_trades"])
+                         if "n_trades" in row.index
+                            and row["n_trades"] is not None
+                            and not _math.isnan(float(row["n_trades"]))
+                         else None),
+            "z_winners_mean": (float(row["z_winners_mean"])
+                               if "z_winners_mean" in row.index
+                                  and row["z_winners_mean"] is not None
+                                  and not _math.isnan(float(row["z_winners_mean"]))
+                               else None),
+            "z_winners_std": (float(row["z_winners_std"])
+                              if "z_winners_std" in row.index
+                                 and row["z_winners_std"] is not None
+                                 and not _math.isnan(float(row["z_winners_std"]))
+                              else None),
+            "pattern_winrate": (json.loads(row["pattern_winrate"])
+                                if "pattern_winrate" in row.index
+                                   and isinstance(row["pattern_winrate"], str)
+                                else None),
+            "expectancy_per_credit_pct": (float(row["expectancy_per_credit_pct"])
+                                          if "expectancy_per_credit_pct" in row.index
+                                             and row["expectancy_per_credit_pct"] is not None
+                                             and not _math.isnan(float(row["expectancy_per_credit_pct"]))
+                                          else None),
+            "sl_hit_rate": (float(row["sl_hit_rate"])
+                            if "sl_hit_rate" in row.index
+                               and row["sl_hit_rate"] is not None
+                               and not _math.isnan(float(row["sl_hit_rate"]))
+                            else None),
         }
     else:
         # Fall back to universal curve

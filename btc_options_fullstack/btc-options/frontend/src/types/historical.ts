@@ -10,6 +10,8 @@ export interface HistoricalOptionLeg {
   gamma: number;
   theta: number;
   vega: number;
+  open_interest?: number;
+  oi_usd?: number;
 }
 
 export interface HistoricalChainRow {
@@ -63,4 +65,39 @@ export interface AtmIvPoint {
 
 export interface AtmIvSeriesResponse {
   data: AtmIvPoint[];
+}
+
+// ── Spot/leg OHLC for indicator chart ──────────────────────────────────────
+
+export interface SpotOhlcBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+}
+
+export interface SpotOhlcResponse {
+  data: SpotOhlcBar[];
+}
+
+// ── Indicator config + response ────────────────────────────────────────────
+
+export type IndicatorType = 'sma' | 'ema' | 'rsi' | 'macd' | 'bbands' | 'atr' | 'vwap';
+
+export interface IndicatorConfig {
+  type: IndicatorType;
+  params: Record<string, number>;
+  color?: string;
+}
+
+export interface IndicatorValuePoint    { time: number; value: number; }
+export interface IndicatorMacdPoint     { time: number; macd: number | null; signal: number | null; hist: number | null; }
+export interface IndicatorBbandsPoint   { time: number; upper: number | null; mid: number | null; lower: number | null; }
+
+export type IndicatorPoint = IndicatorValuePoint | IndicatorMacdPoint | IndicatorBbandsPoint;
+
+export interface IndicatorsResponse {
+  indicators: Record<string, IndicatorPoint[]>;
 }

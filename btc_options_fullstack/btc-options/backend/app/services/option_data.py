@@ -206,6 +206,172 @@ def strike_for_closest_delta(
     return best_strike
 
 
+def strike_for_closest_delta_below(
+    timestamp: int, expiry: str,
+    option_type: Literal["CE", "PE"], target_delta: float,
+) -> int:
+    """Find the strike with the highest abs(delta) that is still ≤ target_delta.
+
+    If no strike qualifies (all deltas exceed target), falls back to the strike
+    with the smallest abs(delta) available.
+    """
+    from app.core.greeks import implied_vol, compute_greeks
+
+    spot = get_spot_at_or_before(timestamp)
+    if spot <= 0:
+        return 0
+    strikes = get_strikes_for_expiry(expiry)
+    if not strikes:
+        return 0
+
+    expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
+        tzinfo=timezone.utc, hour=12,
+    )
+    now_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    T = max(0.0001, (expiry_dt - now_dt).total_seconds() / (365 * 24 * 3600))
+
+    target = abs(target_delta)
+    # Two candidate pools: strikes at-or-below target, and fallback (above target)
+    below: list[tuple[float, int]] = []   # (abs_delta, strike)
+    above: list[tuple[float, int]] = []
+
+    flag = "call" if option_type == "CE" else "put"
+    for k in sorted(strikes):
+        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
+        if mark <= 0:
+            continue
+        iv = implied_vol(mark, spot, k, T, 0.0, flag)
+        if not iv or iv <= 0:
+            continue
+        try:
+            g = compute_greeks(spot, k, T, 0.0, iv, flag)
+        except Exception:
+            continue
+        ad = abs(g.delta)
+        if ad <= target:
+            below.append((ad, int(k)))
+        else:
+            above.append((ad, int(k)))
+
+    if below:
+        # Highest delta still ≤ target (closest from below)
+        return max(below, key=lambda x: x[0])[1]
+    if above:
+        # Nothing qualifies — use smallest delta available
+        return min(above, key=lambda x: x[0])[1]
+    return 0
+
+
+def strikes_pool_for_delta_below(
+    timestamp: int, expiry: str,
+    option_type: Literal["CE", "PE"], target_delta: float,
+) -> list[tuple[int, float, float]]:
+    """Return [(strike, abs_delta, mark)] for all strikes with abs(delta) ≤ target_delta.
+
+    Sorted by abs_delta descending (highest qualifying delta first = closest to target).
+    Falls back to all strikes sorted by abs_delta ascending when nothing qualifies.
+    Used by the Delta ≤ Match criteria for cross-leg premium alignment.
+    """
+    from app.core.greeks import implied_vol, compute_greeks
+
+    spot = get_spot_at_or_before(timestamp)
+    if spot <= 0:
+        return []
+    strikes = get_strikes_for_expiry(expiry)
+    if not strikes:
+        return []
+
+    expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
+        tzinfo=timezone.utc, hour=12,
+    )
+    now_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    T = max(0.0001, (expiry_dt - now_dt).total_seconds() / (365 * 24 * 3600))
+
+    target = abs(target_delta)
+    flag = "call" if option_type == "CE" else "put"
+    below: list[tuple[int, float, float]] = []   # (strike, abs_delta, mark)
+    above: list[tuple[int, float, float]] = []
+
+    for k in sorted(strikes):
+        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
+        if mark <= 0:
+            continue
+        iv = implied_vol(mark, spot, k, T, 0.0, flag)
+        if not iv or iv <= 0:
+            continue
+        try:
+            g = compute_greeks(spot, k, T, 0.0, iv, flag)
+        except Exception:
+            continue
+        ad = abs(g.delta)
+        if ad <= target:
+            below.append((int(k), ad, mark))
+        else:
+            above.append((int(k), ad, mark))
+
+    if below:
+        return sorted(below, key=lambda x: x[1], reverse=True)
+    return sorted(above, key=lambda x: x[1])
+
+
+def strike_for_highest_oi(
+    timestamp: int, expiry: str,
+    option_type: Literal["CE", "PE"], max_delta: float,
+) -> int:
+    """OTM strike with highest oi_close, abs(delta) ≤ max_delta. 0 if no candidate.
+
+    OTM filter is strict: CE requires strike > spot, PE requires strike < spot.
+    Skips strikes with no mark, no IV, no OI, or delta exceeding the cap.
+    """
+    from app.core.greeks import implied_vol, compute_greeks
+
+    spot = get_spot_at_or_before(timestamp)
+    if spot <= 0:
+        return 0
+    strikes = get_strikes_for_expiry(expiry)
+    if not strikes:
+        return 0
+
+    expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
+        tzinfo=timezone.utc, hour=12,
+    )
+    now_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    T = max(0.0001, (expiry_dt - now_dt).total_seconds() / (365 * 24 * 3600))
+
+    cap = abs(max_delta)
+    flag = "call" if option_type == "CE" else "put"
+    best_strike = 0
+    best_oi = 0.0
+
+    for k in sorted(strikes):
+        # OTM filter (strict)
+        if option_type == "CE" and k <= spot:
+            continue
+        if option_type == "PE" and k >= spot:
+            continue
+
+        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
+        if mark <= 0:
+            continue
+        iv = implied_vol(mark, spot, k, T, 0.0, flag)
+        if not iv or iv <= 0:
+            continue
+        try:
+            g = compute_greeks(spot, k, T, 0.0, iv, flag)
+        except Exception:
+            continue
+        if abs(g.delta) > cap:
+            continue
+        oi = get_oi_at_or_before(expiry, k, option_type, timestamp)
+        if oi <= 0:
+            continue
+        if oi > best_oi:
+            best_oi = oi
+            best_strike = int(k)
+
+    return best_strike
+
+
 # ── Per-leg bar series ────────────────────────────────────────────────────────
 
 def load_leg_series(
@@ -286,6 +452,72 @@ def get_mark_at_or_before(
     if not res or res[0] is None:
         return 0.0, 0
     return float(res[0]), int(res[1])
+
+
+def get_oi_at_or_before(
+    expiry: str, strike: int, option_type: Literal["CE", "PE"], timestamp: int,
+) -> float:
+    """Latest oi_close at or before `timestamp`. Returns 0.0 on miss/NaN."""
+    import math as _math
+    path = f"{OPTIONS_BASE_DIR}/expiry={expiry}/strike={int(strike)}/{option_type}.parquet"
+    if not os.path.exists(path):
+        return 0.0
+    conn = get_conn()
+    res = conn.execute(
+        f"SELECT oi_close FROM read_parquet('{path}') "
+        f"WHERE timestamp_unix <= {int(timestamp)} "
+        f"ORDER BY timestamp_unix DESC LIMIT 1"
+    ).fetchone()
+    if not res or res[0] is None:
+        return 0.0
+    try:
+        v = float(res[0])
+    except Exception:
+        return 0.0
+    return 0.0 if _math.isnan(v) else v
+
+
+# ── Realized / Historical Volatility ─────────────────────────────────────────
+
+def hv_at(timestamp: int, window_days: int = 7, bars_per_day: int = 288) -> float:
+    """Annualized realized volatility (%) at `timestamp`.
+
+    Computes stdev of log-returns over the last `window_days × bars_per_day`
+    spot bars (default 5m bars over 7 days), annualized × sqrt(365 × bars_per_day) × 100.
+    Mirrors the RV pane on the historical chart. Returns 0.0 on failure.
+    """
+    import math as _math
+    try:
+        import numpy as np
+    except Exception:
+        return 0.0
+
+    interval_min = max(1, int(round(24 * 60 / bars_per_day)))
+    interval = f"{interval_min} minutes"
+    rolling_bars = window_days * bars_per_day
+    annualize = _math.sqrt(365 * bars_per_day)
+    lookback_start = max(0, int(timestamp) - (window_days + 5) * 86400)
+    conn = get_conn()
+    try:
+        q = f"""
+        SELECT
+            time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
+            last(mark_close ORDER BY timestamp_unix) AS spot_close
+        FROM read_parquet('{SPOT_DATA_PATH}')
+        WHERE timestamp_unix >= {lookback_start} AND timestamp_unix <= {int(timestamp)}
+        GROUP BY bucket ORDER BY bucket ASC
+        """
+        df = conn.execute(q).df()
+        if df.empty or len(df) < 2:
+            return 0.0
+        log_ret = np.log(df["spot_close"] / df["spot_close"].shift(1)).dropna()
+        recent = log_ret.tail(rolling_bars)
+        if len(recent) < 10:
+            return 0.0
+        rv = float(recent.std() * annualize * 100)
+        return round(rv, 2)
+    except Exception:
+        return 0.0
 
 
 # ── ATM IV ────────────────────────────────────────────────────────────────────

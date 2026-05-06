@@ -165,7 +165,7 @@ export default function App() {
       )}
 
       {/* Main */}
-      <main className="main">
+      <main className="main" style={mode === 'M7_SWEEP' || mode === 'M4_RESULTS' ? { overflowY: 'auto' } : undefined}>
         {mode === 'M7_SWEEP' ? (
           <M7SweepDashboard />
         ) : mode === 'M4_RESULTS' ? (

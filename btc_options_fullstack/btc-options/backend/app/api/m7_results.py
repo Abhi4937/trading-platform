@@ -40,25 +40,29 @@ TRADES_PATH = os.path.join(M7_BASE_DIR, "m7_trades.parquet")
 TRADES_ENRICHED_PATH = os.path.join(M7_BASE_DIR, "m7_trades_enriched.parquet")
 PATHS_GLOB = os.path.join(M7_BASE_DIR, "m7_paths/friday_date=*/part.parquet")
 
-# Lazy module-level cache. Trades fits in RAM; paths queried via DuckDB.
+# Lazy module-level cache — auto-reloads when the parquet file changes on disk.
 _TRADES_DF: Optional[pd.DataFrame] = None
+_TRADES_MTIME: float = 0.0
 
 
 def _load_trades() -> pd.DataFrame:
     """Prefer m7_trades_enriched.parquet (with calibration_v2 join columns)
-    when present; fall back to plain m7_trades.parquet."""
-    global _TRADES_DF
-    if _TRADES_DF is None:
-        if os.path.exists(TRADES_ENRICHED_PATH):
-            _TRADES_DF = pd.read_parquet(TRADES_ENRICHED_PATH)
-        elif os.path.exists(TRADES_PATH):
-            _TRADES_DF = pd.read_parquet(TRADES_PATH)
-        else:
-            raise HTTPException(
-                status_code=503,
-                detail=f"m7_trades.parquet missing under {M7_BASE_DIR}; "
-                       f"run `python -m app.analytics.m7_batch_backtester` first.",
-            )
+    when present; fall back to plain m7_trades.parquet.
+    Re-reads from disk whenever the file's mtime changes (backfill writes
+    incremental snapshots every 5 Fridays)."""
+    global _TRADES_DF, _TRADES_MTIME
+    path = TRADES_ENRICHED_PATH if os.path.exists(TRADES_ENRICHED_PATH) else TRADES_PATH
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=503,
+            detail=f"m7_trades.parquet missing under {M7_BASE_DIR}; "
+                   f"run `python -m app.analytics.m7_batch_backtester` first.",
+        )
+    mtime = os.path.getmtime(path)
+    if _TRADES_DF is None or mtime != _TRADES_MTIME:
+        _TRADES_DF = pd.read_parquet(path)
+        _TRADES_MTIME = mtime
+        log.info("M7 trades reloaded: %d rows from %s", len(_TRADES_DF), path)
     return _TRADES_DF
 
 
@@ -197,10 +201,39 @@ def _derive_exits(filters: dict, exit_rule: dict) -> pd.DataFrame:
     if trades.empty:
         return pd.DataFrame()
 
-    # If a fixed exit time is given, simply look up that row.
-    if exit_rule.get("fixed_exit_ts") is not None:
+    # fixed_exit_hour_ist: per-trade Saturday exit at a given IST hour.
+    # Formula: target_ts = friday_midnight_utc + 86400 + hour*3600 - 19800
+    # (86400 = one day, -19800 = IST offset 5.5h, so Sat H:MM IST → Sat (H-5.5)h UTC)
+    if exit_rule.get("fixed_exit_hour_ist") is not None:
+        hour = float(exit_rule["fixed_exit_hour_ist"])
+        offset_secs = int(86400 + hour * 3600 - 19800)
+        t = trades.copy()
+        t["_target_ts"] = t["friday_date_ist"].map(
+            lambda d: int(pd.Timestamp(str(d), tz="UTC").timestamp()) + offset_secs
+        )
+        conn = _duckdb_conn()
+        conn.register("_trade_targets", t[["trade_id", "_target_ts"]])
+        sql = f"""
+        WITH per_trade_exit AS (
+            SELECT p.trade_id, MAX(p.ts) AS exit_ts
+            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+            JOIN _trade_targets ft ON p.trade_id = ft.trade_id
+            WHERE p.ts <= ft._target_ts
+            GROUP BY p.trade_id
+        )
+        SELECT p.trade_id, p.ts AS exit_ts, p.spot AS exit_spot,
+               p.call_mark AS exit_call_mark, p.put_mark AS exit_put_mark,
+               p.gross_pnl_usd, p.pnl_pct_of_credit, p.pnl_pct_of_margin,
+               'fixed_hour_ist' AS exit_reason
+        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        JOIN per_trade_exit pe ON p.trade_id = pe.trade_id AND p.ts = pe.exit_ts
+        """
+        exits = conn.execute(sql).df()
+        conn.close()
+
+    # If a fixed exit timestamp is given, simply look up that row.
+    elif exit_rule.get("fixed_exit_ts") is not None:
         fix_ts = int(exit_rule["fixed_exit_ts"])
-        # Same fixed_exit_ts for all trades → query path for that ts per trade
         sql = f"""
         SELECT p.trade_id, p.ts AS exit_ts, p.spot AS exit_spot,
                p.call_mark AS exit_call_mark, p.put_mark AS exit_put_mark,

@@ -492,3 +492,315 @@ d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
 ?? scripts/
 ?? "../../new platform arch/"
 ```
+
+---
+## Snapshot — 2026-05-01 06:04 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+d79686c feat: multi-day backtester + persistence layer + slippage parity fix
+bb5adab feat: per-leg margin lookup, compare-mode margin, payoff slider-only, ATM IV fallback
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+18669c3 fix: compute Greeks T from bucket END not bucket START in chart-data-with-greeks
+4ea3a65 docs: clarify restart rules — backend change requires both backend rebuild AND frontend restart
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/CLAUDE.md        |  23 ++
+ btc_options_fullstack/btc-options/HANDOFF.md       | 101 ++++++++-
+ .../btc-options/backend/app/api/backtest.py        |   6 +
+ .../btc-options/backend/app/services/backtest.py   | 233 +++++++++++++++++----
+ .../btc-options/docs/memories/current_state.md     |  31 +++
+ .../btc-options/docs/memories/work_log_claude.md   |  49 +++++
+ .../src/components/backtest/BacktestForm.tsx       |  40 ++++
+ .../src/components/backtest/BacktestStatsPanel.tsx |  40 +++-
+ .../components/backtest/BacktestTradeLogTable.tsx  |  60 +++++-
+ .../src/components/historical/StrategyPanel.tsx    | 210 ++++++++++++++-----
+ .../btc-options/frontend/src/types/backtest.ts     |  44 +++-
+ 11 files changed, 737 insertions(+), 100 deletions(-)
+```
+
+### Git Status
+```
+ M CLAUDE.md
+ M HANDOFF.md
+ M backend/app/api/backtest.py
+ M backend/app/services/backtest.py
+ M docs/memories/current_state.md
+ M docs/memories/work_log_claude.md
+ M frontend/src/components/backtest/BacktestForm.tsx
+ M frontend/src/components/backtest/BacktestStatsPanel.tsx
+ M frontend/src/components/backtest/BacktestTradeLogTable.tsx
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/types/backtest.ts
+?? "Slipage calculation SS/"
+?? "UI ss/"
+?? frontend/src/utils/slippage_v2.ts
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-02 12:10 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+1a48d4f docs: add UI ss/ — strangle spec + reference screenshots
+0bd3863 feat: Module 1 — spot enrichment pipeline (analytics layer)
+d79686c feat: multi-day backtester + persistence layer + slippage parity fix
+bb5adab feat: per-leg margin lookup, compare-mode margin, payoff slider-only, ATM IV fallback
+2362b15 fix: revert RV default to 7d (30d was too large for weekly contracts)
+48dee87 feat: entry/exit slippage split + brokerage model + peak exit P&L
+ed70ad9 feat: RV — intraday rolling window + full contract lifetime for IV/RV panes
+730b35d feat: HV → RV (daily-return realized vol, GVOL/Delta convention)
+d1c184d feat: HV chart, IV-HV spread, slippage model + entry-spot context
+03289e4 fix: IV pane shrink on Delta toggle + hide replay bar on maximize
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/CLAUDE.md        | 161 +++++++++
+ btc_options_fullstack/btc-options/HANDOFF.md       |  86 ++++-
+ .../btc-options/backend/app/api/backtest.py        |   8 +
+ .../btc-options/backend/app/api/historical.py      | 241 +++++++++++-
+ .../btc-options/backend/app/services/backtest.py   | 402 +++++++++++++++++++--
+ .../backend/app/services/option_data.py            | 232 ++++++++++++
+ .../btc-options/docs/memories/current_state.md     |  29 +-
+ .../btc-options/docs/memories/session_end_log.md   |  56 +++
+ .../btc-options/docs/memories/work_log_claude.md   |  84 +++++
+ .../src/components/backtest/BacktestForm.tsx       | 100 ++++-
+ .../src/components/backtest/BacktestStatsPanel.tsx |  40 +-
+ .../components/backtest/BacktestTradeLogTable.tsx  | 331 +++++++++++------
+ .../historical/HistoricalOptionChain.tsx           |  39 +-
+ .../src/components/historical/StrategyPanel.tsx    | 210 ++++++++---
+ .../frontend/src/pages/BacktestDashboard.tsx       |  69 +++-
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 104 +++++-
+ .../frontend/src/services/historical_api.ts        |  33 ++
+ .../btc-options/frontend/src/types/backtest.ts     |  53 ++-
+ .../btc-options/frontend/src/types/historical.ts   |  37 ++
+ 19 files changed, 2099 insertions(+), 216 deletions(-)
+```
+
+### Git Status
+```
+ M CLAUDE.md
+ M HANDOFF.md
+ M backend/app/api/backtest.py
+ M backend/app/api/historical.py
+ M backend/app/services/backtest.py
+ M backend/app/services/option_data.py
+ M docs/memories/current_state.md
+ M docs/memories/session_end_log.md
+ M docs/memories/work_log_claude.md
+ M frontend/src/components/backtest/BacktestForm.tsx
+ M frontend/src/components/backtest/BacktestStatsPanel.tsx
+ M frontend/src/components/backtest/BacktestTradeLogTable.tsx
+ M frontend/src/components/historical/HistoricalOptionChain.tsx
+ M frontend/src/components/historical/StrategyPanel.tsx
+ M frontend/src/pages/BacktestDashboard.tsx
+ M frontend/src/pages/HistoricalDashboard.tsx
+ M frontend/src/services/historical_api.ts
+ M frontend/src/types/backtest.ts
+ M frontend/src/types/historical.ts
+?? "Slipage calculation SS/"
+?? backend/app/analytics/enrich_derived.py
+?? backend/app/analytics/enrich_options.py
+?? backend/app/services/indicators.py
+?? backend/tests/test_enrich_derived.py
+?? backend/tests/test_enrich_options.py
+?? frontend/src/components/historical/IndicatorConfigPanel.tsx
+?? frontend/src/components/historical/SpotChart.tsx
+?? frontend/src/utils/slippage_v2.ts
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-03 15:30 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+92d4362 docs: M4 + M5 v2 + live recorder pipeline now fully operational
+d9e3772 feat(types): add 'calibrated_v2' to BacktestTrade.quality_source enum
+bd05f94 test(M5v2): add backfill_attribution unit tests
+847da38 feat(M4+M5v2): batch backtester + outcome-aware calibration enrichment
+58d67c2 fix(M2): per-expiry Stage A checkpoint to survive kills
+b2597ac feat: market context snapshot + multi-TF confluence + quality fallback + start-platform.sh
+8dad76c feat: extend calibration delta grid to include 0.30 and 0.50 (ATM)
+9c3eb36 feat: live WS recorder + nightly merge job (data_live/ → data/)
+7377822 feat: strangle analytics — credit%, decomposition, quality score, master ratios
+8dac468 feat: Modules 2 + 3 — options enrichment + derived metrics/patterns
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/CLAUDE.md        | 161 ++++++++++++++
+ .../btc-options/backend/app/api/backtest.py        |   8 +
+ .../backend/app/services/option_data.py            | 232 +++++++++++++++++++++
+ .../btc-options/docs/memories/session_end_log.md   | 134 ++++++++++++
+ .../src/components/backtest/BacktestForm.tsx       | 100 ++++++++-
+ .../src/components/backtest/BacktestStatsPanel.tsx |  40 +++-
+ .../historical/HistoricalOptionChain.tsx           |  39 +++-
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 104 ++++++++-
+ .../btc-options/frontend/src/types/historical.ts   |  37 ++++
+ 9 files changed, 848 insertions(+), 7 deletions(-)
+```
+
+### Git Status
+```
+ M CLAUDE.md
+ M backend/app/api/backtest.py
+ M backend/app/services/option_data.py
+ M docs/memories/session_end_log.md
+ M frontend/src/components/backtest/BacktestForm.tsx
+ M frontend/src/components/backtest/BacktestStatsPanel.tsx
+ M frontend/src/components/historical/HistoricalOptionChain.tsx
+ M frontend/src/pages/HistoricalDashboard.tsx
+ M frontend/src/types/historical.ts
+?? "Slipage calculation SS/"
+?? backend/app/services/indicators.py
+?? backend/app/services/live_signal_compute.py
+?? frontend/src/components/historical/IndicatorConfigPanel.tsx
+?? frontend/src/components/historical/SpotChart.tsx
+?? frontend/src/utils/slippage_v2.ts
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/calibrate_full.py
+?? scripts/calibrate_loop.sh
+?? scripts/calibrate_loop_v2.sh
+?? scripts/calibrate_v2.py
+?? scripts/calibration_constants.json
+?? scripts/calibration_data.json
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/check_user_strategy.py
+?? scripts/compare_margin_models.py
+?? scripts/compare_results.csv
+?? scripts/fit_margin_scale.py
+?? scripts/fit_v2.py
+?? scripts/friday_overnight_pnl.py
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/historical_margin.py
+?? scripts/margin_engine.py
+?? scripts/margin_engine_v2.py
+?? scripts/margin_engine_v2_constants.json
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-05 11:09 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+454dc84 feat(M7): Friday→Saturday strangle/straddle sweep with rich 1m path + rule-based exit derivation
+92d4362 docs: M4 + M5 v2 + live recorder pipeline now fully operational
+d9e3772 feat(types): add 'calibrated_v2' to BacktestTrade.quality_source enum
+bd05f94 test(M5v2): add backfill_attribution unit tests
+847da38 feat(M4+M5v2): batch backtester + outcome-aware calibration enrichment
+58d67c2 fix(M2): per-expiry Stage A checkpoint to survive kills
+b2597ac feat: market context snapshot + multi-TF confluence + quality fallback + start-platform.sh
+8dad76c feat: extend calibration delta grid to include 0.30 and 0.50 (ATM)
+9c3eb36 feat: live WS recorder + nightly merge job (data_live/ → data/)
+7377822 feat: strangle analytics — credit%, decomposition, quality score, master ratios
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/CLAUDE.md        | 161 ++++++++++++++
+ btc_options_fullstack/btc-options/HANDOFF.md       |  13 +-
+ .../btc-options/backend/app/api/backtest.py        |   8 +
+ .../btc-options/backend/app/api/historical.py      |  47 ++++-
+ .../btc-options/backend/app/services/backtest.py   |   8 +-
+ .../backend/app/services/live_recorder.py          |  17 ++
+ .../backend/app/services/option_data.py            | 232 +++++++++++++++++++++
+ .../backend/tests/test_calibration_api.py          |   7 +-
+ .../btc-options/docs/memories/session_end_log.md   | 209 +++++++++++++++++++
+ .../src/components/backtest/BacktestForm.tsx       | 100 ++++++++-
+ .../src/components/backtest/BacktestStatsPanel.tsx |  40 +++-
+ .../components/backtest/BacktestTradeLogTable.tsx  | 123 ++++++++++-
+ .../historical/HistoricalOptionChain.tsx           |  39 +++-
+ .../frontend/src/pages/HistoricalDashboard.tsx     | 104 ++++++++-
+ .../btc-options/frontend/src/types/backtest.ts     |   1 +
+ .../btc-options/frontend/src/types/historical.ts   |  37 ++++
+ 16 files changed, 1127 insertions(+), 19 deletions(-)
+```
+
+### Git Status
+```
+ M CLAUDE.md
+ M HANDOFF.md
+ M backend/app/api/backtest.py
+ M backend/app/api/historical.py
+ M backend/app/services/backtest.py
+ M backend/app/services/live_recorder.py
+ M backend/app/services/option_data.py
+ M backend/tests/test_calibration_api.py
+ M docs/memories/session_end_log.md
+ M frontend/src/components/backtest/BacktestForm.tsx
+ M frontend/src/components/backtest/BacktestStatsPanel.tsx
+ M frontend/src/components/backtest/BacktestTradeLogTable.tsx
+ M frontend/src/components/historical/HistoricalOptionChain.tsx
+ M frontend/src/pages/HistoricalDashboard.tsx
+ M frontend/src/types/backtest.ts
+ M frontend/src/types/historical.ts
+?? "../../backtest result for best expiry and delta/"
+?? "Slipage calculation SS/"
+?? backend/app/api/live_signal.py
+?? backend/app/api/m4_results.py
+?? backend/app/services/indicators.py
+?? backend/app/services/live_signal_compute.py
+?? backend/tests/test_live_signal.py
+?? backend/tests/test_m4_api.py
+?? docs/m4_findings_and_full_sweep_plan.md
+?? docs/per_cell_trade_analysis.md
+?? docs/weekly_next_to_next_analysis.md
+?? frontend/src/components/historical/IndicatorConfigPanel.tsx
+?? frontend/src/components/historical/SpotChart.tsx
+?? frontend/src/components/m4/
+?? frontend/src/pages/LiveSignalDashboard.tsx
+?? frontend/src/pages/M4ResultsDashboard.tsx
+?? frontend/src/services/live_signal_api.ts
+?? frontend/src/services/m4_api.ts
+?? frontend/src/utils/slippage_v2.ts
+?? margin-calculator.jsx
+?? margin_check.py
+?? modify-codebase-for-deployment.md
+?? scripts/backfill_m4_enriched.py
+?? scripts/calibrate_full.py
+?? scripts/calibrate_loop.sh
+?? scripts/calibrate_loop_v2.sh
+?? scripts/calibrate_v2.py
+?? scripts/calibration_constants.json
+?? scripts/calibration_data.json
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/check_user_strategy.py
+?? scripts/compare_margin_models.py
+?? scripts/compare_results.csv
+?? scripts/fit_margin_scale.py
+?? scripts/fit_v2.py
+?? scripts/friday_overnight_pnl.py
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/historical_margin.py
+?? scripts/margin_engine.py
+?? scripts/margin_engine_v2.py
+?? scripts/margin_engine_v2_constants.json
+?? "../../new platform arch/"
+```

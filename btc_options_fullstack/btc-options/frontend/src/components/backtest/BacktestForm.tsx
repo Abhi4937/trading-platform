@@ -33,6 +33,9 @@ interface AlgoLeg {
   strikeType: AlgoStrikeType;          // when criteria = Strike Type
   premiumTarget: number;               // when criteria = Closest Premium
   deltaTarget: number;                 // when criteria = Closest Delta
+  slEnabled: boolean;
+  slType: 'pct' | 'points' | 'delta';
+  slValue: number;
 }
 
 const newLeg = (overrides: Partial<AlgoLeg> = {}): AlgoLeg => ({
@@ -45,12 +48,15 @@ const newLeg = (overrides: Partial<AlgoLeg> = {}): AlgoLeg => ({
   strikeType: 'ATM',
   premiumTarget: 100,
   deltaTarget: 0.30,
+  slEnabled: false,
+  slType: 'pct',
+  slValue: 50,
   ...overrides,
 });
 
 // Strike criteria currently runnable on backend (Phase 2.5)
 const ENABLED_CRITERIA: AlgoStrikeCriteria[] = [
-  'Strike Type', 'Closest Premium', 'Closest Delta',
+  'Strike Type', 'Closest Premium', 'Closest Delta', 'Delta ≤', 'Delta ≤ Match', 'Delta ≤ Align', 'Highest OI',
 ];
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL ?? 'http://localhost:8000/api/v1';
@@ -212,10 +218,27 @@ export const BacktestForm: React.FC<Props> = ({ busy, onSubmit }) => {
           base.strike_criteria = 'closest_delta';
           base.strike_value = l.deltaTarget;
           break;
+        case 'Delta ≤':
+          base.strike_criteria = 'closest_delta_below';
+          base.strike_value = l.deltaTarget;
+          break;
+        case 'Delta ≤ Match':
+          base.strike_criteria = 'closest_delta_prem_match';
+          base.strike_value = l.deltaTarget;
+          break;
+        case 'Delta ≤ Align':
+          base.strike_criteria = 'closest_delta_align';
+          base.strike_value = l.deltaTarget;
+          break;
+        case 'Highest OI':
+          base.strike_criteria = 'highest_oi';
+          base.strike_value = l.deltaTarget;
+          break;
         default:
           base.strike_criteria = 'strike_type';
           base.strike_level = 'ATM';
       }
+      base.leg_sl = l.slEnabled ? { type: l.slType, value: l.slValue } : null;
       return base;
     });
 
@@ -509,6 +532,38 @@ export const BacktestForm: React.FC<Props> = ({ busy, onSubmit }) => {
                         width={70} />
                     </Stack>
                   )}
+                  {leg.strikeCriteria === 'Delta ≤' && (
+                    <Stack label="Delta ≤">
+                      <Stepper value={leg.deltaTarget} min={0.01} max={0.99} step={0.05}
+                        decimals={2}
+                        onChange={n => updateLeg(leg.id, { deltaTarget: n })}
+                        width={70} />
+                    </Stack>
+                  )}
+                  {leg.strikeCriteria === 'Delta ≤ Match' && (
+                    <Stack label="Delta ≤" title="Picks delta ≤ target per leg, then aligns all legs' premiums to the cheapest leg">
+                      <Stepper value={leg.deltaTarget} min={0.01} max={0.99} step={0.05}
+                        decimals={2}
+                        onChange={n => updateLeg(leg.id, { deltaTarget: n })}
+                        width={70} />
+                    </Stack>
+                  )}
+                  {leg.strikeCriteria === 'Delta ≤ Align' && (
+                    <Stack label="Delta ≤" title="Each leg picks delta ≤ target; the leg with higher resolved delta becomes the reference — the lower delta leg is re-run with that reference to align as closely as possible">
+                      <Stepper value={leg.deltaTarget} min={0.01} max={0.99} step={0.05}
+                        decimals={2}
+                        onChange={n => updateLeg(leg.id, { deltaTarget: n })}
+                        width={70} />
+                    </Stack>
+                  )}
+                  {leg.strikeCriteria === 'Highest OI' && (
+                    <Stack label="Max |Δ|" title="OTM strike with highest open interest; abs(delta) must not exceed this value">
+                      <Stepper value={leg.deltaTarget} min={0.01} max={0.99} step={0.05}
+                        decimals={2}
+                        onChange={n => updateLeg(leg.id, { deltaTarget: n })}
+                        width={70} />
+                    </Stack>
+                  )}
                   {!ENABLED_CRITERIA.includes(leg.strikeCriteria) && (
                     <Stack label="Value">
                       <span style={{ fontSize: 11, color: '#7a9bb5', fontStyle: 'italic' }}>
@@ -516,6 +571,49 @@ export const BacktestForm: React.FC<Props> = ({ busy, onSubmit }) => {
                       </span>
                     </Stack>
                   )}
+                  {/* Per-leg SL */}
+                  <Stack label="Leg SL">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Toggle label="" value={leg.slEnabled}
+                        onChange={v => updateLeg(leg.id, { slEnabled: v })} />
+                      <div style={{ display: 'flex', gap: 4, opacity: leg.slEnabled ? 1 : 0.35 }}>
+                        <select
+                          disabled={!leg.slEnabled}
+                          value={leg.slType}
+                          onChange={e => {
+                            const t = e.target.value as 'pct' | 'points' | 'delta';
+                            const defaultVal = t === 'pct' ? 50 : t === 'points' ? 100 : 0.40;
+                            updateLeg(leg.id, { slType: t, slValue: defaultVal });
+                          }}
+                          style={{
+                            appearance: 'none', border: '1px solid #1a2d42',
+                            background: '#080e16', color: '#c9d1d9',
+                            borderRadius: 4, fontSize: 11, padding: '4px 8px',
+                            cursor: leg.slEnabled ? 'pointer' : 'not-allowed',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          <option value="pct">% Entry</option>
+                          <option value="points">Points</option>
+                          <option value="delta">Δ ≥</option>
+                        </select>
+                        <Stepper
+                          value={leg.slValue}
+                          min={leg.slType === 'delta' ? 0.05 : 0.1}
+                          max={leg.slType === 'delta' ? 0.99 : undefined}
+                          step={leg.slType === 'pct' ? 5 : leg.slType === 'points' ? 10 : 0.05}
+                          decimals={leg.slType === 'pct' ? 0 : leg.slType === 'points' ? 1 : 2}
+                          onChange={n => updateLeg(leg.id, {
+                            slValue: leg.slType === 'delta' ? Math.min(0.99, Math.max(0.05, n)) : Math.max(0.1, n),
+                          })}
+                          disabled={!leg.slEnabled} width={60}
+                        />
+                        <span style={{ fontSize: 10, color: '#7a9bb5', alignSelf: 'center' }}>
+                          {leg.slType === 'pct' ? '%' : leg.slType === 'points' ? 'pts' : '|Δ|'}
+                        </span>
+                      </div>
+                    </div>
+                  </Stack>
                 </div>
               </div>
             ))}

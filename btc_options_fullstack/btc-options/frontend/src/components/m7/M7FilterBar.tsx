@@ -52,7 +52,16 @@ export function M7FilterBar({ meta, filters, setFilters, exitRule, setExitRule }
         <select style={sty} value={filters.entry_hour_ist || ''}
                 onChange={e => update('entry_hour_ist', e.target.value)}>
           <option value="">All</option>
-          {meta?.entry_hours.map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}:00 IST</option>)}
+          {meta && [...meta.entry_hours]
+            .sort((a, b) => {
+              // Chronological order: Fri 21,22,23 → Sat 00,01,02,03
+              const ord = (h: number) => h >= 21 ? h - 21 : h + 3;
+              return ord(a) - ord(b);
+            })
+            .map(h => {
+              const day = h >= 21 ? 'Fri' : 'Sat';
+              return <option key={h} value={h}>{day} {String(h).padStart(2, '0')}:00 IST</option>;
+            })}
         </select>
       </div>
       <div>
@@ -74,6 +83,22 @@ export function M7FilterBar({ meta, filters, setFilters, exitRule, setExitRule }
 
       <div style={{ borderLeft: '1px solid #1a2d42', paddingLeft: 12, marginLeft: 4 }}>
         <span style={lab}>Exit Rule</span>
+      </div>
+      <div>
+        <span style={lab}>Exit hour</span>
+        <select style={sty}
+                value={exitRule.fixed_exit_hour_ist ?? ''}
+                onChange={e => {
+                  const v = e.target.value;
+                  setExitRule({ ...exitRule, fixed_exit_hour_ist: v === '' ? null : Number(v) });
+                }}>
+          <option value="">Rule-based</option>
+          {([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 17.5] as const).map(h => (
+            <option key={h} value={h}>
+              {h === 17.5 ? 'Sat 17:30 IST' : `Sat ${String(h).padStart(2, '0')}:00 IST`}
+            </option>
+          ))}
+        </select>
       </div>
       <div>
         <span style={lab}>Max profit %</span>

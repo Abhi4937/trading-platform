@@ -164,6 +164,7 @@ export interface BacktestLegFill {
 
 export interface BacktestTrade {
   date: string;
+  exit_date?: string | null;
   entry_time: string | null;
   exit_time: string | null;
   exit_reason: string | null;

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import type { HistoricalChainRow } from '../../types/historical';
 
 interface LegIndicator {
@@ -17,6 +17,14 @@ interface Props {
 const f = (n: number, d = 2) => n.toFixed(d);
 // Show '-' for greeks/mark only when mark price is 0 (no data at that timestamp)
 const fd = (mark: number, n: number, d = 2) => mark === 0 ? '-' : n.toFixed(d);
+
+// USD formatter mirroring the live OptionChainTable (Delta Exchange style)
+const fUsd = (usd: number | undefined) => {
+  if (usd == null || isNaN(usd) || usd === 0) return '—';
+  if (usd >= 1_000_000) return `$${(usd / 1_000_000).toFixed(2)}M`;
+  if (usd >= 1_000)     return `$${(usd / 1_000).toFixed(1)}K`;
+  return `$${usd.toFixed(0)}`;
+};
 
 export const HistoricalOptionChain: React.FC<Props> = ({
   chain, strategyMode, legMap, onSelectOption, onAddLeg
@@ -51,11 +59,35 @@ export const HistoricalOptionChain: React.FC<Props> = ({
     return () => observer.disconnect();
   }, []);
 
+  // Max OI USD across the visible chain (call + put) — drives the bar fill.
+  const maxOi = useMemo(() => {
+    let m = 0;
+    for (const r of chain) {
+      const c = r.call?.oi_usd ?? 0;
+      const p = r.put?.oi_usd ?? 0;
+      if (c > m) m = c;
+      if (p > m) m = p;
+    }
+    return m;
+  }, [chain]);
+
+  const oiBarStyle = (oi: number | undefined, side: 'call' | 'put'): React.CSSProperties => {
+    if (!oi || oi <= 0 || maxOi <= 0) return {};
+    const pct = Math.min(100, (oi / maxOi) * 100);
+    // Call OI bar fills from the right (strike side) leftward; put bar from the left rightward.
+    const color = side === 'call' ? 'rgba(88, 166, 255, 0.30)' : 'rgba(255, 169, 64, 0.30)';
+    const dir = side === 'call' ? 'to left' : 'to right';
+    return {
+      background: `linear-gradient(${dir}, ${color} 0%, ${color} ${pct}%, transparent ${pct}%)`,
+    };
+  };
+
   return (
     <div className="table-scroll" ref={scrollRef}>
       <table className="chain-table">
         <thead>
           <tr>
+            <th className="call-header">OI (USD)</th>
             <th className="call-header">Vega</th>
             <th className="call-header">Theta</th>
             <th className="call-header">Gamma</th>
@@ -69,6 +101,7 @@ export const HistoricalOptionChain: React.FC<Props> = ({
             <th className="put-header">Gamma</th>
             <th className="put-header">Theta</th>
             <th className="put-header">Vega</th>
+            <th className="put-header">OI (USD)</th>
           </tr>
         </thead>
         <tbody>
@@ -84,6 +117,7 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               data-itm-call={row.call.delta > 0.5 ? 'true' : 'false'}
               data-itm-put={Math.abs(row.put.delta) > 0.5 ? 'true' : 'false'}
             >
+              <td className="call-cell oi-cell" style={oiBarStyle(row.call.oi_usd, 'call')}>{fUsd(row.call.oi_usd)}</td>
               <td className="call-cell">{fd(row.call.last_price, row.call.vega, 2)}</td>
               <td className="call-cell">{fd(row.call.last_price, row.call.theta, 2)}</td>
               <td className="call-cell">{fd(row.call.last_price, row.call.gamma, 8)}</td>
@@ -151,11 +185,12 @@ export const HistoricalOptionChain: React.FC<Props> = ({
               <td className="put-cell">{fd(row.put.last_price, row.put.gamma, 8)}</td>
               <td className="put-cell">{fd(row.put.last_price, row.put.theta, 2)}</td>
               <td className="put-cell">{fd(row.put.last_price, row.put.vega, 2)}</td>
+              <td className="put-cell oi-cell" style={oiBarStyle(row.put.oi_usd, 'put')}>{fUsd(row.put.oi_usd)}</td>
             </tr>
           ))}
           {chain.length === 0 && (
             <tr>
-              <td colSpan={13} className="loading-center">
+              <td colSpan={15} className="loading-center">
                 No data available for this minute. Scrub timeline to find data.
               </td>
             </tr>

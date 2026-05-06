@@ -26,6 +26,11 @@ router = APIRouter()
 
 # ── Request/response schemas ──────────────────────────────────────────────────
 
+class LegSlConfig(BaseModel):
+    type: Literal["pct", "points", "delta"] = "pct"
+    value: float = 0.0
+
+
 class BacktestLegTemplate(BaseModel):
     strike_offset: int = 0                            # legacy: ATM ± N positions
     type: Literal["CE", "PE"]
@@ -43,9 +48,12 @@ class BacktestLegTemplate(BaseModel):
     # (value=target $), "closest_delta" (value=0.0..1.0).
     strike_criteria: Optional[Literal[
         "strike_type", "closest_premium", "closest_delta",
+        "closest_delta_below", "closest_delta_prem_match", "closest_delta_align",
+        "highest_oi",
     ]] = None
     strike_level: Optional[str]   = None              # for strike_type
     strike_value: Optional[float] = None              # for closest_premium / closest_delta
+    leg_sl: Optional[LegSlConfig] = None
 
 
 class SlippageConfig(BaseModel):

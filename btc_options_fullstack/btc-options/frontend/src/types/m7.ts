@@ -3,6 +3,7 @@
 
 export interface M7ExitRule {
   fixed_exit_ts?: number | null;
+  fixed_exit_hour_ist?: number | null;  // e.g. 10 = Sat 10:00 IST, 17.5 = Sat 17:30 IST
   max_profit_pct?: number | null;
   margin_target_pct?: number | null;
   premium_sl_pct?: number | null;

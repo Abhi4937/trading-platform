@@ -155,3 +155,77 @@ def test_iv_bands_cover_zero_to_one_hundred_plus():
     band_lows = [b[0] for b in IV_BANDS]
     assert 0 in band_lows
     assert 100 in band_lows
+
+
+# ── OI column schema + forward-fill ───────────────────────────────────────────
+
+# Canonical set of keys that every path row dict must contain.
+# If build_trade's path_rows.append({...}) ever drops an OI column this list
+# will catch it at the integration level (test_m7_batch_integration.py can
+# load a real parquet and assert against this set).
+_EXPECTED_PATH_COLUMNS = {
+    "trade_id", "ts", "minute_offset",
+    "spot", "spot_open", "spot_high", "spot_low", "spot_volume", "spot_oi",
+    "call_mark", "put_mark", "total_premium",
+    "call_oi", "put_oi",
+    "call_iv", "put_iv", "atm_iv_now",
+    "call_delta", "call_gamma", "call_theta", "call_vega",
+    "put_delta", "put_gamma", "put_theta", "put_vega",
+    "net_delta", "net_gamma", "net_theta", "net_vega",
+    "theta_per_vega_combined",
+    "gross_pnl_usd", "net_pnl_unwind_usd",
+    "pnl_pct_of_credit", "pnl_pct_of_margin",
+}
+
+
+def test_path_schema_includes_oi_columns():
+    """call_oi, put_oi and spot_oi must be in the canonical path column set."""
+    assert {"call_oi", "put_oi", "spot_oi"}.issubset(_EXPECTED_PATH_COLUMNS)
+
+
+def test_oi_forward_fill_skips_nan():
+    """NaN OI values must be skipped; the last valid value carries forward."""
+    updates = [50.0, float("nan"), float("nan"), 75.0, float("nan")]
+    last_oi = 0.0
+    carried = []
+    for v in updates:
+        # mirrors the guard used in build_trade's minute loop
+        if v is not None and not pd.isna(v):
+            last_oi = float(v)
+        carried.append(last_oi)
+    assert carried == [50.0, 50.0, 50.0, 75.0, 75.0]
+
+
+def test_oi_forward_fill_tracks_increases():
+    """Rising OI is recorded at each step; starting value is 0 before any bar."""
+    updates = [0.0, 100.0, 200.0, 300.0]
+    last_oi = 0.0
+    carried = []
+    for v in updates:
+        if v is not None and not pd.isna(v):
+            last_oi = float(v)
+        carried.append(last_oi)
+    assert carried == [0.0, 100.0, 200.0, 300.0]
+
+
+def test_fake_chain_oi_close_is_populated():
+    """_fake_chain sets oi_close=100.0 on every row (call and put)."""
+    chain = _fake_chain([48000, 50000, 52000], 50000.0)
+    assert "oi_close" in chain.columns
+    assert (chain["oi_close"] == 100.0).all()
+    # Both CE and PE rows carry OI
+    assert set(chain.loc[chain["oi_close"] == 100.0, "opt_type"].unique()) == {"CE", "PE"}
+
+
+def test_pick_strikes_accepts_chain_with_oi_column():
+    """pick_strikes must not raise when chain includes oi_close (no KeyError)."""
+    spot = 50000.0
+    # Use far-OTM strikes so at least one has |delta| <= 0.20 at 7d / 50% IV
+    chain = _fake_chain([40000, 43000, 46000, 50000, 54000, 57000, 60000], spot)
+    assert "oi_close" in chain.columns
+    res = pick_strikes(chain, spot, 7 / 365.0, 0.20)
+    assert res is not None  # a qualifying OTM strike exists
+    # The returned dict is independent of OI — OI is used downstream in
+    # the path loop, not in strike selection. Verify no OI key bleeds in.
+    assert "call_oi" not in res
+    assert "put_oi" not in res

@@ -12,7 +12,8 @@ interface Props {
 type SortKey =
   | 'date' | 'gross_pnl' | 'slippage_cost' | 'brokerage_cost'
   | 'net_pnl' | 'spot_at_entry' | 'spot_at_exit'
-  | 'credit_pct' | 'quality_score' | 'pattern';
+  | 'credit_pct' | 'quality_score' | 'pattern'
+  | 'iv_regime_premium_pct' | 'excess_over_fair_pct';
 
 const PATTERN_COLOR: Record<string, string> = {
   A: '#3b82f6', B: '#ef4444', C: '#6b7280', D: '#f0b429', Other: '#475569',
@@ -86,6 +87,30 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
     else { setSortKey(k); setSortDir(k === 'date' ? 'asc' : 'desc'); }
   };
 
+  // Aggregate calibration baselines across all non-skipped trades.
+  // Same-expiry trades typically share a calibration bucket so the baseline
+  // values are stable; we average them so the banner is meaningful even when
+  // multiple buckets are present.
+  const baselines = useMemo(() => {
+    const xs = trades.filter(t => !t.skipped);
+    const avg = (key: keyof BacktestTrade) => {
+      const vs = xs.map(t => t[key]).filter((v): v is number => typeof v === 'number');
+      if (!vs.length) return null;
+      return vs.reduce((a, b) => a + b, 0) / vs.length;
+    };
+    return {
+      n: xs.length,
+      credit_pct:           avg('credit_pct'),
+      structural_pct:       avg('structural_credit_pct'),
+      fair_at_ivp_pct:      avg('fair_credit_at_ivp'),
+      iv_regime_pct:        avg('iv_regime_premium_pct'),
+      excess_pct:           avg('excess_over_fair_pct'),
+      atm_iv:               avg('entry_atm_iv'),
+      hv:                   avg('entry_hv'),
+      ivp:                  avg('ivp_atm_7d_90d_at_entry'),
+    };
+  }, [trades]);
+
   const exportXlsx = () => {
     const activeTrades = trades.filter(t => !t.skipped);
     const tradeRows = activeTrades.map(t => {
@@ -93,9 +118,15 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
       const pe = legSummary(t.legs, 'PE');
       return {
         date: t.date,
+        exit_date: t.exit_date ?? '',
         entry_time: t.entry_time ?? '',
         exit_time: t.exit_time ?? '',
         exit_reason: t.exit_reason ?? '',
+        credit_pct: t.credit_pct != null ? t.credit_pct * 100 : '',
+        structural_credit_pct: t.structural_credit_pct != null ? t.structural_credit_pct * 100 : '',
+        fair_credit_at_ivp_pct: t.fair_credit_at_ivp != null ? t.fair_credit_at_ivp * 100 : '',
+        iv_regime_premium_pct: t.iv_regime_premium_pct != null ? t.iv_regime_premium_pct * 100 : '',
+        excess_over_fair_pct: t.excess_over_fair_pct != null ? t.excess_over_fair_pct * 100 : '',
         legs: legsToString(t.legs),
         ce_strike:     ce?.strike ?? '',
         ce_expiry:     ce?.expiry ?? '',
@@ -244,6 +275,36 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
         </button>
       </div>
 
+      {/* Calibration baselines banner — averages across all non-skipped trades */}
+      {baselines.n > 0 && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center',
+          padding: '8px 12px', borderBottom: '1px solid #1a2d42',
+          background: '#0a1019', fontSize: 11,
+        }}>
+          <span style={{ color: '#7a9bb5' }}>
+            <strong style={{ color: '#c9d1d9' }}>Baselines</strong> (avg of {baselines.n} trades):
+          </span>
+          <BL label="Actual Credit%" value={baselines.credit_pct} fmt="pct3" tone="neutral"
+              tip="Avg actual credit % captured at entry" />
+          <BL label="Struct%"        value={baselines.structural_pct} fmt="pct3" tone="neutral"
+              tip="Structural baseline credit% from calibration (DTE × Δ × spot, IV-neutral)" />
+          <BL label="Fair@IVP"       value={baselines.fair_at_ivp_pct} fmt="pct3" tone="neutral"
+              tip="Fair credit% at current IVP (calibration bucket median, includes IV regime)" />
+          <BL label="IV-Prem"        value={baselines.iv_regime_pct} fmt="pct3" tone="signed"
+              tip="Avg IV regime premium = fair − structural" />
+          <BL label="Excess"         value={baselines.excess_pct} fmt="pct3" tone="signed"
+              tip="Avg excess over fair = actual − fair" />
+          <span style={{ color: '#3a4d63' }}>|</span>
+          <BL label="ATM IV"         value={baselines.atm_iv} fmt="pct1" tone="neutral"
+              tip="Avg ATM IV at entry (already in %)" />
+          <BL label="HV"             value={baselines.hv} fmt="pct1" tone="neutral"
+              tip="Avg 7d realized vol at entry (annualized %)" />
+          <BL label="IVP"            value={baselines.ivp} fmt="pct1" tone="neutral"
+              tip="Avg IV percentile (90d rank of 7d ATM IV)" />
+        </div>
+      )}
+
       <div style={{ overflow: 'auto', maxHeight: 460 }}>
         <table style={{
           width: '100%', borderCollapse: 'collapse',
@@ -252,11 +313,15 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
           <thead style={{ background: '#080e16', position: 'sticky', top: 0, zIndex: 1 }}>
             <tr>
               <Th k="date">Date</Th>
+              <th style={thStyle} title="Date the trade exited (IST)">Exit Date</th>
               <th style={thStyle}>Entry</th>
               <th style={thStyle}>Exit</th>
               <th style={thStyle}>Reason</th>
               <Th k="pattern" align="center">Patt</Th>
               <Th k="credit_pct" align="right">Credit%</Th>
+              <th style={{ ...thStyle, textAlign: 'right' }} title="Structural baseline credit% from calibration (DTE × Δ × spot)">Struct%</th>
+              <Th k="iv_regime_premium_pct" align="right">IV-Prem%</Th>
+              <Th k="excess_over_fair_pct" align="right">Excess%</Th>
               <Th k="quality_score" align="right">Qty</Th>
               <th style={thStyle}>Leg</th>
               <th style={thStyle} title="Expiry of this leg">Expiry</th>
@@ -298,7 +363,7 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
                 return (
                   <tr key={i} style={{ background: bg }}>
                     <td style={{ ...tdStyle, background: bg, borderBottom: tradeBorder }}>{t.date}</td>
-                    <td style={{ ...tdStyle, background: bg, borderBottom: tradeBorder }} colSpan={34}>
+                    <td style={{ ...tdStyle, background: bg, borderBottom: tradeBorder }} colSpan={38}>
                       <span style={{ color: '#4a6a85', fontStyle: 'italic' }}>
                         skipped — {t.skip_reason}
                       </span>
@@ -343,6 +408,9 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
                     <td rowSpan={2} style={s({ borderBottom: tradeBorder, ...selStyle })}>
                       {t.date}{t.is_reentry && <span style={{ color: '#ffa940', marginLeft: 4 }}>↻</span>}
                     </td>
+                    <td rowSpan={2} style={s({ borderBottom: tradeBorder, color: t.exit_date && t.exit_date !== t.date ? '#ffa940' : '#7a9bb5' })}>
+                      {t.exit_date ?? '—'}
+                    </td>
                     <td rowSpan={2} style={s({ borderBottom: tradeBorder })}>{t.entry_time}</td>
                     <td rowSpan={2} style={s({ borderBottom: tradeBorder })}>{t.exit_time}</td>
                     <td rowSpan={2} style={s({ borderBottom: tradeBorder })}>{t.exit_reason}</td>
@@ -356,8 +424,27 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
                         }}>{t.pattern}</span>
                       ) : '—'}
                     </td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder, color: '#c9d1d9' })}>
+                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder, color: '#c9d1d9' })}
+                        title={t.fair_credit_at_ivp != null ? `Fair (incl. IV regime): ${(t.fair_credit_at_ivp * 100).toFixed(3)}%` : ''}>
                       {t.credit_pct != null ? `${(t.credit_pct * 100).toFixed(3)}%` : '—'}
+                    </td>
+                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder, color: '#7a9bb5' })}
+                        title="Structural baseline credit% from calibration (DTE × Δ × spot, IV-neutral)">
+                      {t.structural_credit_pct != null ? `${(t.structural_credit_pct * 100).toFixed(3)}%` : '—'}
+                    </td>
+                    <td rowSpan={2} style={sr({
+                      borderBottom: tradeBorder,
+                      color: t.iv_regime_premium_pct == null ? '#7a9bb5'
+                            : t.iv_regime_premium_pct > 0 ? '#00e5a0' : '#ff4d6a',
+                    })} title="Extra credit% from current IV vs structural baseline (fair − structural)">
+                      {t.iv_regime_premium_pct != null ? `${t.iv_regime_premium_pct >= 0 ? '+' : ''}${(t.iv_regime_premium_pct * 100).toFixed(3)}%` : '—'}
+                    </td>
+                    <td rowSpan={2} style={sr({
+                      borderBottom: tradeBorder,
+                      color: t.excess_over_fair_pct == null ? '#7a9bb5'
+                            : t.excess_over_fair_pct > 0 ? '#00e5a0' : '#ff4d6a',
+                    })} title="Actual credit% − fair credit. Positive = market paying more than historical fair.">
+                      {t.excess_over_fair_pct != null ? `${t.excess_over_fair_pct >= 0 ? '+' : ''}${(t.excess_over_fair_pct * 100).toFixed(3)}%` : '—'}
                     </td>
                     <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>
                       {t.quality_score != null ? (
@@ -435,7 +522,7 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
               );
             })}
             {sorted.length === 0 && (
-              <tr><td style={tdStyle} colSpan={35}>
+              <tr><td style={tdStyle} colSpan={39}>
                 <div style={{ textAlign: 'center', color: '#4a6a85', padding: 24 }}>No rows</div>
               </td></tr>
             )}
@@ -457,4 +544,32 @@ const tdStyle: React.CSSProperties = {
 const tdRight: React.CSSProperties = {
   padding: '6px 10px', whiteSpace: 'nowrap', textAlign: 'right',
   fontVariantNumeric: 'tabular-nums',
+};
+
+// Baseline-banner cell: label + value with sign-aware coloring.
+const BL: React.FC<{
+  label: string;
+  value: number | null;
+  fmt: 'pct1' | 'pct3';
+  tone: 'neutral' | 'signed';
+  tip?: string;
+}> = ({ label, value, fmt, tone, tip }) => {
+  const text = (() => {
+    if (value == null) return '—';
+    if (fmt === 'pct1') return `${value.toFixed(1)}%`;
+    // pct3: incoming value is decimal (0.0042 = 0.420%)
+    const pct = value * 100;
+    return `${tone === 'signed' && pct >= 0 ? '+' : ''}${pct.toFixed(3)}%`;
+  })();
+  const color =
+    value == null ? '#7a9bb5'
+    : tone === 'signed'
+      ? (value >= 0 ? '#00e5a0' : '#ff4d6a')
+      : '#c9d1d9';
+  return (
+    <span title={tip} style={{ display: 'inline-flex', gap: 4, alignItems: 'baseline' }}>
+      <span style={{ color: '#7a9bb5' }}>{label}:</span>
+      <strong style={{ color, fontVariantNumeric: 'tabular-nums' }}>{text}</strong>
+    </span>
+  );
 };

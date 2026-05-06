@@ -304,6 +304,14 @@ class LiveRecorder:
         self._inflight: dict[str, tuple[int, dict]] = {}
         self._msgs_total = 0
         self._bars_closed = 0
+        # Per-prefix message counters, used to surface the known-missing OI
+        # candle stream. Delta's `candlestick_1m` channel is documented as a
+        # price stream — OI subscriptions are accepted but no candles fire,
+        # so all `oi_*` columns end up NaN. To populate OI properly the
+        # recorder needs a separate `v2/ticker` subscription that buckets
+        # `oi_contracts` updates into 1m bars. Tracked as cleanup item C1.
+        self._mark_msgs = 0
+        self._oi_msgs = 0
 
     async def stop(self):
         self._stop.set()
@@ -315,6 +323,8 @@ class LiveRecorder:
             "last_atm":     self._last_atm,
             "msgs_total":   self._msgs_total,
             "bars_closed":  self._bars_closed,
+            "mark_msgs":    self._mark_msgs,
+            "oi_msgs":      self._oi_msgs,
             **self.writer.stats(),
         }
 
@@ -423,6 +433,13 @@ class LiveRecorder:
         cs = msg.get("candle_start_time")
         if not sym or cs is None:
             return
+        # Track which prefix the candle came from. In practice Delta only
+        # emits MARK candles even though we subscribe both — see the OI note
+        # in __init__.
+        if sym.startswith("OI:"):
+            self._oi_msgs += 1
+        elif sym.startswith("MARK:"):
+            self._mark_msgs += 1
         # Delta sends candle_start_time in MICROSECONDS. Convert to unix seconds.
         try:
             minute_unix = int(int(cs) // 1_000_000)

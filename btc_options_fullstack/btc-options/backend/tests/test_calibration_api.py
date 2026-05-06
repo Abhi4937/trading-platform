@@ -72,9 +72,13 @@ def client_with_calibration(tmp_path, monkeypatch):
     univ_path = tmp_path / "calibration_universal.parquet"
     universal.to_parquet(univ_path, compression="snappy", index=False)
 
-    # Patch the module's path constants
+    # Patch the module's path constants. We also point CALIBRATION_V2_PATH at
+    # a non-existent file so the loader falls back to the v1 stub above —
+    # otherwise the loader picks up the real on-disk v2 parquet.
     from app.api import historical
     monkeypatch.setattr(historical, "CALIBRATION_PATH", str(calib_path))
+    monkeypatch.setattr(historical, "CALIBRATION_V2_PATH",
+                        str(tmp_path / "calibration_v2_NOT_PRESENT.parquet"))
     monkeypatch.setattr(historical, "CALIBRATION_UNIVERSAL_PATH", str(univ_path))
     # Reset cache
     historical._calibration_cache.clear()
@@ -127,6 +131,7 @@ def test_calibration_503_when_not_built(monkeypatch):
     """If parquets don't exist, return 503."""
     from app.api import historical
     monkeypatch.setattr(historical, "CALIBRATION_PATH", "/nonexistent/calib.parquet")
+    monkeypatch.setattr(historical, "CALIBRATION_V2_PATH", "/nonexistent/calib_v2.parquet")
     monkeypatch.setattr(historical, "CALIBRATION_UNIVERSAL_PATH", "/nonexistent/universal.parquet")
     historical._calibration_cache.clear()
     historical._calibration_loaded["specific"] = None

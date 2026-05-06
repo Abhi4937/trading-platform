@@ -5,7 +5,9 @@ import { ReplayController } from '../components/historical/ReplayController';
 import { HistoricalOptionChain } from '../components/historical/HistoricalOptionChain';
 import { HistoricalChart } from '../components/historical/HistoricalChart';
 import { StrategyPanel } from '../components/historical/StrategyPanel';
-import type { HistoricalChainRow, OHLCData } from '../types/historical';
+import { SpotChart } from '../components/historical/SpotChart';
+import { IndicatorConfigPanel } from '../components/historical/IndicatorConfigPanel';
+import type { HistoricalChainRow, OHLCData, SpotOhlcBar, IndicatorConfig, IndicatorPoint } from '../types/historical';
 import type { Strategy, StrategyLeg } from '../types/strategy';
 
 export const HistoricalDashboard: React.FC = () => {
@@ -126,6 +128,61 @@ export const HistoricalDashboard: React.FC = () => {
   }, [simulationDate, simulationTime]);
 
   const simTimestamp = useCallback(() => currentSimTimestamp, [currentSimTimestamp]);
+
+  // ── Spot/leg chart with technical indicators ──────────────────────────────
+  // Reuses the existing `timeframe` state (the premium chart's timeframe) so
+  // changing it on the premium chart also drives the spot chart.
+  const [indicatorConfigs, setIndicatorConfigs] = usePersistedState<IndicatorConfig[]>('historical:indicators', []);
+  const [chartSource, setChartSource] = usePersistedState<'spot' | 'leg'>('historical:chartSource', 'spot');
+  const [spotOhlc, setSpotOhlc] = useState<SpotOhlcBar[]>([]);
+  const [indicatorData, setIndicatorData] = useState<Record<string, IndicatorPoint[]>>({});
+  const indicatorAbortRef = useRef<AbortController | null>(null);
+  const spotChartRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToSpot = useCallback(() => {
+    spotChartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  // Window: full simulation day [00:00 IST, 23:59 IST] for the spot chart.
+  const chartWindow = useMemo(() => {
+    if (!simulationDate) return null;
+    const start = Math.floor(new Date(simulationDate + 'T00:00:00+05:30').getTime() / 1000);
+    const end   = start + 24 * 3600 - 60;
+    return { start, end };
+  }, [simulationDate]);
+
+  // Fetch spot OHLC + indicators when window/configs/source change.
+  useEffect(() => {
+    if (!chartWindow) return;
+    if (indicatorAbortRef.current) indicatorAbortRef.current.abort();
+    indicatorAbortRef.current = new AbortController();
+    const sig = indicatorAbortRef.current.signal;
+
+    const useLeg = chartSource === 'leg' && selectedOption && selectedExpiry;
+
+    const ohlcP = useLeg
+      ? historicalApi.getLegOhlc(selectedExpiry!, selectedOption!.strike, selectedOption!.type,
+                                  chartWindow.start, chartWindow.end, timeframe, sig)
+      : historicalApi.getSpotOhlc(chartWindow.start, chartWindow.end, timeframe, sig);
+
+    const indP = indicatorConfigs.length === 0
+      ? Promise.resolve({ indicators: {} as Record<string, IndicatorPoint[]> })
+      : (useLeg
+          ? historicalApi.getLegIndicators(selectedExpiry!, selectedOption!.strike, selectedOption!.type,
+              chartWindow.start, chartWindow.end, timeframe, indicatorConfigs, sig)
+          : historicalApi.getSpotIndicators(chartWindow.start, chartWindow.end, timeframe, indicatorConfigs, sig));
+
+    Promise.all([ohlcP, indP])
+      .then(([ohlcRes, indRes]) => {
+        setSpotOhlc(ohlcRes.data ?? []);
+        setIndicatorData(indRes.indicators ?? {});
+      })
+      .catch(err => {
+        if (err?.name !== 'AbortError') console.error('spot chart fetch failed', err);
+      });
+
+    return () => indicatorAbortRef.current?.abort();
+  }, [chartWindow, chartSource, timeframe, indicatorConfigs, selectedExpiry, selectedOption]);
 
   const generateExpiries = useCallback((simDate: string, simTime: string) => {
     if (!simDate || !dataRange) return [];
@@ -407,7 +464,25 @@ export const HistoricalDashboard: React.FC = () => {
     : strategyLegs.length;
 
   return (
-    <div className="historical-container">
+    <div
+      className="historical-container"
+      style={{ overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
+    >
+      {/* Floating "Scroll to Spot Chart" button */}
+      {!maximized && simulationDate && (
+        <button
+          onClick={scrollToSpot}
+          title="Scroll to spot chart"
+          style={{
+            position: 'fixed', right: 16, bottom: 16, zIndex: 20,
+            background: '#1f6feb', color: '#fff', border: 'none',
+            padding: '8px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+            cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+          }}
+        >
+          ↓ Spot Chart
+        </button>
+      )}
       {/* Save/Load strategy bar — minimal floating UI, top-right */}
       <div style={{
         position: 'absolute', top: 6, right: 12, zIndex: 5,
@@ -503,7 +578,10 @@ export const HistoricalDashboard: React.FC = () => {
         />
       </div>}
 
-      <div className="historical-main">
+      <div
+        className="historical-main"
+        style={{ flexShrink: 0, height: 'calc(100vh - 120px)', minHeight: 480 }}
+      >
         {!maximized && !chartsOnly && <div className="historical-chain-panel" style={{ flex: 1, minWidth: 0 }}>
           <HistoricalOptionChain
             chain={strikeFilter ? chain.filter(r => r.strike.toString().includes(strikeFilter)) : chain}
@@ -619,6 +697,26 @@ export const HistoricalDashboard: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Spot/leg chart with technical indicators */}
+      {!maximized && simulationDate && (
+        <div ref={spotChartRef} style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <IndicatorConfigPanel
+            configs={indicatorConfigs}
+            setConfigs={setIndicatorConfigs}
+            source={chartSource}
+            setSource={setChartSource}
+            vwapAvailable={chartSource === 'spot'}
+          />
+          <SpotChart
+            ohlc={spotOhlc}
+            configs={indicatorConfigs}
+            indicators={indicatorData}
+            height={420}
+            premiumMode={chartSource === 'leg'}
+          />
+        </div>
+      )}
     </div>
   );
 };

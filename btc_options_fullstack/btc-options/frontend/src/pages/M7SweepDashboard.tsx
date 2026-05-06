@@ -45,7 +45,7 @@ export function M7SweepDashboard() {
   }
 
   return (
-    <div style={{ padding: 14, color: '#cfd9e3', minHeight: '100vh' }}>
+    <div style={{ padding: 14, color: '#cfd9e3', minHeight: '100vh', overflowY: 'auto', height: '100%' }}>
       <M7HeadlineStrip summary={summary} loading={summaryLoading} />
 
       <M7FilterBar

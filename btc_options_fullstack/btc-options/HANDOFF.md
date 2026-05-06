@@ -61,11 +61,14 @@
 - Cost decomposition matches `costs.py` to the cent
 - Path endpoint returns 1230 1m rows per trade
 
-### Known data limitations
-- Spot OI / volume is NaN in historical spot parquet (only live recorder
-  populates these). Code handles gracefully (defaults to 0).
-- Option OI is 0 for trades older than the live recorder start. Code captures
-  whatever's there.
+### OI data coverage (verified 2026-05-05)
+- **Spot OI / volume**: empty before 2024-01-26; ~92% populated through 2024;
+  100% populated from 2025 onwards.
+- **Option OI**: sparse pre-Feb 2024; progressively richer; by April 2024
+  ~75% of CE/PE rows have OI > 0; near-100% for recent expiries.
+- Net: trades from **March 2024 onwards have reliable OI data** in the M7
+  path (~115 of 121 Fridays in the backfill). Pre-Feb 2024 trades show 0
+  OI which reflects source-parquet reality, not a M7 bug.
 
 ### Pending follow-ups
 - Wait for backfill to complete (~5h), then run `scripts/backfill_m7_enriched.py`
