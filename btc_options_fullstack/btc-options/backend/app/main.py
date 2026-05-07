@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo
 
 # Fresh ID per process — frontend uses this to detect a backend restart and
 # wipe its auto-persisted UI state on the next page load.
@@ -64,6 +64,10 @@ async def lifespan(app: FastAPI):
     await start_recorder()
     merge_task = asyncio.create_task(merge_schedule_loop())
     logger.info("Startup — live recorder + merge scheduler started")
+    # Pre-warm M7 best-combo grid in a background thread (~5–10 min cold).
+    # Frontend gets 202 with progress until ready; backend stays responsive.
+    if m7_best_combo.kick_off_warmup():
+        logger.info("Startup — M7 best-combo warmup thread started")
     yield
     logger.info("Shutdown — stopping live recorder + merge scheduler...")
     await stop_recorder()
@@ -142,3 +146,5 @@ app.include_router(backtest.router,   prefix="/api/v1/historical", tags=["Backte
 app.include_router(live_signal.router, prefix="/api/v1/live-signal", tags=["Live Signal"])
 app.include_router(m4_results.router,  prefix="/api/v1/m4",           tags=["M4 Results"])
 app.include_router(m7_results.router,  prefix="/api/v1/m7",           tags=["M7 Sweep"])
+app.include_router(m7_full_coverage.router, prefix="/api/v1/m7",       tags=["M7 Sweep"])
+app.include_router(m7_best_combo.router,    prefix="/api/v1/m7",       tags=["M7 Sweep"])

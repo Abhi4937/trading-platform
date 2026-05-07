@@ -2,6 +2,177 @@
 
 ## Last Session
 **Who:** Claude
+**Date:** 2026-05-07 (Session 17 — M8 current-expiry IV / ATM Δ / 25Δ skew analytics shipped)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 17 highlights
+- **M8 SHIPPED (UNCOMMITTED)** — new analytics module
+  `backend/app/analytics/m8_current_expiry_skew.py` (~330 LOC). Per-minute
+  current-expiry IV / ATM Δ / 25Δ skew across the full 1m spot history
+  (Dec 2023 → 2026-05-06, 1,247,263 rows × 20 cols).
+  - **What's different from `options_enriched_*.parquet`**: that one carries
+    constant-maturity (7d/14d/30d/60d) ATM IV + 25Δ skew via interpolation
+    across all live expiries. M8 captures the *actual nearest-expiry surface*
+    (the soonest expiry whose 12:00 UTC settle is strictly after each
+    minute) — which dominates short-dated decisions.
+  - **Per-minute output columns**: `ts_unix/ts_utc/ts_ist`,
+    `spot/spot_ret_1m_pct/spot_move_15m_pct`, `current_expiry/dte_minutes`,
+    `atm_strike/atm_call_mark/atm_put_mark`, `atm_iv_pct/atm_call_delta/atm_put_delta`,
+    `call_25d_strike/call_25d_iv_pct`, `put_25d_strike/put_25d_iv_pct`,
+    `rr_25/bf_25` (in IV pts).
+  - **Algorithm**: walks each expiry window `(prev_settle, this_settle]`,
+    pre-pivots the chain into `ts × strike × {CE,PE}` matrices, then
+    per-minute (a) picks ATM strike with both legs marked, (b) vectorized
+    `implied_vol_vec` + analytic `_delta_vec` across ATM±25 strikes, (c)
+    picks call strike with Δ closest to +0.25 and put strike with Δ closest
+    to −0.25, (d) computes RR_25 / BF_25 in IV %.
+  - **Reuses (no edits)**: `backend/app/analytics/enrich_options.py` —
+    `implied_vol_vec`, `_norm_cdf_vec`, `expiry_dt_unix`, `list_expiries`,
+    `load_chain_for_expiry`. `backend/app/core/greeks.py` (compute_greeks
+    fallback path).
+  - **CLI flags**: `--since/--through ISO` (subset window),
+    `--xlsx-months N` (default 6), `--xlsx-only` (skip backfill, just
+    rebuild xlsx from existing parquet — useful when xlsx fails or you
+    want a different window).
+  - **Outputs on disk** (NEW, Session 17):
+    - `/home/abhis/btc-data/derived/m8_current_expiry_skew.parquet`
+      — 110 MB, 1.25M rows × 20 cols, full history.
+    - `/home/abhis/btc-data/derived/m8_current_expiry_skew.xlsx`
+      — 49 MB, 255,518 rows (last 6 months: 2025-11-06 → 2026-05-06).
+  - **Sanity checks (verified)**: ATM call Δ median = +0.502, put Δ ≈ −0.498
+    (centered as expected). 25Δ call IV ≈ ATM IV + 1.4% on avg (sensible
+    smile). `current_expiry` rotates cleanly at each 12:00 UTC settle.
+    ~25,000 minutes (~2%) have NaN `atm_iv_pct` (chain gaps / boundary
+    minutes) — expected.
+  - **No backend or frontend changes**. M8 is a standalone analytics
+    artifact for now; ad-hoc analysis is via parquet/xlsx. Dashboard
+    integration is a separate session if desired.
+
+### Session 16 highlights
+- **M7 Full-Coverage IV-band table SHIPPED (UNCOMMITTED)** — every one of the
+  121 Fridays now assigned to exactly one of the 10 best-cell rules so the
+  headline summary covers the full universe (no orphans).
+  - New backend endpoint `GET /api/v1/m7/iv_band_full_coverage` in
+    `backend/app/api/m7_full_coverage.py` (~340 LOC). Same params as
+    `/iv_band_summary` plus a classifier that partitions Fridays into
+    `rule` (strict 4-dim match) / `force_fit` (matches hour+expiry+delta
+    of some best cell, different IV band) / `closest_fallback` (no
+    hour-expiry-delta match, picked by distance
+    `D = 100·|Δ| + 10·|expiry_idx| + |hour|`) / `uncovered`. Each row
+    returns two metric blocks: `rule_only` (today's strict numbers) and
+    `all_fridays` (rule + force-fit + closest-fallback).
+  - **Option Y classification** (chosen after iteration with user): the
+    `assigned_band` is always the trade's ACTUAL `entry_atm_iv_band`, NOT
+    the cell's nominal band. Cell rule is used only to FIND the right
+    trade for each Friday; the band label tracks where the trade's
+    entry IV actually sits. Reasoning: makes "band 30-40" mean "entry IV
+    was 30-40%" (which is what the user expected) instead of "the rule
+    that came from band 30-40's best cell was used" (which was the
+    initial Option X behavior). Verified: Oct 10 2025 lands in band
+    30-40 (its actual entry-IV band for the (hour=23, next-to-next Mon,
+    Δ=0.50) trade), not 0-20 (the cell's nominal band).
+  - New frontend component
+    `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx` (~395 LOC).
+    Two stacked sub-rows per band ("Rule" / "All (n)") with full Headline
+    column set: 33 metrics including winners-only and losers-only MTM
+    splits (avg/largest win MTM, avg max/min MTM (W), max/min MTM (W),
+    n-winners-below-avg-min, mirror set for losers, ret/credit (W),
+    ret/margin (W)).
+  - Mounted in `backend/app/main.py` (1-line router include) and
+    `frontend/src/pages/M7SweepDashboard.tsx` (1-line import + 1-line
+    render below the existing `M7IvBandSummaryTable`).
+  - Tests: 10 passing in `backend/tests/test_m7_full_coverage.py`
+    (rule-strict-match, force-fit-best-pnl, closest-fallback-distance,
+    distance-by-delta-first, rule-beats-force-fit, universe-counts-
+    partition, etc.).
+  - Verified live: at Δ=0.30, all 121 Fridays partition cleanly
+    (88 rule + 33 force-fit + 0 closest-fallback + 0 uncovered). At
+    Δ=0.05: 115 total (no Δ=0.05 sim for 6 Fridays) → 48 rule + 59
+    force-fit + 8 closest-fallback + 0 uncovered.
+
+- **Exit-rule sweep script SHIPPED (UNCOMMITTED)** —
+  `scripts/m7_exit_rule_sweep.py` (~205 LOC). Sweeps 25 exit-rule variants
+  (baseline / max_profit_{10,20,25,30}% / margin_target_{10,20,25,30}% /
+  premium_sl_{50,75,100}% / fixed_exit_hr_{05,08,10,12,15,17:30} IST /
+  common max-profit + premium-SL combos) across all 7 expiries × 8 deltas.
+  Output: `scripts/m7_exit_rule_sweep.xlsx` (135 KB, 8 sheets including
+  pivot_net, pivot_winr, pivot_minmtm, pivot_n).
+  - **Top by avg net P&L** (gated WR ≥ 60%, n ≥ 20): `current (Sat) Δ=0.50
+    baseline` +$25.73/73% WR, n=847. `next_to_next Δ=0.50 baseline`
+    +$23.81/84% WR, n=833 (best risk-adjusted — cleanest contract).
+  - **Top by lowest drawdown:** `monthly Δ=0.10 exit_hr_12` +$0.59/60% WR,
+    min MTM −$4.57. `current Δ=0.05 max_profit_30` +$0.33/68% WR, min MTM
+    −$5.41.
+  - **Key insight:** most exit rules ≈ baseline at the high-Δ tier —
+    triggers rarely fire before the Sat 17:30 IST hard cap. `max_profit_30`
+    mildly improves WR on next_to_next Δ=0.50 (84.27% vs 84.03%) without
+    sacrificing return.
+  - Skip everything ≥30 DTE — quarterly didn't make any list.
+
+### What's on disk
+```
+/home/abhis/btc-data/derived/m7/m7_trades.parquet                 8.5 MB  (34,166 trades, 82 cols)
+/home/abhis/btc-data/derived/m7/m7_trades_enriched.parquet        8.76 MB (34,166 trades, 91 cols)
+/home/abhis/btc-data/derived/m7/m7_paths/                         121 partitions (friday_date=YYYY-MM-DD)
+/home/abhis/btc-data/derived/m8_current_expiry_skew.parquet       110 MB  (1.25M rows × 20 cols, full history)  ← NEW Session 17
+/home/abhis/btc-data/derived/m8_current_expiry_skew.xlsx          49 MB   (last 6 months, 255,518 rows)         ← NEW Session 17
+```
+
+### Pending follow-ups
+- **Active focus (Session 18+):** Refining M7 loss-trade analysis. The
+  loss-classifier / losses-explorer / cell-winners-vs-losers components
+  from Session 16 (currently UNCOMMITTED) are the active work surface.
+- **Future — proposed M7×M8 join (not started):** point-in-time merge
+  of M8's per-minute RR_25/BF_25/ATM IV onto M7 trades by `entry_ts`.
+  Adds `entry_rr_25` + `entry_bf_25` columns to `m7_trades_enriched.parquet`,
+  surfaced as filter chips/columns on the existing M7 page (no new
+  page). Discussed Session 17 — answers "what was the entry-time skew
+  for the worst losers". **Defer until current M7 loss-trade work
+  is shipped.**
+- **Future — proposed M8 page (only if time-series view needed):** would
+  warrant a dedicated page if you want per-minute RR_25 across all
+  expiries with M7 trade markers overlaid. Skip until M7×M8 column
+  enrichment proves insufficient.
+- **COMMIT** Session 16 work (UNCOMMITTED currently). 4 new files +
+  2 one-line edits:
+    - `backend/app/api/m7_full_coverage.py` (new)
+    - `backend/tests/test_m7_full_coverage.py` (new)
+    - `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx` (new)
+    - `scripts/m7_exit_rule_sweep.py` (new)
+    - `backend/app/main.py` (M)  — 1-line router include
+    - `frontend/src/pages/M7SweepDashboard.tsx` (M, untracked-? actually
+      wired) — 1 import + 1 render line for the new table
+- **COMMIT** Session 17 (M8) work (UNCOMMITTED). 1 new file:
+    - `backend/app/analytics/m8_current_expiry_skew.py` (new, ~330 LOC)
+    - Output parquet+xlsx live in `/home/abhis/btc-data/derived/` (untracked
+      data path — same convention as M2/M4/M7).
+- **Open question (cut off by usage limit at end of session):** "what is
+  the best percentage it can get" for % based exits — i.e. extend the
+  exit-rule sweep with a finer % grid (e.g. 5/10/15/20/25/30/35/40/50/75
+  across max-profit %, margin-target %, premium-SL %, plus 2-way and
+  3-way combos) to find the genuine optimum per (expiry, Δ) cell.
+- Chunks 2–10 of the Trade Copilot plan still pending
+  (`/home/abhis/.claude/plans/phase-1-defining-the-witty-dawn.md`).
+
+### Notable findings exposed by Session 16
+- **Mar 7, 2025 is the only Friday with entry ATM IV ≥ 100%** (102.36% at
+  hour 22 IST). It's the sole rule trade in band 100+. The 100+ band's
+  "All Fridays" set under Option Y has only 1 trade (Mar 7) because
+  force-fit Fridays whose best-rule trade matches the 100+ cell rule
+  have actual entry IVs in lower bands → they get assigned to those
+  lower bands instead.
+- **Oct 10, 2025 — the BTC flash crash** is fully captured in the path
+  data (1m bars, peak ATM IV ~73% mid-trade) but enters in IV band 30-40
+  for its best-rule trade because M7 buckets by entry IV, not peak IV
+  during hold. Path peak captured separately in `max_min_mtm` cols.
+- **next_to_next (Mon)** is the cleanest contract — 84% WR at Δ=0.50,
+  +$23.81 avg net, drawdown comparable to current Sat. Validates the
+  Session 12 finding that next_to_next is the strongest workhorse.
+
+---
+
+## Previous Session (15)
+**Who:** Claude
 **Date:** 2026-05-06 (Session 15 — Trade Copilot plan + M7 enrichment commit + Chunk 1 per-leg attribution shipped)
 **Branch:** `mainbranch-gemini_claude`
 

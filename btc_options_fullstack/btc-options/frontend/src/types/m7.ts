@@ -27,6 +27,8 @@ export interface M7Filters {
   delta_skew_bucket?: string;
   premium_skew_bucket?: string;
   leg_winner?: string;            // both | call_only | put_only | neither
+  // Loss-anatomy: filter trades by what caused the loss (winners → null/empty)
+  loss_cause?: string;            // directional | vol_expansion | path_dependent | gamma_squeeze | skew_flip | unclassified
 }
 
 export interface M7Summary {
@@ -166,6 +168,8 @@ export interface M7IvBandSummaryRow {
   avg_loss_mtm?: number | null;
   largest_win_mtm?: number | null;
   largest_loss_mtm?: number | null;
+  total_win_mtm?: number | null;
+  total_loss_mtm?: number | null;
   // Counts
   n_rule_trigger?: number | null;
   n_hard_cap?: number | null;
@@ -266,6 +270,8 @@ export interface M7Meta {
   iv_skew_buckets: string[];
   premium_skew_buckets: string[];
   leg_winners: string[];          // ["both", "call_only", "put_only", "neither"]
+  // Loss-cause classifier (Chunk 1 of loss-anatomy plan); winners get null
+  loss_causes: string[];          // ["directional", "vol_expansion", "path_dependent", "gamma_squeeze", "skew_flip", "unclassified"]
 }
 
 // ── Chunk 1: Per-leg attribution ─────────────────────────────────────────────
@@ -325,6 +331,8 @@ export interface M7LegAttributionRow {
   is_win: boolean;
   exit_reason: string;
   exit_ts: number;
+  // Loss-cause classifier — null for winners
+  loss_cause?: string | null;
 }
 
 export interface M7LegAttributionResponse {

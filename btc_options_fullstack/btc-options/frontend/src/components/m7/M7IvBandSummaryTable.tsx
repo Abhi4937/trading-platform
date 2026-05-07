@@ -123,6 +123,10 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                 <th style={{ ...thR, color: '#f85149' }}>Largest loss (L)</th>
                 {/* Winners-only — exit MTM + path MTM (peak/trough) */}
                 <th style={{ ...thR, color: '#3fb950' }}>Avg win MTM</th>
+                <th style={{ ...thR, color: '#3fb950' }}
+                    title="Sum of exit-time MTM across all winning trades (entry costs only).">
+                  Total win MTM
+                </th>
                 <th style={{ ...thR, color: '#3fb950' }}>Largest win MTM</th>
                 <th style={{ ...thR, color: '#3fb950' }}>Avg max MTM (W)</th>
                 <th style={{ ...thR, color: '#3fb950' }}>Avg min MTM (W)</th>
@@ -133,6 +137,10 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                 </th>
                 {/* Losers-only — exit MTM + path MTM (peak/trough) */}
                 <th style={{ ...thR, color: '#f85149' }}>Avg loss MTM</th>
+                <th style={{ ...thR, color: '#f85149' }}
+                    title="Sum of exit-time MTM across all losing trades (entry costs only).">
+                  Total loss MTM
+                </th>
                 <th style={{ ...thR, color: '#f85149' }}>Largest loss MTM</th>
                 <th style={{ ...thR, color: '#f85149' }}>Avg max MTM (L)</th>
                 <th style={{ ...thR, color: '#f85149' }}>Avg min MTM (L)</th>
@@ -176,6 +184,7 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                   <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(r.max_loss_usd)}</td>
                   {/* Winners-only — exit MTM + path MTM */}
                   <td style={{ ...tdR, color: pnlColor(r.avg_win_mtm) }}>{usd(r.avg_win_mtm)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.total_win_mtm) }}>{usd(r.total_win_mtm)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.largest_win_mtm) }}>{usd(r.largest_win_mtm)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.avg_max_mtm_winners) }}>{usd(r.avg_max_mtm_winners)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.avg_min_mtm_winners) }}>{usd(r.avg_min_mtm_winners)}</td>
@@ -184,6 +193,7 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                   <td style={{ ...tdR, color: '#3fb950' }}>{r.n_winners_below_avg_min_mtm ?? '—'}</td>
                   {/* Losers-only — exit MTM + path MTM */}
                   <td style={{ ...tdR, color: pnlColor(r.avg_loss_mtm) }}>{usd(r.avg_loss_mtm)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.total_loss_mtm) }}>{usd(r.total_loss_mtm)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.largest_loss_mtm) }}>{usd(r.largest_loss_mtm)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.avg_max_mtm_losers) }}>{usd(r.avg_max_mtm_losers)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.avg_min_mtm_losers) }}>{usd(r.avg_min_mtm_losers)}</td>

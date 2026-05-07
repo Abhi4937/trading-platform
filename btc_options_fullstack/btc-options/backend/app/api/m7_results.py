@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import threading
 from typing import Optional
 
 import duckdb
@@ -48,6 +49,14 @@ _TRADES_MTIME: float = 0.0
 # Each entry is the FULL merged DataFrame (all trades, no filters) for that exit_rule.
 # Filtering happens in pandas on the cached frame, avoiding repeat DuckDB scans.
 _EXIT_CACHE: dict[tuple[str, float], pd.DataFrame] = {}
+
+# Serialise concurrent DuckDB scans across threads. The warmup thread in
+# `m7_best_combo` runs full-path scans in the background; if a request thread
+# starts another scan over the same parquets at the same time DuckDB can
+# C++-terminate ("terminate called without an active exception"). Holding
+# this lock around `_compute_all_exits` ensures one big scan at a time.
+# Cache hits in `_derive_exits` skip the lock entirely.
+_EXIT_COMPUTE_LOCK = threading.Lock()
 
 
 def _load_trades() -> pd.DataFrame:
@@ -154,6 +163,7 @@ _TRADE_FILTER_COLS = {
     "delta_skew_bucket": str,
     "premium_skew_bucket": str,
     "leg_winner": str,
+    "loss_cause": str,
 }
 
 
@@ -199,6 +209,7 @@ def _query_filters(
     delta_skew_bucket: Optional[str] = None,
     premium_skew_bucket: Optional[str] = None,
     leg_winner: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ) -> dict:
     return {
         "delta_target": delta_target,
@@ -217,6 +228,7 @@ def _query_filters(
         "delta_skew_bucket": delta_skew_bucket,
         "premium_skew_bucket": premium_skew_bucket,
         "leg_winner": leg_winner,
+        "loss_cause": loss_cause,
     }
 
 
@@ -300,10 +312,15 @@ def _derive_exits(filters: dict, exit_rule: dict) -> pd.DataFrame:
     rule_key = (json.dumps(exit_rule or {}, sort_keys=True), _TRADES_MTIME)
     full = _EXIT_CACHE.get(rule_key)
     if full is None:
-        full = _compute_all_exits(exit_rule)
-        _EXIT_CACHE[rule_key] = full
-        log.info("M7 exit cache populated for rule=%s (%d trades)",
-                 rule_key[0][:80], len(full))
+        # Serialise heavy DuckDB scans across threads. Re-check the cache
+        # under the lock in case another thread populated it while we waited.
+        with _EXIT_COMPUTE_LOCK:
+            full = _EXIT_CACHE.get(rule_key)
+            if full is None:
+                full = _compute_all_exits(exit_rule)
+                _EXIT_CACHE[rule_key] = full
+                log.info("M7 exit cache populated for rule=%s (%d trades)",
+                         rule_key[0][:80], len(full))
     if full.empty:
         return full
     return _apply_filters(full, filters)
@@ -473,9 +490,39 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         "call_entry_mark", "put_entry_mark",
         "call_entry_iv",   "put_entry_iv",
         "call_entry_delta","put_entry_delta",
+        # Per-leg full Greeks at entry (for trade_diagnostic Greeks tab —
+        # net Γ/ν/Θ + ratios for IV-driven vs gamma-driven loss diagnosis)
+        "call_entry_gamma","put_entry_gamma",
+        "call_entry_theta","put_entry_theta",
+        "call_entry_vega", "put_entry_vega",
         # Skew cols (derived in _add_entry_skew_columns at load time)
         "delta_skew", "iv_skew_pct", "premium_skew_usd", "premium_skew_pct",
         "iv_skew_bucket", "delta_skew_bucket", "premium_skew_bucket",
+        # ── Loss-anatomy chunks need rich entry-context ─────────────────────
+        # IV term structure (Chunk 3 winners-vs-losers indicator pool)
+        "ctx_atm_iv_14d", "ctx_atm_iv_30d", "ctx_atm_iv_60d",
+        # IVP / IV percentile rank
+        "ctx_ivp_atm_7d_90d", "ctx_ivp_atm_14d_90d", "ctx_ivp_atm_30d_90d",
+        "ctx_ivp_4h",
+        # Realized vol + VRP
+        "ctx_rv_7d", "ctx_rv_14d", "ctx_rv_30d",
+        "ctx_iv_rv_spread_7d", "ctx_iv_rv_spread_30d", "ctx_iv_rv_ratio_7d",
+        "ctx_vrp_pct_7d", "ctx_rvp_4h",
+        # Skew / smile
+        "ctx_risk_reversal_25d", "ctx_butterfly_25d",
+        "ctx_wing_atm_ratio", "ctx_term_slope_7_30",
+        # Spot regime (used by directional cause + Chunk 3)
+        "ctx_adx_14_4h", "ctx_atr_pct_4h",
+        # GEX / order-book
+        "ctx_pcr_oi", "ctx_total_gex",
+        # Premium structure
+        "fair_credit_at_ivp", "structural_credit_pct",
+        "iv_regime_premium_pct", "excess_over_fair_pct",
+        # Greeks ratios
+        "theta_per_vega_call", "theta_per_vega_put", "theta_per_vega_combined",
+        # Calibration v2 outcomes (overall + pattern-keyed)
+        "pattern_winrate", "expectancy_per_credit_pct",
+        "bucket_overall_winrate", "n_trades_in_bucket", "bucket_sl_hit_rate",
     ]
     keep_trade_cols = [c for c in keep_trade_cols if c in trades.columns]
     merged = trades[keep_trade_cols].merge(exits, on="trade_id", how="inner")
@@ -505,6 +552,11 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                           "put_entry_mark":  "_p_entry",
                           "quantity_lots":   "_qty",
                       }))
+        # Chunk 1 — loss-cause classifier: project additional path-derived
+        # signals at the trough-MTM bar (arg_min over gross_pnl_usd) plus
+        # window-wide IV/spot extremes. Used by `_classify_loss_cause()` to
+        # distinguish directional / vol-expansion / gamma-squeeze / skew-flip
+        # / path-dependent losers.
         mtm_sql = f"""
         SELECT p.trade_id,
                MAX(p.gross_pnl_usd) AS max_gross_pnl_usd,
@@ -518,7 +570,17 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                MAX( (e._p_entry - p.put_mark)  * e._qty * 0.001 )
                    AS put_leg_max_mtm_usd,
                MIN( (e._p_entry - p.put_mark)  * e._qty * 0.001 )
-                   AS put_leg_min_mtm_usd
+                   AS put_leg_min_mtm_usd,
+               -- Values at the worst-MTM bar (arg_min over gross_pnl_usd)
+               arg_min(p.spot,                    p.gross_pnl_usd) AS spot_at_min_mtm,
+               arg_min(p.atm_iv_now,              p.gross_pnl_usd) AS atm_iv_at_min_mtm,
+               arg_min(p.net_delta,               p.gross_pnl_usd) AS net_delta_at_min_mtm,
+               arg_min(p.theta_per_vega_combined, p.gross_pnl_usd) AS theta_per_vega_at_min_mtm,
+               -- Window-wide IV / spot extremes
+               MIN(p.atm_iv_now) AS min_atm_iv_in_window,
+               MAX(p.atm_iv_now) AS max_atm_iv_in_window,
+               MIN(p.spot)       AS min_spot_in_window,
+               MAX(p.spot)       AS max_spot_in_window
         FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
         JOIN _trade_exits e ON p.trade_id = e.trade_id
         WHERE p.ts <= e._exit_ts
@@ -629,8 +691,603 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
     merged["pct_return_on_credit"] = (
         merged["net_pnl_estimate_usd"] / credit
     ).where(credit > 0)
+    # Peak unrealized return as % of credit — the "what was achievable
+    # at the high-water mark of the trade" number. Useful for evaluating
+    # time-based exits: if exit-rule realised 20% but peak was 50%, the
+    # rule left 30 pts of credit on the table.
+    merged["pct_max_mtm_on_credit"] = (
+        merged["max_mtm_usd"] / credit
+    ).where(credit > 0)
+    merged["pct_min_mtm_on_credit"] = (
+        merged["min_mtm_usd"] / credit
+    ).where(credit > 0)
+
+    # Chunk 1 — auto-classify each loser into one of 6 causes.
+    _classify_loss_cause(merged)
 
     return merged
+
+
+def _classify_loss_cause(df: pd.DataFrame) -> None:
+    """Tag each losing trade with `loss_cause` ∈ {directional, vol_expansion,
+    path_dependent, gamma_squeeze, skew_flip, unclassified}. Winners get None.
+
+    Priority order (first match wins):
+      1. skew_flip       — both legs lost AND directional balance inverted
+      2. gamma_squeeze   — early SL hit AND net delta blew past entry deltas
+      3. vol_expansion   — ATM IV at the worst-MTM bar jumped >10% over entry
+      4. directional     — spot move at min-MTM exceeds 1.5× recent 4h ATR
+      5. path_dependent  — went to >30% of credit profit early then collapsed
+      6. unclassified    — none of the above (also covers NaN-input rows)
+
+    All work is in-place on `df`. Adds columns:
+      loss_cause                — string label or None for winners
+      _is_directional / _is_vol_expansion / … / _is_unclassified — float 0/1
+                                  (mirrors the leg-winner share trick so
+                                  groupby `mean()` works as `share_*`)
+    """
+    n = len(df)
+    if n == 0:
+        df["loss_cause"] = None
+        for k in ("_is_directional", "_is_vol_expansion", "_is_path_dependent",
+                  "_is_gamma_squeeze", "_is_skew_flip", "_is_unclassified"):
+            df[k] = 0.0
+        return
+
+    # Inputs (some may be missing on old paths — the predicates safely
+    # short-circuit to False via fillna).
+    is_loser = (~df["is_win"].fillna(False)).to_numpy()
+
+    def _col(name: str, default=np.nan) -> np.ndarray:
+        return (df[name] if name in df.columns else
+                pd.Series(default, index=df.index)).to_numpy(dtype=float)
+
+    leg_winner = (df["leg_winner"]
+                  if "leg_winner" in df.columns
+                  else pd.Series([""] * n, index=df.index)).fillna("").to_numpy()
+    exit_reason = df["exit_reason"].fillna("").to_numpy()
+
+    call_pnl = _col("call_leg_pnl_usd")
+    put_pnl  = _col("put_leg_pnl_usd")
+    call_d   = _col("call_entry_delta")
+    put_d    = _col("put_entry_delta")
+
+    rel_min_mtm = _col("rel_time_min_mtm")
+    rel_max_mtm = _col("rel_time_max_mtm")
+    net_delta_min = _col("net_delta_at_min_mtm")
+    spot_min  = _col("spot_at_min_mtm")
+    spot_in   = _col("spot_at_entry")
+    atm_iv_min = _col("atm_iv_at_min_mtm")
+    atm_iv_max_w = _col("max_atm_iv_in_window")
+    entry_iv = _col("entry_atm_iv")
+    atr_pct  = _col("ctx_atr_pct_4h")
+    max_mtm  = _col("max_mtm_usd")
+    exit_mtm = _col("exit_mtm_usd")
+    cred     = _col("credit_usd")
+
+    # ── 1. SKEW_FLIP ──────────────────────────────────────────────────
+    # Both legs lost AND the directional balance flipped during the trade.
+    # Use leg_winner == 'neither' as the "both-lost" signal. Imbalance: the
+    # call vs put loss differs by >50% of the smaller-magnitude side.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denom = np.minimum(np.abs(call_pnl), np.abs(put_pnl))
+        denom = np.where(denom > 1e-9, denom, np.nan)
+        leg_imbalance = np.abs(call_pnl - put_pnl) / denom
+    sign_entry = np.sign(call_d + put_d)
+    sign_min   = np.sign(net_delta_min)
+    direction_flipped = (sign_entry != 0) & (sign_min != 0) & (sign_entry != sign_min)
+    cond_skew_flip = (
+        (leg_winner == "neither")
+        & (np.nan_to_num(leg_imbalance, nan=0.0) > 0.5)
+        & direction_flipped
+    )
+
+    # ── 2. GAMMA_SQUEEZE ─────────────────────────────────────────────
+    # Rule-trigger SL fired in the first 30% of the trade AND |net_delta|
+    # at trough > 2× max(|call_entry_delta|, |put_entry_delta|).
+    max_abs_entry_delta = np.maximum(np.abs(call_d), np.abs(put_d))
+    cond_gamma = (
+        (exit_reason == "rule_trigger")
+        & (rel_min_mtm < 0.30)
+        & (np.abs(net_delta_min) > 2.0 * max_abs_entry_delta)
+    )
+
+    # ── 3. VOL_EXPANSION ─────────────────────────────────────────────
+    # IV at trough is >10% over entry IV AND peak IV in window is >5% over.
+    iv_jump_at_min = np.where(entry_iv > 1e-9,
+                              (atm_iv_min - entry_iv) / entry_iv, np.nan)
+    iv_jump_max    = np.where(entry_iv > 1e-9,
+                              (atm_iv_max_w - entry_iv) / entry_iv, np.nan)
+    cond_vol = (np.nan_to_num(iv_jump_at_min, nan=-1.0) > 0.10) & \
+               (np.nan_to_num(iv_jump_max,    nan=-1.0) > 0.05)
+
+    # ── 4. DIRECTIONAL ───────────────────────────────────────────────
+    # Spot moved more than 1.5× the recent 4h ATR by the time MTM bottomed.
+    # NaN ATR → predicate is False → falls through to unclassified (per plan).
+    spot_move_pct = np.where(spot_in > 1e-9,
+                             np.abs(spot_min - spot_in) / spot_in, np.nan)
+    atr_thresh    = 1.5 * (atr_pct / 100.0)
+    cond_direct = (np.nan_to_num(spot_move_pct, nan=-1.0) >
+                   np.nan_to_num(atr_thresh,    nan=np.inf))
+
+    # ── 5. PATH_DEPENDENT ────────────────────────────────────────────
+    # Was in solid profit (>30% of credit) before midpoint, ended below 0.
+    cond_path = (
+        (max_mtm > 0.30 * np.where(cred > 1e-9, cred, np.nan))
+        & (exit_mtm < 0)
+        & (rel_max_mtm < 0.60)
+    )
+
+    # First match wins — locked priority order.
+    cause = np.full(n, None, dtype=object)
+    masks = [
+        ("skew_flip",      cond_skew_flip),
+        ("gamma_squeeze",  cond_gamma),
+        ("vol_expansion",  cond_vol),
+        ("directional",    cond_direct),
+        ("path_dependent", cond_path),
+    ]
+    assigned = np.zeros(n, dtype=bool)
+    for label, mask in masks:
+        fire = is_loser & np.nan_to_num(mask, nan=False).astype(bool) & ~assigned
+        cause[fire] = label
+        assigned |= fire
+    # Remaining losers → unclassified.
+    cause[is_loser & ~assigned] = "unclassified"
+
+    df["loss_cause"] = cause
+
+    # Boolean indicator cols for share metrics (groupby `.mean()` → `share_*`).
+    for label in ("directional", "vol_expansion", "path_dependent",
+                  "gamma_squeeze", "skew_flip", "unclassified"):
+        df[f"_is_{label}"] = (cause == label).astype(float)
+
+
+def _compute_trade_hypotheses(row: pd.Series) -> list[dict]:
+    """Evaluate each loss-cause predicate independently for ONE trade and
+    return them as a flat list of {flag, fired, trigger, value}. Multiple
+    flags can fire (unlike `_classify_loss_cause` which assigns one).
+
+    Predicates mirror `_classify_loss_cause` exactly so the two views stay
+    consistent — the test suite asserts that whatever `_classify_loss_cause`
+    picked for this row appears as `fired=True` in this list.
+
+    Returns 5 entries (one per predicate) regardless of how many fired, so
+    the UI can render a stable rubric of all hypotheses with their numeric
+    triggers.
+    """
+    def _g(name: str, default=float("nan")):
+        v = row.get(name, default)
+        if v is None:
+            return default
+        try:
+            f = float(v)
+            if math.isnan(f):
+                return default
+            return f
+        except (TypeError, ValueError):
+            return default
+
+    # Inputs
+    leg_winner = str(row.get("leg_winner") or "")
+    exit_reason = str(row.get("exit_reason") or "")
+    call_pnl = _g("call_leg_pnl_usd")
+    put_pnl  = _g("put_leg_pnl_usd")
+    call_d   = _g("call_entry_delta")
+    put_d    = _g("put_entry_delta")
+    rel_min  = _g("rel_time_min_mtm")
+    rel_max  = _g("rel_time_max_mtm")
+    net_dmin = _g("net_delta_at_min_mtm")
+    spot_in  = _g("spot_at_entry")
+    spot_min = _g("spot_at_min_mtm")
+    entry_iv = _g("entry_atm_iv")
+    iv_min   = _g("atm_iv_at_min_mtm")
+    iv_max_w = _g("max_atm_iv_in_window")
+    atr_pct  = _g("ctx_atr_pct_4h")
+    max_mtm  = _g("max_mtm_usd")
+    exit_mtm = _g("exit_mtm_usd")
+    cred     = _g("credit_usd")
+
+    out: list[dict] = []
+
+    # 1. SKEW_FLIP — both legs lost AND directional balance flipped.
+    leg_imbalance = float("nan")
+    if not (math.isnan(call_pnl) or math.isnan(put_pnl)):
+        denom = min(abs(call_pnl), abs(put_pnl))
+        if denom > 1e-9:
+            leg_imbalance = abs(call_pnl - put_pnl) / denom
+    sign_entry = math.copysign(1, call_d + put_d) if not (math.isnan(call_d) or math.isnan(put_d)) and (call_d + put_d) != 0 else 0
+    sign_min = math.copysign(1, net_dmin) if not math.isnan(net_dmin) and net_dmin != 0 else 0
+    direction_flipped = (sign_entry != 0 and sign_min != 0 and sign_entry != sign_min)
+    fire_skew = (
+        leg_winner == "neither"
+        and not math.isnan(leg_imbalance) and leg_imbalance > 0.5
+        and direction_flipped
+    )
+    out.append({
+        "flag": "skew_flipped",
+        "fired": bool(fire_skew),
+        "trigger": (
+            f"both legs lost; leg-imbalance {leg_imbalance:.2f} > 0.50; "
+            f"net Δ sign flipped at trough"
+            if fire_skew else
+            f"leg_winner={leg_winner or '—'}, imbalance="
+            f"{'NaN' if math.isnan(leg_imbalance) else f'{leg_imbalance:.2f}'}, "
+            f"flipped={direction_flipped}"
+        ),
+        "value": None if math.isnan(leg_imbalance) else round(leg_imbalance, 4),
+    })
+
+    # 2. GAMMA_SQUEEZED — early SL hit AND |net Δ| at trough >> entry.
+    max_abs_entry = max(abs(call_d), abs(put_d)) if not (math.isnan(call_d) or math.isnan(put_d)) else float("nan")
+    delta_drift_x = float("nan")
+    if not math.isnan(max_abs_entry) and max_abs_entry > 1e-9 and not math.isnan(net_dmin):
+        delta_drift_x = abs(net_dmin) / max_abs_entry
+    fire_gamma = (
+        exit_reason == "rule_trigger"
+        and not math.isnan(rel_min) and rel_min < 0.30
+        and not math.isnan(delta_drift_x) and delta_drift_x > 2.0
+    )
+    out.append({
+        "flag": "gamma_squeezed",
+        "fired": bool(fire_gamma),
+        "trigger": (
+            f"SL fired in first {rel_min*100:.0f}% of window; "
+            f"|net Δ| at trough is {delta_drift_x:.1f}× entry max-leg |Δ|"
+            if fire_gamma else
+            f"exit={exit_reason}, rel_min={'NaN' if math.isnan(rel_min) else f'{rel_min:.2f}'}, "
+            f"Δ-drift×={'NaN' if math.isnan(delta_drift_x) else f'{delta_drift_x:.2f}'}"
+        ),
+        "value": None if math.isnan(delta_drift_x) else round(delta_drift_x, 4),
+    })
+
+    # 3. IV_DRIVEN — IV jumped >10% at trough AND >5% peak in window.
+    iv_jump_min = float("nan")
+    iv_jump_max = float("nan")
+    if not math.isnan(entry_iv) and entry_iv > 1e-9:
+        if not math.isnan(iv_min):
+            iv_jump_min = (iv_min - entry_iv) / entry_iv
+        if not math.isnan(iv_max_w):
+            iv_jump_max = (iv_max_w - entry_iv) / entry_iv
+    fire_iv = (
+        not math.isnan(iv_jump_min) and iv_jump_min > 0.10
+        and not math.isnan(iv_jump_max) and iv_jump_max > 0.05
+    )
+    out.append({
+        "flag": "iv_driven",
+        "fired": bool(fire_iv),
+        "trigger": (
+            f"max IV in window jumped +{iv_jump_max*100:.1f}% from entry; "
+            f"trough-bar IV +{iv_jump_min*100:.1f}%"
+            if fire_iv else
+            f"max-IV jump={'NaN' if math.isnan(iv_jump_max) else f'{iv_jump_max*100:+.1f}%'}, "
+            f"trough-IV jump={'NaN' if math.isnan(iv_jump_min) else f'{iv_jump_min*100:+.1f}%'}"
+        ),
+        "value": None if math.isnan(iv_jump_max) else round(iv_jump_max, 4),
+    })
+
+    # 4. DIRECTIONAL — spot move at trough exceeds 1.5× recent 4h ATR.
+    spot_move = float("nan")
+    if not math.isnan(spot_in) and spot_in > 1e-9 and not math.isnan(spot_min):
+        spot_move = abs(spot_min - spot_in) / spot_in
+    atr_thresh = 1.5 * (atr_pct / 100.0) if not math.isnan(atr_pct) else float("nan")
+    fire_direct = (
+        not math.isnan(spot_move) and not math.isnan(atr_thresh)
+        and spot_move > atr_thresh
+    )
+    out.append({
+        "flag": "directional",
+        "fired": bool(fire_direct),
+        "trigger": (
+            f"|spot move| {spot_move*100:.2f}% > 1.5× ATR_4h "
+            f"({atr_pct:.2f}% × 1.5 = {atr_thresh*100:.2f}%)"
+            if fire_direct else
+            f"spot move={'NaN' if math.isnan(spot_move) else f'{spot_move*100:.2f}%'}, "
+            f"1.5×ATR={'NaN' if math.isnan(atr_thresh) else f'{atr_thresh*100:.2f}%'}"
+        ),
+        "value": None if math.isnan(spot_move) else round(spot_move, 6),
+    })
+
+    # 5. PATH_DEPENDENT — was up >30% of credit early, exited below 0.
+    path_peak_pct = float("nan")
+    if not math.isnan(cred) and cred > 1e-9 and not math.isnan(max_mtm):
+        path_peak_pct = max_mtm / cred
+    fire_path = (
+        not math.isnan(path_peak_pct) and path_peak_pct > 0.30
+        and not math.isnan(exit_mtm) and exit_mtm < 0
+        and not math.isnan(rel_max) and rel_max < 0.60
+    )
+    out.append({
+        "flag": "path_dependent",
+        "fired": bool(fire_path),
+        "trigger": (
+            f"peak MTM was {path_peak_pct*100:.1f}% of credit at "
+            f"{rel_max*100:.0f}% of window; ended at $"
+            f"{exit_mtm:.2f} (negative)"
+            if fire_path else
+            f"peak%={'NaN' if math.isnan(path_peak_pct) else f'{path_peak_pct*100:.1f}%'}, "
+            f"rel_max={'NaN' if math.isnan(rel_max) else f'{rel_max:.2f}'}, "
+            f"exit_mtm={'NaN' if math.isnan(exit_mtm) else f'{exit_mtm:.2f}'}"
+        ),
+        "value": None if math.isnan(path_peak_pct) else round(path_peak_pct, 4),
+    })
+
+    return out
+
+
+def _project_trade_to_diagnostic(row: pd.Series) -> dict:
+    """Project ONE trade row into the sectioned diagnostic shape consumed
+    by /trade_diagnostic. NaN → None for JSON safety; floats rounded for
+    wire compactness. All derived ratios computed once here so the UI
+    doesn't need any math."""
+    def _num(name: str):
+        v = row.get(name)
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            if math.isnan(f):
+                return None
+            return round(f, 4)
+        except (TypeError, ValueError):
+            return None
+
+    def _str(name: str):
+        v = row.get(name)
+        if v is None:
+            return None
+        if isinstance(v, float) and math.isnan(v):
+            return None
+        return str(v)
+
+    def _int(name: str):
+        v = row.get(name)
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            if math.isnan(f):
+                return None
+            return int(f)
+        except (TypeError, ValueError):
+            return None
+
+    def _bool(name: str):
+        v = row.get(name)
+        if v is None:
+            return None
+        return bool(v)
+
+    # Derived helpers
+    entry_iv = _num("entry_atm_iv")
+    iv_max_w = _num("max_atm_iv_in_window")
+    iv_min_w = _num("min_atm_iv_in_window")
+    iv_jump_pct = None
+    if entry_iv and entry_iv > 1e-9 and iv_max_w is not None:
+        iv_jump_pct = round((iv_max_w - entry_iv) / entry_iv, 6)
+
+    spot_in = _num("spot_at_entry")
+    spot_min = _num("spot_at_min_mtm")
+    spot_max_w = _num("max_spot_in_window")
+    spot_min_w = _num("min_spot_in_window")
+    spot_move_pct = None
+    spot_range_pct = None
+    if spot_in and spot_in > 1e-9:
+        if spot_min is not None:
+            spot_move_pct = round((spot_min - spot_in) / spot_in, 6)
+        if spot_max_w is not None and spot_min_w is not None:
+            spot_range_pct = round((spot_max_w - spot_min_w) / spot_in, 6)
+
+    em_7d  = _num("expected_move_1sigma_7d")
+    actual_move_usd = None
+    actual_vs_1sigma_7d = None
+    exceeded_1sigma_7d = None
+    if spot_in is not None and spot_min is not None:
+        actual_move_usd = round(abs(spot_min - spot_in), 2)
+    if em_7d and em_7d > 1e-6 and actual_move_usd is not None:
+        actual_vs_1sigma_7d = round(actual_move_usd / em_7d, 4)
+        exceeded_1sigma_7d = bool(actual_vs_1sigma_7d > 1.0)
+
+    call_d = _num("call_entry_delta") or 0.0
+    put_d  = _num("put_entry_delta")  or 0.0
+    call_g = _num("call_entry_gamma") or 0.0
+    put_g  = _num("put_entry_gamma")  or 0.0
+    call_t = _num("call_entry_theta") or 0.0
+    put_t  = _num("put_entry_theta")  or 0.0
+    call_v = _num("call_entry_vega")  or 0.0
+    put_v  = _num("put_entry_vega")  or 0.0
+    net_d_entry = round(call_d + put_d, 6)
+    net_g_entry = round(call_g + put_g, 6)
+    net_t_entry = round(call_t + put_t, 6)
+    net_v_entry = round(call_v + put_v, 6)
+    net_d_min = _num("net_delta_at_min_mtm")
+    delta_drift = None
+    if net_d_min is not None:
+        delta_drift = round(net_d_min - net_d_entry, 6)
+    abs_theta_per_gamma = None
+    if abs(net_g_entry) > 1e-9:
+        abs_theta_per_gamma = round(abs(net_t_entry) / abs(net_g_entry), 4)
+    abs_gamma_per_vega = None
+    if abs(net_v_entry) > 1e-9:
+        abs_gamma_per_vega = round(abs(net_g_entry) / abs(net_v_entry), 4)
+    delta_drift_x_max_leg = None
+    max_abs_leg = max(abs(call_d), abs(put_d))
+    if max_abs_leg > 1e-9 and delta_drift is not None:
+        delta_drift_x_max_leg = round(abs(delta_drift) / max_abs_leg, 4)
+
+    duration_minutes = None
+    entry_ts = _num("entry_ts_utc")
+    exit_ts  = _num("exit_ts")
+    if entry_ts is not None and exit_ts is not None:
+        duration_minutes = round((exit_ts - entry_ts) / 60.0, 1)
+
+    return {
+        "identity": {
+            "trade_id": _str("trade_id"),
+            "friday_date_ist": _str("friday_date_ist"),
+            "entry_ts_utc": _num("entry_ts_utc"),
+            "exit_ts": _num("exit_ts"),
+            "duration_minutes": duration_minutes,
+            "entry_hour_ist": _int("entry_hour_ist"),
+            "expiry_bucket": _str("expiry_bucket"),
+            "expiry_date": _str("expiry_date"),
+            "delta_target": _num("delta_target"),
+            "is_straddle": _bool("is_straddle"),
+            "exit_reason": _str("exit_reason"),
+            "loss_cause": _str("loss_cause"),
+            "leg_winner": _str("leg_winner"),
+            "entry_atm_iv_band": _str("entry_atm_iv_band"),
+        },
+        "pnl": {
+            "credit_usd": _num("credit_usd"),
+            "margin_used_usd_at_entry": _num("margin_used_usd_at_entry"),
+            "gross_pnl_usd": _num("gross_pnl_usd"),
+            "net_pnl_estimate_usd": _num("net_pnl_estimate_usd"),
+            "is_win": _bool("is_win"),
+            "max_mtm_usd": _num("max_mtm_usd"),
+            "min_mtm_usd": _num("min_mtm_usd"),
+            "exit_mtm_usd": _num("exit_mtm_usd"),
+            "rel_time_max_mtm": _num("rel_time_max_mtm"),
+            "rel_time_min_mtm": _num("rel_time_min_mtm"),
+            "pct_return_on_credit": _num("pct_return_on_credit"),
+            "pct_return_on_margin": _num("pct_return_on_margin"),
+            "leg_pnl_diff_usd": _num("leg_pnl_diff_usd"),
+        },
+        "costs": {
+            "entry_slippage_call_usd": _num("entry_slippage_call_usd"),
+            "entry_slippage_put_usd":  _num("entry_slippage_put_usd"),
+            "entry_brokerage_call_usd": _num("entry_brokerage_call_usd"),
+            "entry_brokerage_put_usd":  _num("entry_brokerage_put_usd"),
+            "exit_slippage_call_usd":  _num("exit_slippage_call_usd"),
+            "exit_slippage_put_usd":   _num("exit_slippage_put_usd"),
+            "exit_brokerage_call_usd": _num("exit_brokerage_call_usd"),
+            "exit_brokerage_put_usd":  _num("exit_brokerage_put_usd"),
+            "total_entry_cost_usd":    _num("total_entry_cost_usd"),
+            "total_exit_cost_usd":     _num("total_exit_cost_usd"),
+        },
+        "per_leg": {
+            "call": {
+                "strike": _num("call_strike"),
+                "entry_iv": _num("call_entry_iv"),
+                "entry_delta": _num("call_entry_delta"),
+                "entry_gamma": _num("call_entry_gamma"),
+                "entry_theta": _num("call_entry_theta"),
+                "entry_vega":  _num("call_entry_vega"),
+                "entry_mark":  _num("call_entry_mark"),
+                "exit_mark":   _num("exit_call_mark"),
+                "leg_pnl_usd": _num("call_leg_pnl_usd"),
+                "leg_max_mtm_usd": _num("call_leg_max_mtm_usd"),
+                "leg_min_mtm_usd": _num("call_leg_min_mtm_usd"),
+            },
+            "put": {
+                "strike": _num("put_strike"),
+                "entry_iv": _num("put_entry_iv"),
+                "entry_delta": _num("put_entry_delta"),
+                "entry_gamma": _num("put_entry_gamma"),
+                "entry_theta": _num("put_entry_theta"),
+                "entry_vega":  _num("put_entry_vega"),
+                "entry_mark":  _num("put_entry_mark"),
+                "exit_mark":   _num("exit_put_mark"),
+                "leg_pnl_usd": _num("put_leg_pnl_usd"),
+                "leg_max_mtm_usd": _num("put_leg_max_mtm_usd"),
+                "leg_min_mtm_usd": _num("put_leg_min_mtm_usd"),
+            },
+            "skew": {
+                "delta_skew": _num("delta_skew"),
+                "iv_skew_pct": _num("iv_skew_pct"),
+                "premium_skew_usd": _num("premium_skew_usd"),
+                "premium_skew_pct": _num("premium_skew_pct"),
+                "iv_skew_bucket": _str("iv_skew_bucket"),
+                "delta_skew_bucket": _str("delta_skew_bucket"),
+                "premium_skew_bucket": _str("premium_skew_bucket"),
+            },
+        },
+        "vol_regime": {
+            "entry_atm_iv": entry_iv,
+            "ctx_atm_iv_7d":  _num("ctx_atm_iv_7d"),
+            "ctx_atm_iv_14d": _num("ctx_atm_iv_14d"),
+            "ctx_atm_iv_30d": _num("ctx_atm_iv_30d"),
+            "ctx_atm_iv_60d": _num("ctx_atm_iv_60d"),
+            "ctx_ivp_atm_7d_90d":  _num("ctx_ivp_atm_7d_90d"),
+            "ctx_ivp_atm_14d_90d": _num("ctx_ivp_atm_14d_90d"),
+            "ctx_ivp_atm_30d_90d": _num("ctx_ivp_atm_30d_90d"),
+            "ctx_ivp_4h":  _num("ctx_ivp_4h"),
+            "ctx_rv_7d":   _num("ctx_rv_7d"),
+            "ctx_rv_14d":  _num("ctx_rv_14d"),
+            "ctx_rv_30d":  _num("ctx_rv_30d"),
+            "ctx_iv_rv_spread_7d":  _num("ctx_iv_rv_spread_7d"),
+            "ctx_iv_rv_spread_30d": _num("ctx_iv_rv_spread_30d"),
+            "ctx_iv_rv_ratio_7d":   _num("ctx_iv_rv_ratio_7d"),
+            "ctx_vrp_pct_7d":       _num("ctx_vrp_pct_7d"),
+            "ctx_rvp_4h":           _num("ctx_rvp_4h"),
+            "ivp_4h_delta_24h":     _num("ivp_4h_delta_24h"),
+            "ivp_4h_delta_48h":     _num("ivp_4h_delta_48h"),
+            "iv_change_stdev_7d":   _num("iv_change_stdev_7d"),
+            "vov_ratio":            _num("vov_ratio"),
+            "atm_iv_at_min_mtm":    _num("atm_iv_at_min_mtm"),
+            "min_atm_iv_in_window": iv_min_w,
+            "max_atm_iv_in_window": iv_max_w,
+            "iv_jump_pct": iv_jump_pct,
+        },
+        "skew_smile": {
+            "ctx_risk_reversal_25d": _num("ctx_risk_reversal_25d"),
+            "ctx_butterfly_25d":     _num("ctx_butterfly_25d"),
+            "ctx_wing_atm_ratio":    _num("ctx_wing_atm_ratio"),
+            "ctx_term_slope_7_30":   _num("ctx_term_slope_7_30"),
+        },
+        "spot_regime": {
+            "spot_at_entry": spot_in,
+            "exit_spot": _num("exit_spot"),
+            "spot_at_min_mtm": spot_min,
+            "min_spot_in_window": spot_min_w,
+            "max_spot_in_window": spot_max_w,
+            "entry_rsi_14_5m":  _num("entry_rsi_14_5m"),
+            "entry_rsi_14_4h":  _num("entry_rsi_14_4h"),
+            "entry_macd_hist_5m": _num("entry_macd_hist_5m"),
+            "entry_bb_pct_b_5m":  _num("entry_bb_pct_b_5m"),
+            "entry_atr_pct_5m":   _num("entry_atr_pct_5m"),
+            "ctx_atr_pct_4h":     _num("ctx_atr_pct_4h"),
+            "ctx_adx_14_4h":      _num("ctx_adx_14_4h"),
+            "ctx_pcr_oi":         _num("ctx_pcr_oi"),
+            "ctx_total_gex":      _num("ctx_total_gex"),
+            "spot_move_pct": spot_move_pct,
+            "spot_range_pct": spot_range_pct,
+        },
+        "expected_move": {
+            "expected_move_1sigma_7d":  em_7d,
+            "expected_move_1sigma_14d": _num("expected_move_1sigma_14d"),
+            "expected_move_1sigma_30d": _num("expected_move_1sigma_30d"),
+            "actual_move_usd": actual_move_usd,
+            "actual_vs_1sigma_7d_ratio": actual_vs_1sigma_7d,
+            "exceeded_1sigma_7d": exceeded_1sigma_7d,
+        },
+        "greeks_ratios": {
+            "theta_per_vega_call":     _num("theta_per_vega_call"),
+            "theta_per_vega_put":      _num("theta_per_vega_put"),
+            "theta_per_vega_combined": _num("theta_per_vega_combined"),
+            "theta_per_vega_at_min_mtm": _num("theta_per_vega_at_min_mtm"),
+            "net_delta_at_entry": net_d_entry,
+            "net_delta_at_min_mtm": net_d_min,
+            "net_gamma_at_entry": net_g_entry,
+            "net_vega_at_entry":  net_v_entry,
+            "net_theta_at_entry": net_t_entry,
+            "abs_theta_per_gamma": abs_theta_per_gamma,
+            "abs_gamma_per_vega":  abs_gamma_per_vega,
+            "delta_drift": delta_drift,
+            "delta_drift_x_max_leg": delta_drift_x_max_leg,
+        },
+        "context_premium": {
+            "fair_credit_at_ivp":       _num("fair_credit_at_ivp"),
+            "structural_credit_pct":    _num("structural_credit_pct"),
+            "iv_regime_premium_pct":    _num("iv_regime_premium_pct"),
+            "excess_over_fair_pct":     _num("excess_over_fair_pct"),
+            "pattern_winrate":          _num("pattern_winrate"),
+            "expectancy_per_credit_pct":_num("expectancy_per_credit_pct"),
+            "bucket_overall_winrate":   _num("bucket_overall_winrate"),
+            "bucket_sl_hit_rate":       _num("bucket_sl_hit_rate"),
+        },
+        "hypotheses": _compute_trade_hypotheses(row),
+    }
 
 
 def _add_exit_costs(df: pd.DataFrame) -> None:
@@ -682,6 +1339,7 @@ _WINNER_METRICS = {
     # Exit-time MTM among winners only (gross − entry costs only)
     "avg_win_mtm":            lambda g: g.loc[g["is_win"], "exit_mtm_usd"].mean(),
     "largest_win_mtm":        lambda g: g.loc[g["is_win"], "exit_mtm_usd"].max(),
+    "total_win_mtm":          lambda g: g.loc[g["is_win"], "exit_mtm_usd"].sum(),
     # Per-trade ROI restricted to winners (per-trade ratio, then mean)
     "avg_pct_return_on_margin_winners": lambda g: g.loc[g["is_win"], "pct_return_on_margin"].mean(),
     "avg_pct_return_on_credit_winners": lambda g: g.loc[g["is_win"], "pct_return_on_credit"].mean(),
@@ -696,6 +1354,7 @@ _LOSER_METRICS = {
     # Exit-time MTM among losers only
     "avg_loss_mtm":           lambda g: g.loc[~g["is_win"], "exit_mtm_usd"].mean(),
     "largest_loss_mtm":       lambda g: g.loc[~g["is_win"], "exit_mtm_usd"].min(),
+    "total_loss_mtm":         lambda g: g.loc[~g["is_win"], "exit_mtm_usd"].sum(),
 }
 # Metrics that are simple column aggregations (mean / sum / size on a column).
 _SIMPLE_METRICS = {
@@ -709,6 +1368,10 @@ _SIMPLE_METRICS = {
     "avg_margin":                  ("margin_used_usd_at_entry",    "mean"),
     "avg_pct_return_on_margin":    ("pct_return_on_margin",        "mean"),
     "avg_pct_return_on_credit":    ("pct_return_on_credit",        "mean"),
+    # Peak/trough unrealized as % of credit — what was theoretically
+    # achievable at the high/low-water mark of each trade.
+    "avg_pct_max_mtm_on_credit":   ("pct_max_mtm_on_credit",       "mean"),
+    "avg_pct_min_mtm_on_credit":   ("pct_min_mtm_on_credit",       "mean"),
     # Exit-time MTM overall (on-screen P&L at exit, only entry costs subtracted)
     "avg_exit_mtm":                ("exit_mtm_usd",                "mean"),
     # Per-leg P&L (Chunk 1 — leg attribution)
@@ -729,6 +1392,15 @@ _SIMPLE_METRICS = {
     "call_only_share":             ("_is_call_only",               "mean"),
     "put_only_share":              ("_is_put_only",                "mean"),
     "neither_share":               ("_is_neither",                 "mean"),
+    # Loss-cause shares (Chunk 1) — fraction of trades in the group whose
+    # loss_cause matches each label. Winners contribute 0 to all share_*
+    # metrics. Compose as a "% of all trades", not "% of losers".
+    "share_directional":           ("_is_directional",             "mean"),
+    "share_vol_expansion":         ("_is_vol_expansion",           "mean"),
+    "share_path_dependent":        ("_is_path_dependent",          "mean"),
+    "share_gamma_squeeze":         ("_is_gamma_squeeze",           "mean"),
+    "share_skew_flip":             ("_is_skew_flip",               "mean"),
+    "share_unclassified":          ("_is_unclassified",            "mean"),
 }
 
 # Special-case metrics that don't fit the simple "column + agg" pattern.
@@ -784,6 +1456,10 @@ def _n_losers_above_avg_max_mtm(g):
         return 0
     return int((losers["max_mtm_usd"] > avg_max).sum())
 
+def _count_cause(label: str):
+    def _f(g): return int((g["loss_cause"] == label).sum()) if "loss_cause" in g.columns else 0
+    return _f
+
 _SPECIAL_METRICS = {
     "n_rule_trigger": _count_rule_trigger,  # # of trades that hit any rule (SL/max-profit/margin)
     "n_hard_cap":     _count_hard_cap,      # # of trades that exited at Sat 17:30 (no rule fired)
@@ -794,6 +1470,13 @@ _SPECIAL_METRICS = {
     "max_consec_sl_hits": _max_consecutive_sl_hits,  # longest streak of rule-triggered (SL) exits
     "n_winners_below_avg_min_mtm": _n_winners_below_avg_min_mtm,  # winners w/ worse-than-avg drawdown
     "n_losers_above_avg_max_mtm":  _n_losers_above_avg_max_mtm,   # losers w/ better-than-avg peak
+    # Loss-cause counts (Chunk 1) — # of losers in the group with each cause
+    "n_directional":     _count_cause("directional"),
+    "n_vol_expansion":   _count_cause("vol_expansion"),
+    "n_path_dependent":  _count_cause("path_dependent"),
+    "n_gamma_squeeze":   _count_cause("gamma_squeeze"),
+    "n_skew_flip":       _count_cause("skew_flip"),
+    "n_unclassified":    _count_cause("unclassified"),
 }
 
 ALL_METRICS = (list(_SIMPLE_METRICS) + list(_WINNER_METRICS)
@@ -834,6 +1517,40 @@ def _round_score(metric: str, val: float) -> float:
     return round(float(val), 4)
 
 
+# ── Best-cells helper (shared by full_coverage endpoint + losses_distribution scope) ──
+
+def _best_cells_for_metric(derived: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Return one best (band, hour, expiry, delta) cell per IV band, ranked by
+    `metric`. Strict pick uses n_trades >= 3; bands not covered by the strict
+    pick fall back to best-score regardless of n. Mirrors the selection in
+    `m7_full_coverage.get_iv_band_full_coverage` — kept here so scope-aware
+    callers (Losses Explorer) get the SAME best cells the table renders.
+    """
+    if derived.empty:
+        return pd.DataFrame(columns=["entry_atm_iv_band", "entry_hour_ist",
+                                      "expiry_bucket", "delta_target",
+                                      "score", "n_trades"])
+    dims = ["entry_atm_iv_band", "entry_hour_ist", "expiry_bucket", "delta_target"]
+    grp = derived.groupby(dims, dropna=False)
+    score = _metric_score(grp, metric)
+    n = grp.size()
+    df = pd.DataFrame({"score": score, "n_trades": n}).reset_index()
+    df_valid = df.dropna(subset=["score"])
+    if df_valid.empty:
+        return df_valid
+    strict = df_valid[df_valid["n_trades"] >= 3]
+    strict_idx = (strict.groupby("entry_atm_iv_band", dropna=False)["score"].idxmax()
+                  if not strict.empty else pd.Index([]))
+    strict_best = strict.loc[strict_idx] if len(strict_idx) else strict.iloc[0:0]
+    covered = set(strict_best["entry_atm_iv_band"].dropna().tolist())
+    fallback = df_valid[~df_valid["entry_atm_iv_band"].isin(covered)]
+    if not fallback.empty:
+        fb_idx = fallback.groupby("entry_atm_iv_band", dropna=False)["score"].idxmax()
+        fallback_best = fallback.loc[fb_idx]
+        return pd.concat([strict_best, fallback_best], ignore_index=True)
+    return strict_best.reset_index(drop=True)
+
+
 # ── NaN → None for JSON ───────────────────────────────────────────────────────
 
 def _to_records(df: pd.DataFrame) -> list[dict]:
@@ -865,11 +1582,13 @@ def get_summary(
     ctx_pattern: Optional[str] = None,
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
                               spot_bucket, ivp_bucket, ctx_pattern,
-                              ctx_gex_regime, friday_date_ist, expiry_bucket)
+                              ctx_gex_regime, friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -955,11 +1674,13 @@ def get_aggregate(
     ivp_bucket: Optional[str] = None,
     ctx_pattern: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
                               None, ivp_bucket, ctx_pattern, None,
-                              friday_date_ist, expiry_bucket)
+                              friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -986,11 +1707,13 @@ def get_heatmap(
     expiry_date: Optional[str] = None,
     expiry_bucket: Optional[str] = None,
     entry_atm_iv_band: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     """Entry-time × Friday heatmap (one cell per friday_date × entry_hour)."""
     filters = _query_filters(delta_target, None, expiry_date,
                               entry_atm_iv_band, None, None, None, None, None,
-                              None, None, expiry_bucket)
+                              None, None, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -1019,6 +1742,7 @@ def get_missed_fridays(
     ctx_pattern: Optional[str] = None,
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     """For each Friday NOT represented in any of the 10 IV-band best cells
     (under the same filters + exit rule), return that Friday's own best combo.
@@ -1029,7 +1753,8 @@ def get_missed_fridays(
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
                               spot_bucket, ivp_bucket, ctx_pattern,
-                              ctx_gex_regime, friday_date_ist, expiry_bucket)
+                              ctx_gex_regime, friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -1127,13 +1852,15 @@ def get_iv_band_summary(
     ctx_pattern: Optional[str] = None,
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     """For each IV band, find the best (entry_hour, expiry, delta) combo
     by the chosen metric. Headline 'answer the question' table."""
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
                               spot_bucket, ivp_bucket, ctx_pattern,
-                              ctx_gex_regime, friday_date_ist, expiry_bucket)
+                              ctx_gex_regime, friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -1181,8 +1908,10 @@ def get_iv_band_summary(
         "max_loss_usd", "max_win_usd",
         # Exit-time MTM (entry costs only, no exit costs)
         "avg_exit_mtm",
-        "avg_win_mtm", "largest_win_mtm",
-        "avg_loss_mtm", "largest_loss_mtm",
+        "avg_win_mtm", "largest_win_mtm", "total_win_mtm",
+        "avg_loss_mtm", "largest_loss_mtm", "total_loss_mtm",
+        # Peak/trough unrealized return as % of credit
+        "avg_pct_max_mtm_on_credit", "avg_pct_min_mtm_on_credit",
         # Counts
         "n_rule_trigger", "n_hard_cap", "n_losses", "n_wins",
         # Streaks (chronological by friday_date_ist)
@@ -1242,6 +1971,7 @@ def get_best_combo_markers(
     ctx_pattern: Optional[str] = None,
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     """For each IV band's best (entry_hour × expiry_bucket × delta) combo,
     return per-trade path-marker rows for the path-markers chart:
@@ -1250,7 +1980,8 @@ def get_best_combo_markers(
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
                               spot_bucket, ivp_bucket, ctx_pattern,
-                              ctx_gex_regime, friday_date_ist, expiry_bucket)
+                              ctx_gex_regime, friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -1353,12 +2084,14 @@ def get_best_combo(
     ctx_pattern: Optional[str] = None,
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     """Top-N (entry_hour × expiry_bucket × delta) combos by metric, given exit rule."""
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
                               spot_bucket, ivp_bucket, ctx_pattern,
-                              ctx_gex_regime, friday_date_ist, expiry_bucket)
+                              ctx_gex_regime, friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
     if derived.empty:
@@ -1393,6 +2126,7 @@ def get_leg_attribution(
     delta_skew_bucket: Optional[str] = None,
     premium_skew_bucket: Optional[str] = None,
     leg_winner: Optional[str] = None,
+    loss_cause: Optional[str] = None,
     sort_by: str = "friday_date_ist",
     sort_dir: str = "desc",
     limit: int = Query(200, ge=1, le=5000),
@@ -1416,6 +2150,7 @@ def get_leg_attribution(
         spot_bucket, ivp_bucket, ctx_pattern, ctx_gex_regime,
         friday_date_ist, expiry_bucket,
         iv_skew_bucket, delta_skew_bucket, premium_skew_bucket, leg_winner,
+        loss_cause,
     )
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
@@ -1447,6 +2182,8 @@ def get_leg_attribution(
         "gross_pnl_usd", "net_pnl_estimate_usd",
         "max_mtm_usd", "min_mtm_usd", "exit_mtm_usd",
         "is_win", "exit_reason", "exit_ts",
+        # Loss-cause classifier (Chunk 1) — None for winners
+        "loss_cause",
     ]
     keep_cols = [c for c in keep_cols if c in derived.columns]
     df = derived[keep_cols].copy()
@@ -1502,6 +2239,7 @@ def get_leg_skew_heatmap(
     ivp_bucket: Optional[str] = None,
     ctx_pattern: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
 ):
     """2D heatmap on the leg-attribution dataset.
 
@@ -1519,6 +2257,7 @@ def get_leg_skew_heatmap(
         entry_atm_iv_band, entry_hour_ist, dte_bucket,
         None, ivp_bucket, ctx_pattern, None,
         friday_date_ist, expiry_bucket,
+        loss_cause=loss_cause,
     )
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
@@ -1574,6 +2313,856 @@ def get_cost_breakdown(trade_id: str = Query(...)):
     }
 
 
+# ── Loss-anatomy: per-cell winners-vs-losers indicator gap ──────────────────
+# Indicator universe for the cell-level winners-vs-losers analysis. Mirrors
+# m4_results._ATTR_INDICATORS plus the Chunk-2 IV-velocity / expected-move /
+# spot-technical additions. Each tuple is (column, display_label, category).
+_M7_LOSS_INDICATORS: list[tuple[str, str, str]] = [
+    # IV term structure
+    ("ctx_atm_iv_7d",          "ATM IV 7d",            "IV"),
+    ("ctx_atm_iv_14d",         "ATM IV 14d",           "IV"),
+    ("ctx_atm_iv_30d",         "ATM IV 30d",           "IV"),
+    ("ctx_atm_iv_60d",         "ATM IV 60d",           "IV"),
+    ("ctx_ivp_atm_7d_90d",     "IVP 7d/90d (rank)",    "IV"),
+    ("ctx_ivp_atm_14d_90d",    "IVP 14d/90d (rank)",   "IV"),
+    ("ctx_ivp_atm_30d_90d",    "IVP 30d/90d (rank)",   "IV"),
+    ("ctx_ivp_4h",             "IVP 4h",               "IV"),
+    # IV velocity / vol-of-vol (Chunk 2 additions)
+    ("ivp_4h_delta_24h",       "IVP Δ 24h",            "IV velocity"),
+    ("ivp_4h_delta_48h",       "IVP Δ 48h",            "IV velocity"),
+    ("iv_change_stdev_7d",     "IV change σ 7d",       "IV velocity"),
+    ("vov_ratio",              "Vol-of-vol ratio",     "IV velocity"),
+    # Realized vol + spread
+    ("ctx_rv_7d",              "RV 7d",                "RV/VRP"),
+    ("ctx_rv_14d",             "RV 14d",               "RV/VRP"),
+    ("ctx_rv_30d",             "RV 30d",               "RV/VRP"),
+    ("ctx_iv_rv_spread_7d",    "IV-RV spread 7d",      "RV/VRP"),
+    ("ctx_iv_rv_spread_30d",   "IV-RV spread 30d",     "RV/VRP"),
+    ("ctx_iv_rv_ratio_7d",     "IV/RV ratio 7d",       "RV/VRP"),
+    ("ctx_vrp_pct_7d",         "VRP % 7d",             "RV/VRP"),
+    ("ctx_rvp_4h",             "RVP 4h",               "RV/VRP"),
+    # Skew / smile / term
+    ("ctx_risk_reversal_25d",  "RR 25d",               "Skew/Term"),
+    ("ctx_butterfly_25d",      "Butterfly 25d",        "Skew/Term"),
+    ("ctx_wing_atm_ratio",     "Wing/ATM ratio",       "Skew/Term"),
+    ("ctx_term_slope_7_30",    "Term slope 7→30",      "Skew/Term"),
+    # Spot regime
+    ("ctx_adx_14_4h",          "ADX 14 (4h)",          "Spot regime"),
+    ("ctx_atr_pct_4h",         "ATR % (4h)",           "Spot regime"),
+    # Spot technicals at entry (Chunk 2 additions)
+    ("entry_rsi_14_5m",        "RSI 14 (5m, entry)",   "Spot technicals"),
+    ("entry_macd_hist_5m",     "MACD hist (5m, entry)","Spot technicals"),
+    ("entry_bb_pct_b_5m",      "BB %B (5m, entry)",    "Spot technicals"),
+    ("entry_atr_pct_5m",       "ATR % (5m, entry)",    "Spot technicals"),
+    ("entry_rsi_14_4h",        "RSI 14 (4h, entry)",   "Spot technicals"),
+    # Expected move (Chunk 2 additions) — USD
+    ("expected_move_1sigma_7d", "Expected move 1σ 7d", "Expected move"),
+    ("expected_move_1sigma_14d","Expected move 1σ 14d","Expected move"),
+    ("expected_move_1sigma_30d","Expected move 1σ 30d","Expected move"),
+    # Order book / GEX
+    ("ctx_pcr_oi",             "PCR OI",               "GEX/Flow"),
+    ("ctx_total_gex",          "Total GEX",            "GEX/Flow"),
+    # Premium structure (entry-side credit / IV-regime context)
+    ("fair_credit_at_ivp",     "Fair credit @ IVP",    "Premium"),
+    ("structural_credit_pct",  "Structural credit %",  "Premium"),
+    ("iv_regime_premium_pct",  "IV regime premium %",  "Premium"),
+    ("excess_over_fair_pct",   "Excess over fair %",   "Premium"),
+    # Greeks ratios
+    ("theta_per_vega_call",    "θ/ν call",             "Greeks"),
+    ("theta_per_vega_put",     "θ/ν put",              "Greeks"),
+    ("theta_per_vega_combined","θ/ν combined",         "Greeks"),
+    # Skew at entry (per-leg)
+    ("delta_skew",             "Δ skew (call−put)",    "Skew (entry)"),
+    ("iv_skew_pct",            "IV skew % (call−put)", "Skew (entry)"),
+    ("premium_skew_pct",       "Premium skew %",       "Skew (entry)"),
+]
+
+
+def _pool_suggestions(cell: dict) -> list[str]:
+    """Adjacent-cell suggestions surfaced when the requested cell is too
+    small for stable winners-vs-losers stats. UI renders as buttons the
+    user can click into. No silent auto-pooling."""
+    return [
+        "entry_atm_iv_band ±1 (adjacent IV bucket)",
+        "entry_hour_ist ±1 (adjacent entry hour)",
+        f"delta_target ±0.05 (adjacent Δ around {cell.get('delta_target')})",
+        f"expiry_bucket adjacent (currently {cell.get('expiry_bucket')!r})",
+    ]
+
+
+@router.get("/cell_winners_vs_losers")
+def get_cell_winners_vs_losers(
+    cell: str = Query(..., description="JSON: {entry_atm_iv_band, entry_hour_ist, expiry_bucket, delta_target}"),
+    discriminate_sigma: float = Query(0.5, ge=0.0, le=3.0,
+        description="Effect-size cutoff: |gap|/σ > this flags discriminating"),
+    min_n_per_side: int = Query(3, ge=1, le=20,
+        description="Below this, response.low_confidence=true and pool_suggestions are returned"),
+    exit_rule: Optional[str] = None,
+):
+    """For ONE best-combo cell (band × hour × expiry_bucket × delta), compare
+    avg(indicator) for winners vs losers across ~50 indicators.
+
+    `discriminating` flag fires when |gap| > N·σ where σ is the indicator's
+    overall std across the full dataset. Also returns Welch's t-test p-value
+    as `p_value_t` (informational; not gating).
+
+    When n_win or n_loss < `min_n_per_side`, response sets `low_confidence`
+    and surfaces `pool_suggestions` — adjacent cells the user could
+    optionally re-query against.
+    """
+    try:
+        cell_obj = json.loads(cell)
+        if not isinstance(cell_obj, dict):
+            raise ValueError("cell must be a JSON object")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"bad cell payload: {e}")
+
+    required = {"entry_atm_iv_band", "entry_hour_ist", "expiry_bucket", "delta_target"}
+    missing = required - set(cell_obj.keys())
+    if missing:
+        raise HTTPException(status_code=400,
+            detail=f"cell missing required keys: {sorted(missing)}")
+
+    rule = _parse_exit_rule(exit_rule)
+    full_derived = _derive_exits({}, rule)
+    if full_derived.empty:
+        return {"cell": cell_obj, "n_trades": 0, "n_win": 0, "n_loss": 0,
+                "win_rate": 0.0, "low_confidence": True,
+                "pool_suggestions": _pool_suggestions(cell_obj), "rows": []}
+
+    sub = full_derived
+    sub = sub[sub["entry_atm_iv_band"] == str(cell_obj["entry_atm_iv_band"])]
+    sub = sub[sub["entry_hour_ist"] == int(cell_obj["entry_hour_ist"])]
+    sub = sub[sub["expiry_bucket"] == str(cell_obj["expiry_bucket"])]
+    sub = sub[np.isclose(sub["delta_target"].astype(float),
+                          float(cell_obj["delta_target"]), atol=1e-6)]
+
+    n_trades = len(sub)
+    if n_trades == 0:
+        return {"cell": cell_obj, "n_trades": 0, "n_win": 0, "n_loss": 0,
+                "win_rate": 0.0, "low_confidence": True,
+                "pool_suggestions": _pool_suggestions(cell_obj), "rows": []}
+
+    wins   = sub[sub["is_win"]]
+    losses = sub[~sub["is_win"]]
+    n_win, n_loss = len(wins), len(losses)
+    win_rate = n_win / n_trades if n_trades else 0.0
+    low_conf = n_win < min_n_per_side or n_loss < min_n_per_side
+
+    # σ baseline on the FULL derived universe (stable cross-cell scale).
+    sigmas: dict[str, float] = {}
+    for col, _label, _cat in _M7_LOSS_INDICATORS:
+        if col in full_derived.columns and full_derived[col].notna().any():
+            sigmas[col] = float(full_derived[col].std())
+        else:
+            sigmas[col] = 0.0
+
+    try:
+        from scipy.stats import ttest_ind  # type: ignore
+        _have_scipy = True
+    except Exception:
+        _have_scipy = False
+
+    rows = []
+    for col, label, category in _M7_LOSS_INDICATORS:
+        if col not in sub.columns:
+            continue
+        w_vals = wins[col].dropna().astype(float)
+        l_vals = losses[col].dropna().astype(float)
+        avg_win  = float(w_vals.mean()) if len(w_vals)  else float("nan")
+        avg_loss = float(l_vals.mean()) if len(l_vals) else float("nan")
+        gap = (avg_win - avg_loss) if (
+            np.isfinite(avg_win) and np.isfinite(avg_loss)) else float("nan")
+        sigma = sigmas.get(col, 0.0)
+        discriminating = bool(
+            np.isfinite(gap) and sigma > 0 and
+            abs(gap) > discriminate_sigma * sigma
+        )
+
+        p_t = None
+        if _have_scipy and len(w_vals) >= 2 and len(l_vals) >= 2:
+            try:
+                _stat, p_val = ttest_ind(w_vals, l_vals, equal_var=False)
+                if np.isfinite(p_val):
+                    p_t = round(float(p_val), 6)
+            except Exception:
+                p_t = None
+
+        rows.append({
+            "indicator": col,
+            "label": label,
+            "category": category,
+            "avg_win":  None if not np.isfinite(avg_win)  else round(avg_win, 6),
+            "avg_loss": None if not np.isfinite(avg_loss) else round(avg_loss, 6),
+            "gap":      None if not np.isfinite(gap)      else round(gap, 6),
+            "sigma":    round(sigma, 6),
+            "discriminating": discriminating,
+            "p_value_t": p_t,
+            "n_win":  int(len(w_vals)),
+            "n_loss": int(len(l_vals)),
+        })
+
+    # Sort discriminating-first then by |gap|/σ desc.
+    def _sort_key(r):
+        sig = r["sigma"] or 0.0
+        eff = abs(r["gap"]) / sig if (sig > 0 and r["gap"] is not None) else 0.0
+        return (-int(r["discriminating"]), -eff)
+    rows.sort(key=_sort_key)
+
+    return {
+        "cell": cell_obj,
+        "n_trades": n_trades,
+        "n_win": n_win,
+        "n_loss": n_loss,
+        "win_rate": round(win_rate, 4),
+        "low_confidence": low_conf,
+        "pool_suggestions": _pool_suggestions(cell_obj) if low_conf else [],
+        "rows": rows,
+    }
+
+
+def _losses_empty_response(scope_summary: dict) -> dict:
+    """Empty losses_distribution payload preserving the scope_summary block."""
+    return {
+        "n_losses": 0, "n_total": 0, "loss_rate": 0.0,
+        "avg_loss_usd": 0.0, "total_loss_usd": 0.0, "worst_loss_usd": 0.0,
+        "by_cause": {}, "by_band": {}, "rows": [],
+        "scope_summary": scope_summary,
+    }
+
+
+@router.get("/losses_distribution")
+def get_losses_distribution(
+    dimensions: Optional[str] = Query(None,
+        description="Comma-separated dim cols, e.g. 'loss_cause,entry_atm_iv_band'"),
+    exit_rule: Optional[str] = None,
+    metric: str = Query("avg_net_pnl",
+        description="Best-cell selection metric for scope=full_coverage"),
+    scope: Optional[str] = Query(None,
+        description="null (universe) | 'full_coverage' | 'best_combo'"),
+    ranking: Optional[str] = Query("credit",
+        description="credit | margin — used only when scope=best_combo"),
+    delta_target: Optional[str] = None,
+    is_straddle: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    expiry_bucket: Optional[str] = None,
+    entry_atm_iv_band: Optional[str] = None,
+    entry_hour_ist: Optional[str] = None,
+    dte_bucket: Optional[str] = None,
+    spot_bucket: Optional[str] = None,
+    ivp_bucket: Optional[str] = None,
+    ctx_pattern: Optional[str] = None,
+    ctx_gex_regime: Optional[str] = None,
+    friday_date_ist: Optional[str] = None,
+    loss_cause: Optional[str] = None,
+    include_trades: bool = Query(False,
+        description="When true, also return a `losers_sample` array of "
+                    "individual losing trades — used by the Losses Explorer "
+                    "drill-down."),
+    trades_limit: int = Query(50, ge=1, le=200,
+        description="Max losing trades to return when include_trades=true"),
+    trades_offset: int = Query(0, ge=0,
+        description="Offset for paginating losers_sample"),
+    trades_sort: str = Query("pnl_asc",
+        description="pnl_asc | pnl_desc | friday_asc | friday_desc | band"),
+    only_sl_hits: bool = Query(False,
+        description="Restrict losers_sample to exit_reason=='rule_trigger'"),
+):
+    """Loss distribution over a chosen trade set.
+
+    Three scopes:
+      - default (`scope=None`): universe — all filtered trades.
+      - `scope=full_coverage`: restrict to the per-band best-cell strict
+        ("rule" kind) trade set produced by m7_full_coverage. Filters in
+        the bar reshape the candidate pool, which reshapes the best cells.
+      - `scope=best_combo`: restrict to per-band best (expiry, delta, rule)
+        trade set produced by m7_best_combo. Premium SL pinned at 100%;
+        per-band rule overrides filter-bar exit_rule. Filters narrow each
+        band's resulting trade set.
+
+    `loss_cause` filter always applies on top of the scoped set.
+    """
+    filters = _query_filters(delta_target, is_straddle, expiry_date,
+                              entry_atm_iv_band, entry_hour_ist, dte_bucket,
+                              spot_bucket, ivp_bucket, ctx_pattern,
+                              ctx_gex_regime, friday_date_ist, expiry_bucket,
+                              loss_cause=loss_cause)
+    rule = _parse_exit_rule(exit_rule)
+
+    scope_summary: dict = {
+        "scope": scope,
+        "ranking": ranking if scope == "best_combo" else None,
+        "metric": metric if scope == "full_coverage" else None,
+        "n_in_scope": 0,
+        "exit_rule_overridden": False,
+        "per_band_rules": [],
+    }
+
+    if scope == "full_coverage":
+        # Filters flow through _query_filters → _derive_exits; the FILTERED
+        # candidate pool is what we pick best cells from. Changing filters
+        # changes the cells, which changes the trade set.
+        candidates = _derive_exits(filters, rule)
+        if candidates.empty:
+            return _losses_empty_response(scope_summary)
+        try:
+            best = _best_cells_for_metric(candidates, metric)
+        except HTTPException:
+            raise
+        if best.empty:
+            return _losses_empty_response(scope_summary)
+        # Take ALL trades in each band's best cell — matches the Full Coverage
+        # table's per-band `n_trades` column (sum across rows). Each trade has
+        # a single entry_atm_iv_band, so concat is duplicate-free.
+        per_cell_dfs: list[pd.DataFrame] = []
+        per_band_rules: list[dict] = []
+        for _, row in best.iterrows():
+            mask = (
+                (candidates["entry_atm_iv_band"] == row["entry_atm_iv_band"]) &
+                (candidates["entry_hour_ist"] == row["entry_hour_ist"]) &
+                (candidates["expiry_bucket"] == row["expiry_bucket"]) &
+                (candidates["delta_target"] == row["delta_target"])
+            )
+            sub = candidates[mask]
+            if not sub.empty:
+                per_cell_dfs.append(sub)
+            per_band_rules.append({
+                "band": str(row["entry_atm_iv_band"]) if row["entry_atm_iv_band"] is not None else None,
+                "entry_hour_ist": int(row["entry_hour_ist"]) if pd.notna(row["entry_hour_ist"]) else None,
+                "expiry_bucket": str(row["expiry_bucket"]) if row["expiry_bucket"] is not None else None,
+                "delta_target": float(row["delta_target"]) if pd.notna(row["delta_target"]) else None,
+                "n_trades": int(len(sub)),
+            })
+        derived = pd.concat(per_cell_dfs, ignore_index=True) if per_cell_dfs else pd.DataFrame()
+        scope_summary["per_band_rules"] = per_band_rules
+        scope_summary["n_in_scope"] = int(len(derived))
+
+    elif scope == "best_combo":
+        from app.api import m7_best_combo as bc
+        # Hydrate / kick off background warmup if grid not yet ready.
+        if bc._GRID_STATE["status"] in ("pending", None):
+            bc.kick_off_warmup()
+        if bc._GRID_STATE["status"] == "warming":
+            return {
+                "n_losses": 0, "n_total": 0, "loss_rate": 0.0,
+                "avg_loss_usd": 0.0, "total_loss_usd": 0.0, "worst_loss_usd": 0.0,
+                "by_cause": {}, "by_band": {}, "rows": [],
+                "scope_summary": {
+                    **scope_summary,
+                    "warming": True,
+                    "rules_done": int(bc._GRID_STATE.get("rules_done", 0)),
+                    "rules_total": int(bc._GRID_STATE.get("rules_total", 21)),
+                },
+            }
+        if bc._GRID_STATE["status"] == "error":
+            raise HTTPException(status_code=500,
+                                detail=f"Best-combo grid warmup failed: "
+                                       f"{bc._GRID_STATE.get('error')}")
+        grid = bc._GRID_STATE.get("grid")
+        if grid is None or grid.empty:
+            return _losses_empty_response(scope_summary)
+        ranking_eff = ranking if ranking in ("credit", "margin") else "credit"
+        scope_summary["ranking"] = ranking_eff
+        best = bc._pick_best_per_band(grid, ranking_eff)
+        if best.empty:
+            return _losses_empty_response(scope_summary)
+        scope_summary["exit_rule_overridden"] = True
+
+        per_band_rules: list[dict] = []
+        per_band_dfs: list[pd.DataFrame] = []
+        for _, row in best.iterrows():
+            band = row["iv_band"]
+            expiry = row["expiry_bucket"]
+            delta = row["delta_target"]
+            rule_label = row["rule_label"]
+            rule_dict = row["rule"] if row["rule"] is not None else {}
+            try:
+                band_derived = _derive_exits(filters, rule_dict)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("scope=best_combo failed to derive band %s rule %s: %s",
+                            band, rule_label, exc)
+                continue
+            n_band = 0
+            if band_derived is not None and not band_derived.empty:
+                try:
+                    delta_f = float(delta) if delta is not None else None
+                except (TypeError, ValueError):
+                    delta_f = None
+                mask = (band_derived["entry_atm_iv_band"] == band) & \
+                       (band_derived["expiry_bucket"] == expiry)
+                if delta_f is not None:
+                    mask = mask & (band_derived["delta_target"].astype(float) == delta_f)
+                sub = band_derived[mask]
+                if not sub.empty:
+                    per_band_dfs.append(sub)
+                    n_band = int(len(sub))
+            per_band_rules.append({
+                "band": str(band) if band is not None else None,
+                "rule_label": str(rule_label) if rule_label is not None else None,
+                "rule_dict": dict(rule_dict) if isinstance(rule_dict, dict) else {},
+                "expiry_bucket": str(expiry) if expiry is not None else None,
+                "delta_target": float(delta) if delta is not None else None,
+                "n_trades": n_band,
+            })
+        scope_summary["per_band_rules"] = per_band_rules
+        if per_band_dfs:
+            derived = pd.concat(per_band_dfs, ignore_index=True)
+        else:
+            derived = pd.DataFrame()
+        scope_summary["n_in_scope"] = int(len(derived))
+
+    else:
+        # Universe (legacy / default)
+        derived = _derive_exits(filters, rule)
+        scope_summary["n_in_scope"] = int(len(derived))
+
+    if derived is None or derived.empty:
+        return _losses_empty_response(scope_summary)
+
+    n_total = len(derived)
+    losers = derived[~derived["is_win"]]
+    n_losses = len(losers)
+    loss_rate = n_losses / n_total if n_total else 0.0
+    avg_loss = float(losers["net_pnl_estimate_usd"].mean()) if n_losses else 0.0
+    total_loss = float(losers["net_pnl_estimate_usd"].sum()) if n_losses else 0.0
+    worst_loss = float(losers["net_pnl_estimate_usd"].min()) if n_losses else 0.0
+
+    by_cause = {}
+    if "loss_cause" in losers.columns:
+        for cause, sub in losers.groupby("loss_cause", dropna=False):
+            key = str(cause) if cause is not None and not (isinstance(cause, float) and pd.isna(cause)) else "unclassified"
+            by_cause[key] = int(len(sub))
+
+    by_band = {}
+    if "entry_atm_iv_band" in losers.columns:
+        for band, sub in losers.groupby("entry_atm_iv_band", dropna=False):
+            by_band[str(band)] = int(len(sub))
+
+    # Per-IV-band loss stats — mirrors the loss-related columns of the FC /
+    # iv_band_summary tables, but on the currently-scoped losers. One row per
+    # band that has at least one losing trade; sorted in natural band order.
+    def _safe_stat(s: pd.Series, op: str):
+        try:
+            if s.empty or s.isna().all():
+                return None
+            val = getattr(s, op)()
+            if pd.isna(val):
+                return None
+            return round(float(val), 4)
+        except Exception:
+            return None
+
+    by_band_stats: list[dict] = []
+    if not losers.empty and "entry_atm_iv_band" in losers.columns:
+        derived_band_n = (derived.groupby("entry_atm_iv_band", dropna=False)
+                                  .size().to_dict())
+        for band, sub in losers.groupby("entry_atm_iv_band", dropna=False):
+            band_label = str(band) if band is not None and not (
+                isinstance(band, float) and pd.isna(band)) else None
+
+            net      = sub["net_pnl_estimate_usd"] if "net_pnl_estimate_usd" in sub.columns else pd.Series(dtype=float)
+            exit_mtm = sub["exit_mtm_usd"]         if "exit_mtm_usd"         in sub.columns else pd.Series(dtype=float)
+            max_mtm  = sub["max_mtm_usd"]          if "max_mtm_usd"          in sub.columns else pd.Series(dtype=float)
+            min_mtm  = sub["min_mtm_usd"]          if "min_mtm_usd"          in sub.columns else pd.Series(dtype=float)
+
+            avg_max_l = _safe_stat(max_mtm, "mean")
+            n_above_avg_peak = 0
+            if avg_max_l is not None and not max_mtm.empty:
+                n_above_avg_peak = int((max_mtm > avg_max_l).sum())
+
+            n_rule_trigger = 0
+            n_hard_cap = 0
+            if "exit_reason" in sub.columns:
+                er = sub["exit_reason"].fillna("")
+                n_rule_trigger = int((er == "rule_trigger").sum())
+                n_hard_cap     = int((er == "hard_cap").sum())
+
+            by_band_stats.append({
+                "entry_atm_iv_band": band_label,
+                "n_band_total":   int(derived_band_n.get(band, 0)),
+                "n_loss":         int(len(sub)),
+                # Realized loss (after costs)
+                "avg_loss_usd":     _safe_stat(net, "mean"),
+                "total_loss_usd":   _safe_stat(net, "sum"),
+                "largest_loss_usd": _safe_stat(net, "min"),
+                # Path MTM stats (entry-cost only)
+                "avg_loss_mtm":      _safe_stat(exit_mtm, "mean"),
+                "total_loss_mtm":    _safe_stat(exit_mtm, "sum"),
+                "largest_loss_mtm":  _safe_stat(exit_mtm, "min"),
+                "avg_max_mtm_losers":_safe_stat(max_mtm,  "mean"),
+                "avg_min_mtm_losers":_safe_stat(min_mtm,  "mean"),
+                "max_mtm_losers":    _safe_stat(max_mtm,  "max"),
+                "min_mtm_losers":    _safe_stat(min_mtm,  "min"),
+                # Counts
+                "n_losers_above_avg_max_mtm": n_above_avg_peak,
+                "n_rule_trigger": n_rule_trigger,
+                "n_hard_cap":     n_hard_cap,
+            })
+
+        def _band_key(s: Optional[str]) -> int:
+            if not s:
+                return 9999
+            if s == "100+":
+                return 1000
+            try:
+                return int(s.split("-")[0])
+            except (ValueError, AttributeError):
+                return 9999
+        by_band_stats.sort(key=lambda r: _band_key(r.get("entry_atm_iv_band")))
+
+    rows = []
+    if dimensions:
+        dims = [d.strip() for d in dimensions.split(",") if d.strip()]
+        for d in dims:
+            if d not in losers.columns:
+                raise HTTPException(status_code=400,
+                    detail=f"Unknown dimension: {d}")
+        if dims:
+            grp = losers.groupby(dims, dropna=False)
+            for key, sub in grp:
+                if not isinstance(key, tuple):
+                    key = (key,)
+                row = {dim: (None if pd.isna(v) else
+                             (int(v) if isinstance(v, (int, np.integer))
+                              else float(v) if isinstance(v, (float, np.floating))
+                              else str(v)))
+                       for dim, v in zip(dims, key)}
+                row["n"] = int(len(sub))
+                row["avg_loss_usd"] = round(float(sub["net_pnl_estimate_usd"].mean()), 4)
+                row["total_loss_usd"] = round(float(sub["net_pnl_estimate_usd"].sum()), 4)
+                row["share"] = round(len(sub) / n_total, 6) if n_total else 0
+                rows.append(row)
+            rows.sort(key=lambda r: r["n"], reverse=True)
+
+    # ── Optional individual losing trades (for the Losses Explorer
+    # drill-down). Sorted server-side, paginated; returns a thin row
+    # schema sized for a clickable table — full diagnostic comes from
+    # /trade_diagnostic on click. ───────────────────────────────────────
+    losers_sample: list[dict] = []
+    losers_total = 0
+    if include_trades and not losers.empty:
+        sample = losers
+        if only_sl_hits and "exit_reason" in sample.columns:
+            sample = sample[sample["exit_reason"] == "rule_trigger"]
+        losers_total = int(len(sample))
+
+        sort_key, asc = "net_pnl_estimate_usd", True
+        if trades_sort == "pnl_desc":         sort_key, asc = "net_pnl_estimate_usd", False
+        elif trades_sort == "friday_asc":     sort_key, asc = "friday_date_ist",      True
+        elif trades_sort == "friday_desc":    sort_key, asc = "friday_date_ist",      False
+        elif trades_sort == "band":           sort_key, asc = "entry_atm_iv_band",    True
+        # default = pnl_asc (worst losers first)
+        if sort_key in sample.columns:
+            sample = sample.sort_values(sort_key, ascending=asc, kind="mergesort")
+
+        sample = sample.iloc[trades_offset: trades_offset + trades_limit]
+        for _, r in sample.iterrows():
+            mx = r.get("max_mtm_usd")
+            mn = r.get("min_mtm_usd")
+            try:
+                mx_f = float(mx) if mx is not None else float("nan")
+                mn_f = float(mn) if mn is not None else float("nan")
+                if math.isnan(mx_f) and math.isnan(mn_f):
+                    swing = None
+                else:
+                    cand = []
+                    if not math.isnan(mx_f): cand.append(abs(mx_f))
+                    if not math.isnan(mn_f): cand.append(abs(mn_f))
+                    swing = round(max(cand), 4) if cand else None
+            except (TypeError, ValueError):
+                swing = None
+
+            def _ns(v):
+                if v is None: return None
+                try:
+                    f = float(v)
+                    return None if math.isnan(f) else round(f, 4)
+                except (TypeError, ValueError):
+                    return None
+            losers_sample.append({
+                "trade_id": str(r["trade_id"]) if r.get("trade_id") is not None else None,
+                "friday_date_ist": str(r["friday_date_ist"]) if r.get("friday_date_ist") is not None else None,
+                "entry_atm_iv_band": str(r["entry_atm_iv_band"]) if r.get("entry_atm_iv_band") is not None else None,
+                "entry_hour_ist": int(r["entry_hour_ist"]) if r.get("entry_hour_ist") is not None and not (isinstance(r["entry_hour_ist"], float) and math.isnan(r["entry_hour_ist"])) else None,
+                "expiry_bucket": str(r["expiry_bucket"]) if r.get("expiry_bucket") is not None else None,
+                "delta_target": _ns(r.get("delta_target")),
+                "exit_reason": str(r["exit_reason"]) if r.get("exit_reason") is not None else None,
+                "loss_cause": str(r["loss_cause"]) if r.get("loss_cause") is not None and not (isinstance(r["loss_cause"], float) and math.isnan(r["loss_cause"])) else None,
+                "net_pnl_estimate_usd": _ns(r.get("net_pnl_estimate_usd")),
+                "max_mtm_usd": _ns(r.get("max_mtm_usd")),
+                "min_mtm_usd": _ns(r.get("min_mtm_usd")),
+                "largest_swing_usd": swing,
+            })
+
+    return {
+        "n_losses": n_losses,
+        "n_total": n_total,
+        "loss_rate": round(loss_rate, 4),
+        "avg_loss_usd": round(avg_loss, 4),
+        "total_loss_usd": round(total_loss, 4),
+        "worst_loss_usd": round(worst_loss, 4),
+        "by_cause": by_cause,
+        "by_band": by_band,
+        "by_band_stats": by_band_stats,
+        "rows": rows,
+        "scope_summary": scope_summary,
+        "losers_sample": losers_sample,
+        "losers_sample_total": losers_total,
+        "losers_sample_offset": trades_offset if include_trades else 0,
+        "losers_sample_limit":  trades_limit  if include_trades else 0,
+    }
+
+
+@router.get("/cell_worst_fridays")
+def get_cell_worst_fridays(
+    cell: str = Query(..., description="JSON: {entry_atm_iv_band, entry_hour_ist, expiry_bucket, delta_target}"),
+    n: int = Query(5, ge=1, le=50,
+        description="How many worst Fridays to surface"),
+    n_special: int = Query(5, ge=1, le=20,
+        description="How many top |z| context cols to return per Friday"),
+    exit_rule: Optional[str] = None,
+):
+    """For a best-combo cell, return the N Fridays with the worst
+    `net_pnl_estimate_usd`, plus a per-Friday "what made it special" diff:
+    the top-K context columns where the Friday's value is most outside
+    the cell's median±IQR (highest |z| score).
+
+    Useful for tail-risk tuning ("which 5 Fridays are dragging this cell
+    down, and why?"). Pairs with `cell_winners_vs_losers` (Chunk 3) for
+    full per-cell loss anatomy.
+    """
+    try:
+        cell_obj = json.loads(cell)
+        if not isinstance(cell_obj, dict):
+            raise ValueError("cell must be a JSON object")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"bad cell payload: {e}")
+
+    required = {"entry_atm_iv_band", "entry_hour_ist", "expiry_bucket", "delta_target"}
+    missing = required - set(cell_obj.keys())
+    if missing:
+        raise HTTPException(status_code=400,
+            detail=f"cell missing required keys: {sorted(missing)}")
+
+    rule = _parse_exit_rule(exit_rule)
+    full = _derive_exits({}, rule)
+    if full.empty:
+        return {"cell": cell_obj, "n_total_fridays": 0, "rows": []}
+
+    sub = full
+    sub = sub[sub["entry_atm_iv_band"] == str(cell_obj["entry_atm_iv_band"])]
+    sub = sub[sub["entry_hour_ist"] == int(cell_obj["entry_hour_ist"])]
+    sub = sub[sub["expiry_bucket"] == str(cell_obj["expiry_bucket"])]
+    sub = sub[np.isclose(sub["delta_target"].astype(float),
+                          float(cell_obj["delta_target"]), atol=1e-6)]
+    if sub.empty:
+        return {"cell": cell_obj, "n_total_fridays": 0, "rows": []}
+
+    # Per-cell median + IQR for the indicator universe — used as the
+    # "typical" reference each Friday is compared against.
+    cell_median: dict[str, float] = {}
+    cell_iqr: dict[str, float] = {}
+    for col, _label, _cat in _M7_LOSS_INDICATORS:
+        if col not in sub.columns:
+            continue
+        s = sub[col].dropna().astype(float)
+        if s.empty:
+            continue
+        cell_median[col] = float(s.median())
+        q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
+        iqr = q3 - q1
+        # IQR=0 → fall back to std so z-score is well-defined; if both are
+        # zero (constant col), z is undefined and we drop the col.
+        if iqr <= 0:
+            iqr = float(s.std()) if s.std() > 0 else 0.0
+        cell_iqr[col] = iqr
+
+    # Sort losers ascending (worst first), take top n.
+    worst = sub.sort_values("net_pnl_estimate_usd", ascending=True, kind="stable").head(n)
+
+    rows = []
+    for _, r in worst.iterrows():
+        # Per-friday "what made it special": top-K |z| ctx cols.
+        special: list[dict] = []
+        for col, label, category in _M7_LOSS_INDICATORS:
+            if col not in cell_median:
+                continue
+            v = r.get(col)
+            if v is None or pd.isna(v):
+                continue
+            iqr = cell_iqr.get(col, 0.0)
+            if iqr <= 0:
+                continue
+            z = (float(v) - cell_median[col]) / iqr
+            special.append({
+                "col": col, "label": label, "category": category,
+                "value":       round(float(v), 6),
+                "cell_median": round(cell_median[col], 6),
+                "z": round(z, 3),
+            })
+        special.sort(key=lambda x: -abs(x["z"]))
+        special = special[:n_special]
+
+        # Path-summary-from-row: spot move %, IV jump %, rel time of trough.
+        spot_in = float(r.get("spot_at_entry") or 0)
+        spot_min = r.get("spot_at_min_mtm")
+        spot_move_pct = (None if spot_min is None or pd.isna(spot_min) or spot_in <= 0
+                        else round(100.0 * (float(spot_min) - spot_in) / spot_in, 3))
+        entry_iv = float(r.get("entry_atm_iv") or 0)
+        max_iv_w = r.get("max_atm_iv_in_window")
+        max_iv_jump_pct = (None if max_iv_w is None or pd.isna(max_iv_w) or entry_iv <= 0
+                          else round(100.0 * (float(max_iv_w) - entry_iv) / entry_iv, 3))
+
+        rows.append({
+            "friday_date_ist": str(r.get("friday_date_ist")),
+            "trade_id":  str(int(r["trade_id"])),
+            "net_pnl_estimate_usd": round(float(r["net_pnl_estimate_usd"]), 4),
+            "gross_pnl_usd":        round(float(r["gross_pnl_usd"]), 4),
+            "credit_usd": round(float(r.get("credit_usd") or 0), 4),
+            "loss_cause": (None if r.get("loss_cause") is None or
+                           (isinstance(r.get("loss_cause"), float) and pd.isna(r.get("loss_cause")))
+                           else str(r.get("loss_cause"))),
+            "is_win":   bool(r.get("is_win")),
+            "exit_reason": str(r.get("exit_reason") or ""),
+            "entry_atm_iv_pct":  None if pd.isna(r.get("entry_atm_iv_pct")) else round(float(r["entry_atm_iv_pct"]), 2),
+            "spot_move_pct": spot_move_pct,
+            "max_iv_jump_pct": max_iv_jump_pct,
+            "rel_time_min_mtm": None if pd.isna(r.get("rel_time_min_mtm")) else round(float(r["rel_time_min_mtm"]), 3),
+            "max_mtm_usd": None if pd.isna(r.get("max_mtm_usd")) else round(float(r["max_mtm_usd"]), 4),
+            "min_mtm_usd": None if pd.isna(r.get("min_mtm_usd")) else round(float(r["min_mtm_usd"]), 4),
+            "what_made_it_special": special,
+        })
+
+    return {
+        "cell": cell_obj,
+        "n_total_fridays": int(sub["friday_date_ist"].nunique()),
+        "n_total_trades":  int(len(sub)),
+        "n_returned": len(rows),
+        "rows": rows,
+    }
+
+
+@router.get("/trade_diagnostic")
+def get_trade_diagnostic(
+    trade_id: str = Query(..., description="Trade ID to diagnose"),
+    exit_rule: Optional[str] = None,
+):
+    """Sectioned diagnostic for one trade — every indicator at entry,
+    per-leg breakdown, derived ratios, and hypothesis flags. Used by the
+    Losses Explorer drill-down modal.
+
+    Reuses _derive_exits cache so cost is dominated by a single dataframe
+    lookup once the cache is warm.
+    """
+    rule = _parse_exit_rule(exit_rule)
+    derived = _derive_exits({}, rule)
+    if derived is None or derived.empty:
+        raise HTTPException(status_code=404, detail="No trades available")
+
+    # trade_id may be string or int in source; coerce both sides to string for the lookup
+    tid_str = str(trade_id)
+    mask = derived["trade_id"].astype(str) == tid_str
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Trade not found: {trade_id}")
+
+    row = derived[mask].iloc[0]
+    return _project_trade_to_diagnostic(row)
+
+
+@router.get("/trade_context_ohlc")
+def get_trade_context_ohlc(
+    trade_id: str = Query(..., description="m7 trade_id (string-int)"),
+    pad_minutes_before: int = Query(120, ge=0, le=1440,
+        description="Pad spot OHLC start backwards by N minutes for indicator warm-up"),
+    pad_minutes_after: int = Query(30, ge=0, le=1440,
+        description="Pad spot OHLC end forward by N minutes (post-exit visualization)"),
+    exit_rule: Optional[str] = None,
+):
+    """Return spot 1m OHLC for the trade's window + per-minute IV and
+    Greeks projections from the M7 path parquet. Used by Chunk 4's
+    multi-pane chart (`M7TradePathChart`) to overlay client-side
+    indicator computations on spot.
+
+    Padding lets the chart render indicator warm-up bars before entry
+    and post-exit recovery bars without forcing the trade itself to
+    start at index 0.
+    """
+    try:
+        tid = int(trade_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="trade_id must be int")
+
+    rule = _parse_exit_rule(exit_rule)
+    derived = _derive_exits({}, rule)
+    if derived.empty or tid not in derived["trade_id"].astype(int).values:
+        raise HTTPException(status_code=404, detail=f"trade_id {tid} not found")
+
+    row = derived[derived["trade_id"].astype(int) == tid].iloc[0]
+    entry_ts = int(row["entry_ts_utc"])
+    exit_ts = int(row["exit_ts"])
+    spot_at_entry = float(row["spot_at_entry"])
+    loss_cause = row.get("loss_cause")
+    if isinstance(loss_cause, float) and pd.isna(loss_cause):
+        loss_cause = None
+    em_7d  = row.get("expected_move_1sigma_7d")
+    em_14d = row.get("expected_move_1sigma_14d")
+    em_30d = row.get("expected_move_1sigma_30d")
+
+    pad_b = pad_minutes_before * 60
+    pad_a = pad_minutes_after * 60
+
+    # Pull 1m spot OHLC over the padded window. Reuse the historical
+    # endpoint's helper so the candlestick shape matches what other
+    # charts already consume.
+    from app.api.historical import _bucketed_spot_ohlc
+    ohlc_df = _bucketed_spot_ohlc(entry_ts - pad_b, exit_ts + pad_a, "1m")
+    ohlc = [{"time": int(r["time"]),
+             "open":  float(r["open"]),
+             "high":  float(r["high"]),
+             "low":   float(r["low"]),
+             "close": float(r["close"]),
+             "volume": float(r["volume"]) if pd.notna(r["volume"]) else 0.0}
+            for _, r in ohlc_df.iterrows()]
+
+    # Per-minute IV / greeks aligned to spot bars from the path parquet.
+    conn = _duckdb_conn()
+    try:
+        path_sql = f"""
+        SELECT ts AS time, atm_iv_now, call_iv, put_iv,
+               net_delta, theta_per_vega_combined
+        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true)
+        WHERE trade_id = {tid} AND ts >= {entry_ts - pad_b} AND ts <= {exit_ts + pad_a}
+        ORDER BY ts
+        """
+        path_df = conn.execute(path_sql).df()
+    finally:
+        conn.close()
+
+    iv_series = [{"time": int(r["time"]),
+                  "atm_iv":   None if pd.isna(r["atm_iv_now"]) else float(r["atm_iv_now"]),
+                  "call_iv":  None if pd.isna(r["call_iv"])    else float(r["call_iv"]),
+                  "put_iv":   None if pd.isna(r["put_iv"])     else float(r["put_iv"])}
+                 for _, r in path_df.iterrows()]
+    greeks_series = [{"time": int(r["time"]),
+                      "net_delta":      None if pd.isna(r["net_delta"]) else float(r["net_delta"]),
+                      "theta_per_vega": None if pd.isna(r["theta_per_vega_combined"]) else float(r["theta_per_vega_combined"])}
+                     for _, r in path_df.iterrows()]
+
+    return {
+        "trade_id": str(tid),
+        "entry_ts": entry_ts,
+        "exit_ts": exit_ts,
+        "spot_at_entry": spot_at_entry,
+        "loss_cause": None if loss_cause is None else str(loss_cause),
+        "expected_move_1sigma_7d_at_entry":  None if em_7d  is None or pd.isna(em_7d)  else float(em_7d),
+        "expected_move_1sigma_14d_at_entry": None if em_14d is None or pd.isna(em_14d) else float(em_14d),
+        "expected_move_1sigma_30d_at_entry": None if em_30d is None or pd.isna(em_30d) else float(em_30d),
+        "ohlc": ohlc,
+        "iv_series": iv_series,
+        "greeks_series": greeks_series,
+    }
+
+
 @router.get("/meta")
 def get_meta():
     """Return the universe of dimension values for filter dropdowns."""
@@ -1615,4 +3204,7 @@ def get_meta():
         "premium_skew_buckets": _ordered("premium_skew_bucket"),
         # leg_winner classes available post-derivation; static enum
         "leg_winners": ["both", "call_only", "put_only", "neither"],
+        # loss_cause classes (Chunk 1) — populated only on losers; static enum
+        "loss_causes": ["directional", "vol_expansion", "path_dependent",
+                        "gamma_squeeze", "skew_flip", "unclassified"],
     }

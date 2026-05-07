@@ -62,6 +62,20 @@ function legWinnerColor(w: string): string {
   } as Record<string, string>)[w] || '#7a9bb5';
 }
 
+// Color the loss-cause badge. Distinct hue per cause so the eye picks them
+// out at a glance in the trade log; null (winners) → no badge.
+function lossCauseColor(c: string | null | undefined): string {
+  if (!c) return '#1a2d42';
+  return ({
+    directional:    '#f85149',  // red — spot blew through
+    vol_expansion:  '#d29922',  // amber — IV jumped
+    path_dependent: '#bf6fde',  // purple — gave back profit
+    gamma_squeeze:  '#ff7b72',  // hot red — early SL
+    skew_flip:      '#79c0ff',  // blue — direction inverted
+    unclassified:   '#586e7e',  // grey — "didn't fit any bucket"
+  } as Record<string, string>)[c] || '#7a9bb5';
+}
+
 export function M7LegAttributionTable({ filters, exitRule, onSelectTrade }: Props) {
   const [data, setData] = useState<M7LegAttributionResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -158,6 +172,7 @@ export function M7LegAttributionTable({ filters, exitRule, onSelectTrade }: Prop
               <th style={{ padding: cellPad, textAlign: 'right' }}>Margin</th>
               <th style={{ padding: cellPad, textAlign: 'right' }}>Gross P&L</th>
               <th style={{ padding: cellPad, textAlign: 'right' }}>Net P&L</th>
+              <th style={{ padding: cellPad, textAlign: 'left' }} title="What caused the loss (winners blank)">Cause</th>
               <th style={{ padding: cellPad, textAlign: 'left' }}>Exit</th>
             </tr>
           </thead>
@@ -254,6 +269,20 @@ function TradePair({ r, onSelectTrade }: PairProps) {
         </td>
         <td style={{ ...sharedTop, color: pnlColor(r.net_pnl_estimate_usd), fontWeight: 600 }} rowSpan={2}>
           {fmtUsd(r.net_pnl_estimate_usd)}
+        </td>
+        <td style={sharedTopL} rowSpan={2}>
+          {r.loss_cause ? (
+            <span style={{
+              background: lossCauseColor(r.loss_cause),
+              color: '#0a0e17',
+              padding: '1px 6px', borderRadius: 3,
+              fontSize: 9, fontWeight: 700, whiteSpace: 'nowrap',
+            }}>
+              {r.loss_cause}
+            </span>
+          ) : (
+            <span style={{ color: '#586e7e', fontSize: 10 }}>—</span>
+          )}
         </td>
         <td style={sharedTopL} rowSpan={2}>
           <div style={{ fontSize: 10 }}>{r.exit_reason}</div>

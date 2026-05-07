@@ -1,6 +1,127 @@
 # Current Project State
 
 ## Active Projects
+- **M7 loss-trade analysis refinement — IN PROGRESS (Session 18+):**
+  Active work surface is the Session-16 loss-classifier + losses-explorer
+  + cell-winners-vs-losers components (UNCOMMITTED in branch). Goal:
+  perfect the loss attribution before considering M8 enrichment.
+
+- **Future — M7×M8 skew enrichment (not started, proposed Session 17):**
+  Point-in-time join of M8 per-minute RR_25/BF_25/ATM IV onto M7 trades
+  by `entry_ts`, adding `entry_rr_25` + `entry_bf_25` columns to
+  `m7_trades_enriched.parquet` and exposing them as filter chips/columns
+  on the existing M7 page. **Defer until current M7 loss-trade work
+  is shipped.**
+
+- **M8 — Per-minute current-expiry IV / ATM Δ / 25Δ skew analytics — SHIPPED (UNCOMMITTED) (Session 17, 2026-05-07):**
+  New analytics module `backend/app/analytics/m8_current_expiry_skew.py`
+  (~330 LOC) producing the first per-minute *nearest-expiry* IV/skew
+  dataset across the platform's full 1m spot history (Dec 2023 →
+  2026-05-06, 1,247,263 rows × 20 cols, 857 expiries). Distinct from
+  `options_enriched_*.parquet`, which carries constant-maturity (7d/14d/
+  30d/60d) IV via interpolation across all live expiries — M8 captures
+  the actual nearest-expiry surface that dominates short-dated decisions.
+
+  Per-minute outputs: ATM strike, ATM call+put marks, ATM IV (avg of
+  CE/PE solved IVs), ATM call/put delta, nearest-25Δ call strike + IV,
+  nearest-25Δ put strike + IV, RR_25 (call_iv − put_iv), BF_25
+  ((call_iv + put_iv)/2 − atm_iv), plus spot/spot_ret_1m_pct/
+  spot_move_15m_pct context. Algorithm: walks each expiry window
+  `(prev_settle, this_settle]`, pre-pivots chain into ts × strike ×
+  {CE,PE} matrices, then per-minute does vectorized `implied_vol_vec` +
+  analytic `_delta_vec` across ATM±25 strikes.
+
+  Outputs on disk:
+  - `/home/abhis/btc-data/derived/m8_current_expiry_skew.parquet` (110 MB)
+  - `/home/abhis/btc-data/derived/m8_current_expiry_skew.xlsx` (49 MB,
+    last 6 months)
+
+  CLI flags: `--since/--through ISO`, `--xlsx-months N` (default 6),
+  `--xlsx-only` (rebuild xlsx from existing parquet without re-running
+  the ~80 min backfill).
+
+  Sanity: ATM call Δ median +0.502, put Δ ≈ −0.498. 25Δ call IV ≈ ATM IV
+  + 1.4% on avg. `current_expiry` rotates cleanly at each 12:00 UTC.
+  ~25k minutes (~2%) NaN ATM IV (chain gaps / boundary minutes).
+
+  No backend/frontend integration yet — ad-hoc parquet for analysis.
+
+  **UNCOMMITTED — file pending commit:**
+  - `backend/app/analytics/m8_current_expiry_skew.py` (new)
+  - Outputs in `~/btc-data/derived/` are untracked data (matches
+    M2/M4/M7 convention).
+
+- **M7 Full-Coverage IV-band table + Option Y classifier — SHIPPED (UNCOMMITTED) (Session 16, 2026-05-07):**
+  Every one of the 121 Fridays in the M7 dataset is now attributed to one of
+  the 10 best-cell rules so the headline view covers the full universe — no
+  orphan/missed Fridays. New endpoint
+  `GET /api/v1/m7/iv_band_full_coverage` (~340 LOC, in
+  `backend/app/api/m7_full_coverage.py`) classifies each Friday into
+  `rule` (strict 4-dim match: band, hour, expiry, delta) /
+  `force_fit` (matches some cell on hour+expiry+delta but in a different IV
+  band, picked by best PnL) /
+  `closest_fallback` (no hour-expiry-delta match anywhere; picked by
+  distance `D = 100·|Δ| + 10·|expiry_idx| + |hour|`, ties on PnL) /
+  `uncovered` (filters wipe Friday out). **Option Y semantics**: the
+  `assigned_band` is the trade's ACTUAL `entry_atm_iv_band`, NOT the cell's
+  nominal band — the cell rule is used only to FIND the right trade per
+  Friday, and the band label tracks where the trade's entry IV actually
+  sits. Rationale: this matches the user's intuition that "band 30-40"
+  means "entry IV was 30-40%" rather than "the rule from band 30-40's best
+  cell was used".
+
+  Frontend: `M7IvBandFullCoverageTable.tsx` (~395 LOC) with two stacked
+  sub-rows per band ("Rule" / "All (n)") and full Headline column set
+  (33 metrics including winners-only and losers-only MTM splits). Mounted
+  in `M7SweepDashboard.tsx` directly below the existing
+  `M7IvBandSummaryTable`.
+
+  Tests: 10 unit tests passing in `backend/tests/test_m7_full_coverage.py`
+  (rule-strict-match, force-fit-best-pnl, closest-fallback-distance,
+  distance-by-Δ-first, rule-beats-force-fit, universe-counts-partition,
+  bucket-cardinality, etc.).
+
+  Verified live: at Δ=0.30, 121 Fridays partition cleanly (88 rule + 33
+  force-fit + 0 closest-fallback + 0 uncovered). At Δ=0.05: 115 trades
+  (6 Fridays had no Δ=0.05 sim) → 48 rule + 59 force-fit + 8
+  closest-fallback. Spot-check Oct 10 2025 → assigned to band 30-40 as
+  force-fit (its actual entry IV 31.66% for the hour=23 next-to-next-Mon
+  Δ=0.50 trade), confirming Option Y behavior.
+
+  **UNCOMMITTED — files pending commit:**
+  - `backend/app/api/m7_full_coverage.py` (new)
+  - `backend/tests/test_m7_full_coverage.py` (new)
+  - `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx` (new)
+  - `scripts/m7_exit_rule_sweep.py` (new) +
+    `scripts/m7_exit_rule_sweep.xlsx` (output)
+  - `backend/app/main.py` (M, 1-line router include)
+  - `frontend/src/pages/M7SweepDashboard.tsx` (1-line import + 1-line render)
+
+- **M7 25-variant exit-rule sweep — SHIPPED (UNCOMMITTED) (Session 16):**
+  `scripts/m7_exit_rule_sweep.py` calls `/aggregate` 175× (25 rules × 7
+  metrics) across all 7 expiries × 8 deltas. Output:
+  `m7_exit_rule_sweep.xlsx` (8 sheets: raw long table + pivots
+  pivot_net / pivot_winr / pivot_minmtm / pivot_n).
+  - Rules: baseline / max_profit_{10,20,25,30}% / margin_target_{10,20,25,30}% /
+    premium_sl_{50,75,100}% / fixed_exit_hr_{05,08,10,12,15,17:30} IST /
+    common max-profit + premium-SL combos (max20_sl50, max20_sl75,
+    max30_sl50, max30_sl75).
+  - **Top by avg net P&L (gated WR ≥ 60%, n ≥ 20):**
+    `current Sat Δ=0.50 baseline` +$25.73/73% WR (n=847);
+    `next_to_next Mon Δ=0.50 baseline` +$23.81/84% WR (n=833) —
+    cleanest contract, best risk-adjusted setup.
+  - **Top by lowest drawdown:** `monthly Δ=0.10 exit_hr_12` +$0.59/60% WR,
+    min MTM -$4.57.
+  - **Insight:** most exit rules ≈ baseline at high-Δ tier — triggers
+    rarely fire before Sat 17:30 IST hard cap on a 1-day hold.
+    `max_profit_30` mildly improves WR on next_to_next Δ=0.50 (84.27% vs
+    84.03%) without sacrificing return. Skip everything ≥30 DTE —
+    quarterly didn't make any list.
+  - **Open follow-up (cut off by usage limit):** extend sweep with finer
+    % grid (e.g. max_profit % at 5/10/15/20/25/30/35/40/50/75, same for
+    margin_target and premium_sl, plus 2-way and 3-way crosses) to find
+    the genuine optimum % per cell.
+
 - **BTC Trade Copilot — Chunk 1 (Per-leg attribution) SHIPPED (Session 15, 2026-05-06):**
   10-chunk plan at `/home/abhis/.claude/plans/phase-1-defining-the-witty-dawn.md`
   evolves the platform from backtest viewer into a trade copilot covering the
@@ -265,3 +386,17 @@ Implementation in `frontend/src/components/historical/StrategyPanel.tsx`
   filter to chip-only (removed search input). Backend rebuilt + frontend
   restarted; verified in browser. UNCOMMITTED — pending user decision on
   commit grouping.
+- `2026-05-07 (Session 16)`: M7 Full-Coverage IV-band table + Option Y
+  classifier + 25-variant exit-rule sweep. New endpoint
+  `/api/v1/m7/iv_band_full_coverage` partitions all 121 Fridays across the
+  10 best-cell rules (rule / force_fit / closest_fallback / uncovered).
+  Option Y: assigned_band tracks each trade's actual entry IV band
+  (chosen after iteration with user — Option X used cell's nominal band,
+  felt counter-intuitive for Oct 10 2025 case). Frontend
+  `M7IvBandFullCoverageTable.tsx` with 2 stacked sub-rows per band
+  (Rule / All) and full 33-metric column set including winners-only and
+  losers-only MTM splits. 10 unit tests passing. Sweep script ranks 25
+  exit-rule variants × 7 expiries × 8 deltas; outputs xlsx with 4 pivots.
+  Headline: `next_to_next Δ=0.50 baseline` is the cleanest setup (84% WR,
+  +$23.81 avg net). UNCOMMITTED — 4 new files + 2 one-line edits pending
+  commit. Open follow-up: finer % grid sweep cut off by usage limit.

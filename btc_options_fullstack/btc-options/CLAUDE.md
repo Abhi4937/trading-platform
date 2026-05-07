@@ -18,6 +18,33 @@ Do NOT assume a question about behavior is a request to fix it.
 3. Update `docs/memories/current_state.md` — if anything changed
 4. Tell the user: "Ready to hand off to Gemini — HANDOFF.md is updated"
 
+## Auto-handoff at 90% / 95% / 98% session-context usage (added 2026-05-07)
+The status line in this repo shows live session token usage (script:
+`~/.claude/statusline-command.sh`, denominator = 1,000,000 tokens / Opus 4.7
+1M context). Watch the percentage and proactively run a partial handoff each
+time it crosses one of these thresholds — without waiting for the user to
+ask:
+
+- **At 90%** — Update `HANDOFF.md`, `docs/memories/work_log_claude.md`, and
+  `docs/memories/current_state.md` with a *checkpoint* of what's been done
+  in this session so far. Tell the user: "Session at 90% — checkpoint
+  written. Safe to keep going for now." Also update relevant entries in
+  `~/.claude/projects/.../memory/` if any new project/feedback memories
+  emerged.
+- **At 95%** — Refresh the same files with the latest state. Tell the user:
+  "Session at 95% — handoff files refreshed. Approaching the limit — wrap
+  up the in-flight task or restart soon."
+- **At 98%** — Final refresh, then STOP starting new work. Tell the user:
+  "Session at 98% — final handoff written. Please /clear or /compact and
+  restart. Don't ask me to do more in this session."
+
+Do not wait for the user's permission to write these checkpoints — RULE #1
+("ask before changes") is overridden for this specific protocol because the
+whole point is to capture state before context runs out. Each checkpoint
+should be incremental: append new items to `work_log_claude.md`; rewrite
+the "current task" block in `HANDOFF.md`; only mutate `current_state.md`
+if something there changed. Don't churn the files.
+
 ## AI Collaboration
 - Claude and Gemini take turns on this codebase
 - Gemini reads the same `HANDOFF.md` and `docs/memories/` files
@@ -43,10 +70,20 @@ Do NOT assume a question about behavior is a request to fix it.
 
 ### Frontend change
 1. Kill and restart frontend: `fuser -k 3000/tcp && cd frontend && npm run dev`
+2. **Verify the changed UI with Playwright MCP** before declaring the change done:
+   navigate to `http://localhost:3000`, exercise the affected feature, take a
+   screenshot, and confirm the visible state matches what you intended. Don't
+   just rely on type-checks or curl — type-checks verify code correctness, not
+   feature correctness. If Playwright MCP tools aren't yet loaded in the
+   current Claude Code session (newly-installed MCP servers require a session
+   restart), tell the user and pause for the restart.
 
 ### Backend change
 1. Rebuild and restart backend: `cd docker && docker compose up --build -d backend`
 2. Then kill and restart frontend: `fuser -k 3000/tcp && cd frontend && npm run dev`
+3. **Verify the affected UI surface with Playwright MCP** as above — backend
+   changes that flow into the dashboard must be exercised through the browser,
+   not just via `curl`, to catch wiring/serialization mismatches.
 
 - Always restart/rebuild immediately after making changes — do not wait for user to ask
 - Once the user confirms the change works, commit and push to current branch immediately
@@ -55,6 +92,27 @@ Do NOT assume a question about behavior is a request to fix it.
 Before making any new change, check `git status`.
 If there are uncommitted changes, ask the user: "There are uncommitted changes — shall I commit and push first?"
 Do NOT start new work on top of uncommitted changes.
+
+## RULE #4 — Coordinate with Other Claude Sessions
+Multiple Claude sessions may be running against this repo at the same time.
+Before doing anything that touches shared state, check for conflicts and wait
+if another session is mid-flight. Specifically:
+
+1. **Before restarting backend** (`docker compose up --build -d backend`) or
+   **frontend** (`fuser -k 3000/tcp && npm run dev`), or
+   **before driving the UI via Playwright MCP**, run:
+   ```
+   ps -ef | grep -E "claude|fuser|npm run dev|docker compose|vite" | grep -v grep
+   ```
+   If you see another shell mid-restart (e.g. another `fuser -k 3000/tcp`,
+   `npm run dev` starting up, or a `docker compose up --build` running),
+   **wait for it to finish** rather than racing it. Killing port 3000 while
+   the other session is starting Vite will leave the user with a broken
+   frontend.
+2. **Before editing files Gemini may also be editing**, re-read `git status`
+   and `HANDOFF.md` — both AI assistants share this repo.
+3. **If unsure, ask the user**: "I see another session is currently
+   restarting the frontend / accessing the UI — should I wait, or proceed?"
 
 ## RULE #3 — Margin model safety bias (HARD INVARIANT — added 2026-05-01)
 The margin engines (`scripts/margin_engine.py` + `frontend/src/utils/marginEngine.ts`)

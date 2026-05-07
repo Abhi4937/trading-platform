@@ -122,6 +122,16 @@ export function M7FilterBar({ meta, filters, setFilters, exitRule, setExitRule }
           {meta?.leg_winners?.map(b => <option key={b} value={b}>{b}</option>)}
         </select>
       </div>
+      <div>
+        <span style={lab}>Loss cause</span>
+        <select style={sty} value={filters.loss_cause || ''}
+                onChange={e => update('loss_cause', e.target.value)}>
+          <option value="">All</option>
+          {meta?.loss_causes?.map(b => (
+            <option key={b} value={b}>{b}</option>
+          ))}
+        </select>
+      </div>
 
       <div style={{ borderLeft: '1px solid #1a2d42', paddingLeft: 12, marginLeft: 4 }}>
         <span style={lab}>Exit Rule</span>

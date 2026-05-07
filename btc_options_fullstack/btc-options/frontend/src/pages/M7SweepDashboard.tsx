@@ -4,9 +4,12 @@ import type { M7ExitRule, M7Filters, M7Meta, M7Summary } from '../types/m7';
 import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers';
 import { M7FilterBar } from '../components/m7/M7FilterBar';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
+import { M7IvBandBestComboTable } from '../components/m7/M7IvBandBestComboTable';
+import { M7IvBandFullCoverageTable } from '../components/m7/M7IvBandFullCoverageTable';
 import { M7IvBandSummaryTable } from '../components/m7/M7IvBandSummaryTable';
 import { M7LegAttributionTable } from '../components/m7/M7LegAttributionTable';
 import { M7LegSkewHeatmap } from '../components/m7/M7LegSkewHeatmap';
+import { M7LossesExplorer } from '../components/m7/M7LossesExplorer';
 import { M7MissedFridaysTable } from '../components/m7/M7MissedFridaysTable';
 import { M7TradePathChart } from '../components/m7/M7TradePathChart';
 
@@ -175,6 +178,8 @@ export function M7SweepDashboard() {
       </div>
 
       <M7IvBandSummaryTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
+      <M7IvBandFullCoverageTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
+      <M7IvBandBestComboTable />
       <M7MissedFridaysTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric} />
 
@@ -198,6 +203,11 @@ export function M7SweepDashboard() {
         <M7LegAttributionTable filters={dFilters} exitRule={dExitRule}
                                onSelectTrade={setSelectedTrade} />
       </div>
+
+      {/* Loss-anatomy Chunk 6 — universe-wide loss distribution + drilldown.
+          Pass `dMetric` so scope=full_coverage best-cell selection matches
+          what the table above shows. */}
+      <M7LossesExplorer filters={dFilters} exitRule={dExitRule} metric={dMetric} />
 
       {selectedTrade && (
         <M7TradePathChart tradeId={selectedTrade} onClose={() => setSelectedTrade(null)} />

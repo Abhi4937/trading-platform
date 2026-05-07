@@ -11,6 +11,7 @@ const AXIS_OPTIONS: { value: string; label: string }[] = [
   { value: 'delta_skew_bucket',   label: 'Delta skew' },
   { value: 'premium_skew_bucket', label: 'Premium skew' },
   { value: 'leg_winner',          label: 'Leg winner' },
+  { value: 'loss_cause',          label: 'Loss cause' },
   { value: 'delta_target',        label: 'Δ target' },
   { value: 'entry_atm_iv_band',   label: 'IV band' },
   { value: 'entry_hour_ist',      label: 'Entry hour' },
@@ -35,6 +36,13 @@ const METRIC_OPTIONS = [
   { v: 'avg_call_leg_min_mtm',      l: 'Avg call-leg min MTM',        g: 'Per-leg MTM' },
   { v: 'avg_put_leg_max_mtm',       l: 'Avg put-leg max MTM',         g: 'Per-leg MTM' },
   { v: 'avg_put_leg_min_mtm',       l: 'Avg put-leg min MTM',         g: 'Per-leg MTM' },
+  // Loss-cause shares (Chunk 1 of loss-anatomy plan)
+  { v: 'share_directional',         l: 'Directional losses (share)',  g: 'Loss cause' },
+  { v: 'share_vol_expansion',       l: 'Vol-expansion losses (share)',g: 'Loss cause' },
+  { v: 'share_path_dependent',      l: 'Path-dependent losses (share)',g: 'Loss cause' },
+  { v: 'share_gamma_squeeze',       l: 'Gamma-squeeze losses (share)',g: 'Loss cause' },
+  { v: 'share_skew_flip',           l: 'Skew-flip losses (share)',    g: 'Loss cause' },
+  { v: 'share_unclassified',        l: 'Unclassified losses (share)', g: 'Loss cause' },
 ];
 
 // Stable sort order: put-leaning → balanced → call-leaning. For numeric or
@@ -44,6 +52,8 @@ const SKEW_ORDER: Record<string, string[]> = {
   delta_skew_bucket: ['put_richer_strong', 'put_richer', 'balanced', 'call_richer', 'call_richer_strong'],
   premium_skew_bucket: ['put_premium_strong', 'put_premium', 'balanced', 'call_premium', 'call_premium_strong'],
   leg_winner: ['both', 'call_only', 'put_only', 'neither'],
+  loss_cause: ['directional', 'vol_expansion', 'path_dependent',
+               'gamma_squeeze', 'skew_flip', 'unclassified'],
 };
 
 function sortValues(axis: string, vals: string[]): string[] {
