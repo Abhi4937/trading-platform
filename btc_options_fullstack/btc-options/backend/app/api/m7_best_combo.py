@@ -403,19 +403,15 @@ def _warmup_thread() -> None:
         _GRID_STATE["finished_at"] = time.time()
 
 
-def kick_off_warmup() -> bool:
-    """Hydrate the grid: load from disk if present + fresh, else spawn the
-    warmup thread. Idempotent — safe to call from app startup AND lazily
-    from the endpoint on a pending state.
-
-    Returns True iff a NEW background build was kicked off (so the caller
-    can log the warmup start). Returns False if grid is already ready (from
-    cache or previous run) or already warming.
+def try_load_grid_only() -> bool:
+    """Load the grid from disk if a fresh cache exists. Never spawns a
+    background build — the build is run out-of-process by
+    `scripts/build_m7_best_combo_grid.py`. Returns True iff a cached grid
+    was loaded.
     """
     with _GRID_LOCK:
-        if _GRID_STATE["status"] in ("warming", "ready"):
-            return False
-        # Try fast path first — disk-cached grid from a prior run.
+        if _GRID_STATE["status"] == "ready":
+            return True
         cached = _try_load_grid_from_disk()
         if cached is not None and not cached.empty:
             _GRID_STATE["grid"] = cached
@@ -425,15 +421,16 @@ def kick_off_warmup() -> bool:
             _GRID_STATE["finished_at"] = time.time()
             log.info("M7 best-combo grid loaded from disk cache (%d cells)",
                      len(cached))
-            return False
-        # Disk cache miss → kick off background rebuild.
-        _GRID_STATE["status"] = "warming"
-        _GRID_STATE["rules_done"] = 0
-        _GRID_STATE["error"] = None
-    t = threading.Thread(target=_warmup_thread, daemon=True,
-                         name="m7-best-combo-warmup")
-    t.start()
-    return True
+            return True
+    return False
+
+
+def kick_off_warmup() -> bool:
+    """DEPRECATED: kept for backwards compatibility. The build is now run
+    out-of-process via `scripts/build_m7_best_combo_grid.py`. This function
+    only loads from disk if present. Returns False (never spawns a thread).
+    """
+    return try_load_grid_only() and False
 
 
 def _resolve_metric(name: str) -> str:
@@ -592,18 +589,19 @@ def get_iv_band_best_combo(
         raise HTTPException(status_code=400,
                             detail=f"secondary must be one of {sorted(_VALID_RANKINGS)}")
 
-    if _GRID_STATE["status"] == "pending":
-        kick_off_warmup()
+    # Try fast disk-load (idempotent — no-op if already ready).
+    try_load_grid_only()
 
-    if _GRID_STATE["status"] == "warming":
+    if _GRID_STATE["status"] == "pending":
+        # Grid not built — instruct caller to run the CLI builder.
         return {
             "ranking": ranking,
             "secondary": secondary,
             "tolerance_pct": tolerance_pct,
-            "status": "warming",
-            "rules_done": int(_GRID_STATE["rules_done"]),
-            "rules_total": int(_GRID_STATE["rules_total"]),
-            "started_at": _GRID_STATE["started_at"],
+            "status": "not_built",
+            "message": "Grid not built. Run "
+                       "`docker exec docker-backend-1 python -m "
+                       "app.scripts.build_m7_best_combo_grid` to build.",
             "rows": [],
         }
     if _GRID_STATE["status"] == "error":

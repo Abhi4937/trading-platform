@@ -64,10 +64,18 @@ async def lifespan(app: FastAPI):
     await start_recorder()
     merge_task = asyncio.create_task(merge_schedule_loop())
     logger.info("Startup — live recorder + merge scheduler started")
-    # Pre-warm M7 best-combo grid in a background thread (~5–10 min cold).
-    # Frontend gets 202 with progress until ready; backend stays responsive.
-    if m7_best_combo.kick_off_warmup():
-        logger.info("Startup — M7 best-combo warmup thread started")
+    # M7 best-combo grid: load from disk if present (instant), otherwise leave
+    # status='pending'. NEVER auto-spawn a warmup thread inside the backend
+    # process — the heavy DuckDB scans hold the GIL and starve request handlers
+    # ("TypeError: Failed to fetch" in the browser).
+    # To (re)build the grid, run as a one-shot CLI from the host:
+    #   docker exec docker-backend-1 python -m app.scripts.build_m7_best_combo_grid
+    # That process has its own GIL and doesn't compete with FastAPI.
+    if m7_best_combo.try_load_grid_only():
+        logger.info("Startup — M7 best-combo grid loaded from disk cache")
+    else:
+        logger.info("Startup — M7 best-combo grid NOT cached; "
+                    "run scripts/build_m7_best_combo_grid.py to build")
     yield
     logger.info("Shutdown — stopping live recorder + merge scheduler...")
     await stop_recorder()

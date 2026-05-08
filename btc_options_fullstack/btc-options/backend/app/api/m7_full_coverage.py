@@ -98,19 +98,29 @@ def _hour_linear(h) -> int:
 def _classify_fridays_to_cells(
     derived: pd.DataFrame,
     best_cells: pd.DataFrame,
+    coverage_mode: str = "force_fit",
 ) -> pd.DataFrame:
     """Assign each Friday in `derived` to exactly one best-cell band.
 
+    coverage_mode:
+      - "force_fit" (default): step 2 relaxes band entirely; tiebreak by
+        the trade's own net_pnl. Step 3 closest_fallback runs.
+      - "touched_band": step 2 only considers cells whose band the
+        Friday's IV actually touched at SOME hour during the day; tiebreak
+        by the cell's historical avg_net_pnl ('score' col on best_cells).
+        Closest_fallback is SKIPPED — Fridays with no touched-band match
+        become uncovered.
+
     Returns one row per Friday with columns:
         friday_date_ist, trade_id, assigned_band, kind
-    where kind ∈ {'rule', 'force_fit', 'closest_fallback'}.
+    where kind ∈ {'rule', 'force_fit', 'touched_band', 'closest_fallback'}.
     """
     if derived.empty or best_cells.empty:
         return pd.DataFrame(columns=["friday_date_ist", "trade_id",
                                       "assigned_band", "kind"])
 
     cells = best_cells[["entry_atm_iv_band", "entry_hour_ist",
-                        "expiry_bucket", "delta_target"]].to_dict("records")
+                        "expiry_bucket", "delta_target", "score"]].to_dict("records")
 
     out_rows: list[tuple] = []
     for friday, grp in derived.groupby("friday_date_ist", sort=False):
@@ -135,9 +145,37 @@ def _classify_fridays_to_cells(
             out_rows.append((str(friday), tid, band, "rule"))
             continue
 
-        # 2. Force-fit — relax band, keep (hour, expiry, delta).
-        # Assign to the trade's ACTUAL band (not the cell's nominal band) so
-        # band X's All set always contains trades whose IV was actually in X.
+        # 2. Relaxed-band match — keep (hour, expiry, delta), relax band.
+        # In force_fit mode: any band; tiebreak by trade pnl.
+        # In touched_band mode: only bands the Friday's IV touched at SOME
+        # hour; tiebreak by cell historical avg.
+        if coverage_mode == "touched_band":
+            touched_bands = set(
+                str(b) for b in grp["entry_atm_iv_band"].dropna().unique()
+            )
+            tb_candidates: list[tuple] = []
+            for cell in cells:
+                if str(cell["entry_atm_iv_band"]) not in touched_bands:
+                    continue
+                mask = (
+                    (grp["entry_hour_ist"] == cell["entry_hour_ist"]) &
+                    (grp["expiry_bucket"] == cell["expiry_bucket"]) &
+                    (grp["delta_target"] == cell["delta_target"])
+                )
+                if mask.any():
+                    t = grp[mask].iloc[0]
+                    cell_score = (float(cell["score"])
+                                  if pd.notna(cell["score"]) else float("-inf"))
+                    tb_candidates.append(
+                        (cell_score, t["entry_atm_iv_band"], t["trade_id"]))
+            if tb_candidates:
+                tb_candidates.sort(key=lambda x: x[0], reverse=True)
+                _, band, tid = tb_candidates[0]
+                out_rows.append((str(friday), tid, band, "touched_band"))
+            # In touched_band mode, no closest_fallback — uncovered.
+            continue
+
+        # force_fit mode (default): relax band entirely.
         force_candidates: list[tuple] = []
         for cell in cells:
             mask = (
@@ -217,6 +255,7 @@ def get_iv_band_full_coverage(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    coverage_mode: str = "force_fit",
 ):
     """Full-coverage IV-band summary: every Friday is attributed to exactly
     one of the 10 best cells. Each row carries TWO metric blocks:
@@ -281,7 +320,7 @@ def get_iv_band_full_coverage(
             best.at[i, m] = rule_metrics[m]
 
     # Step B: classify Fridays + all_fridays metrics.
-    classified = _classify_fridays_to_cells(derived, best)
+    classified = _classify_fridays_to_cells(derived, best, coverage_mode=coverage_mode)
     if not classified.empty:
         # trade_id types must match for .isin to work safely
         classified["trade_id"] = classified["trade_id"].astype(
@@ -289,6 +328,7 @@ def get_iv_band_full_coverage(
 
     best["n_all"] = 0
     best["n_force_fit"] = 0
+    best["n_touched_band"] = 0
     best["n_closest_fallback"] = 0
     for i, row in best.iterrows():
         band = row["entry_atm_iv_band"]
@@ -299,6 +339,7 @@ def get_iv_band_full_coverage(
         sub = derived[derived["trade_id"].isin(band_tids)]
         best.at[i, "n_all"] = int(len(sub))
         best.at[i, "n_force_fit"] = int((band_rows["kind"] == "force_fit").sum())
+        best.at[i, "n_touched_band"] = int((band_rows["kind"] == "touched_band").sum())
         best.at[i, "n_closest_fallback"] = int((band_rows["kind"] == "closest_fallback").sum())
         all_metrics = _compute_metrics_for_subset(sub, prefix="all_")
         for m in EXTRA_METRICS:
@@ -327,19 +368,22 @@ def get_iv_band_full_coverage(
     n_classified = int(len(classified))
     n_rule = int((classified["kind"] == "rule").sum()) if not classified.empty else 0
     n_force = int((classified["kind"] == "force_fit").sum()) if not classified.empty else 0
+    n_touched = int((classified["kind"] == "touched_band").sum()) if not classified.empty else 0
     n_close = int((classified["kind"] == "closest_fallback").sum()) if not classified.empty else 0
     n_uncovered = max(0, n_total_fridays - n_classified)
 
-    for c in ("n_all", "n_force_fit", "n_closest_fallback"):
+    for c in ("n_all", "n_force_fit", "n_touched_band", "n_closest_fallback"):
         if c in best.columns:
             best[c] = best[c].fillna(0).astype(int)
 
     return {
         "rows": _to_records(best),
         "metric": metric,
+        "coverage_mode": coverage_mode,
         "n_total_fridays": n_total_fridays,
         "n_rule_fridays": n_rule,
         "n_force_fit_fridays": n_force,
+        "n_touched_band_fridays": n_touched,
         "n_closest_fallback_fridays": n_close,
         "n_uncovered_fridays": int(n_uncovered),
     }

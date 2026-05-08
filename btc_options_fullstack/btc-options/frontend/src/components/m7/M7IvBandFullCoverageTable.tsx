@@ -10,6 +10,8 @@ import type { M7Cell } from '../../services/m7_api';
 
 // ── Inline types (mirror backend response shape) ──────────────────────────────
 
+type CoverageMode = 'force_fit' | 'touched_band';
+
 interface FullCoverageRow {
   entry_atm_iv_band: string;
   entry_hour_ist: number;
@@ -17,8 +19,9 @@ interface FullCoverageRow {
   delta_target: number;
   score: number;
   n_trades: number;          // strict-rule subset
-  n_all: number;             // rule ∪ force_fit ∪ closest_fallback
+  n_all: number;             // rule ∪ (force_fit | touched_band) ∪ (closest_fallback in force-fit mode only)
   n_force_fit: number;
+  n_touched_band: number;
   n_closest_fallback: number;
   // Rule-only metrics (flat, like /iv_band_summary)
   avg_net_pnl?: number | null;
@@ -64,9 +67,11 @@ interface FullCoverageRow {
 interface FullCoverageResponse {
   rows: FullCoverageRow[];
   metric: string;
+  coverage_mode: CoverageMode;
   n_total_fridays: number;
   n_rule_fridays: number;
   n_force_fit_fridays: number;
+  n_touched_band_fridays: number;
   n_closest_fallback_fridays: number;
   n_uncovered_fridays: number;
 }
@@ -95,7 +100,7 @@ function buildQuery(filters: Record<string, unknown>,
 }
 
 async function fetchFullCoverage(
-  filters: M7Filters & { metric?: string },
+  filters: M7Filters & { metric?: string; coverage_mode?: CoverageMode },
   exitRule?: M7ExitRule,
   signal?: AbortSignal,
 ): Promise<FullCoverageResponse> {
@@ -106,6 +111,17 @@ async function fetchFullCoverage(
     throw new Error(`${r.status} ${r.statusText}: ${text}`);
   }
   return (await r.json()) as FullCoverageResponse;
+}
+
+const COVERAGE_MODE_LS_KEY = 'm7:fullcoverage:coverage_mode';
+
+function loadCoverageMode(): CoverageMode {
+  try {
+    const v = localStorage.getItem(COVERAGE_MODE_LS_KEY);
+    return v === 'touched_band' ? 'touched_band' : 'force_fit';
+  } catch {
+    return 'force_fit';
+  }
 }
 
 // ── Loading bar (mirror of M7IvBandSummaryTable) ──────────────────────────────
@@ -181,18 +197,23 @@ export function M7IvBandFullCoverageTable({
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [drilldown, setDrilldown] = useState<{ cell: M7Cell; setLabel: string } | null>(null);
+  const [coverageMode, setCoverageMode] = useState<CoverageMode>(loadCoverageMode);
+
+  useEffect(() => {
+    try { localStorage.setItem(COVERAGE_MODE_LS_KEY, coverageMode); } catch { /* ignore */ }
+  }, [coverageMode]);
 
   useEffect(() => {
     let active = true;
     const ac = new AbortController();
     setLoading(true);
     setErr(null);
-    fetchFullCoverage({ ...filters, metric }, exitRule, ac.signal)
+    fetchFullCoverage({ ...filters, metric, coverage_mode: coverageMode }, exitRule, ac.signal)
       .then(r => { if (active) setResp(r); })
       .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
-  }, [JSON.stringify(filters), JSON.stringify(exitRule), metric]);
+  }, [JSON.stringify(filters), JSON.stringify(exitRule), metric, coverageMode]);
 
   const rows = resp?.rows ?? [];
 
@@ -235,15 +256,44 @@ export function M7IvBandFullCoverageTable({
     }}>
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginBottom: 8,
+        marginBottom: 8, gap: 12, flexWrap: 'wrap',
       }}>
         <div style={{ fontSize: 14, color: '#cfd9e3', fontWeight: 700 }}>
           Full coverage — Best combo per IV band, every Friday assigned ({metric})
         </div>
-        <div style={{ fontSize: 11, color: '#7a9bb5' }}>
-          {loading ? 'Loading…'
-            : err ? <span style={{ color: '#f85149' }}>{err}</span>
-            : `${rows.length} bands`}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Coverage:</span>
+          <div style={{
+            display: 'inline-flex', border: '1px solid #1a2d42',
+            borderRadius: 4, overflow: 'hidden',
+          }}>
+            {(['force_fit', 'touched_band'] as const).map(mode => {
+              const active = coverageMode === mode;
+              const label = mode === 'force_fit' ? 'Force-fit' : 'Touched-band';
+              const tip = mode === 'force_fit'
+                ? 'Relax band entirely — any (hour, expiry, delta) match qualifies. Tiebreak by trade P&L.'
+                : "Only allow bands the Friday's IV touched at SOME hour during the day. Tiebreak by cell historical avg. No closest-fallback.";
+              return (
+                <button key={mode}
+                  onClick={() => setCoverageMode(mode)}
+                  title={tip}
+                  style={{
+                    background: active ? '#1f6feb' : '#0d1421',
+                    color: active ? '#fff' : '#cfd9e3',
+                    border: 'none',
+                    padding: '4px 10px',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    fontWeight: active ? 600 : 400,
+                  }}>{label}</button>
+              );
+            })}
+          </div>
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>
+            {loading ? 'Loading…'
+              : err ? <span style={{ color: '#f85149' }}>{err}</span>
+              : `${rows.length} bands`}
+          </span>
         </div>
       </div>
       <LoadingBar visible={loading} />
@@ -398,7 +448,9 @@ export function M7IvBandFullCoverageTable({
                   {/* Sub-row 2 — All Fridays */}
                   <tr>
                     <td style={{ ...tdAll, ...allLabelStyle }} title={
-                      `Includes ${r.n_force_fit} force-fit + ${r.n_closest_fallback} closest-fallback Fridays`
+                      coverageMode === 'force_fit'
+                        ? `Includes ${r.n_force_fit} force-fit + ${r.n_closest_fallback} closest-fallback Fridays`
+                        : `Includes ${r.n_touched_band} touched-band Fridays`
                     }>
                       <button
                         onClick={() => setDrilldown({
@@ -475,9 +527,20 @@ export function M7IvBandFullCoverageTable({
           borderTop: '1px solid #1a2d42', paddingTop: 6,
         }}>
           <strong>{resp.n_total_fridays}</strong> Fridays total —{' '}
-          <span style={{ color: '#3fb950' }}>{resp.n_rule_fridays} rule</span>{' · '}
-          <span style={{ color: '#d29922' }}>{resp.n_force_fit_fridays} force-fit</span>{' · '}
-          <span style={{ color: '#a371f7' }}>{resp.n_closest_fallback_fridays} closest-fallback</span>
+          <span style={{ color: '#3fb950' }}>{resp.n_rule_fridays} rule</span>
+          {coverageMode === 'force_fit' ? (
+            <>
+              {' · '}
+              <span style={{ color: '#d29922' }}>{resp.n_force_fit_fridays} force-fit</span>
+              {' · '}
+              <span style={{ color: '#a371f7' }}>{resp.n_closest_fallback_fridays} closest-fallback</span>
+            </>
+          ) : (
+            <>
+              {' · '}
+              <span style={{ color: '#d29922' }}>{resp.n_touched_band_fridays} touched-band</span>
+            </>
+          )}
           {resp.n_uncovered_fridays > 0 && (
             <>
               {' · '}

@@ -14,9 +14,9 @@ whose `time` ≤ entry_ts_utc):
   Expected move (1σ) at 7d / 14d / 30d tenors
     expected_move_1sigma_7d, expected_move_1sigma_14d, expected_move_1sigma_30d
 
-  Spot technicals at entry time (5m + 4h frames)
-    entry_rsi_14_5m, entry_macd_hist_5m, entry_bb_pct_b_5m,
-    entry_atr_pct_5m, entry_rsi_14_4h
+  Spot technicals at entry time (5m + 15m + 30m + 1h + 4h + 1d frames)
+    For each timeframe: entry_rsi_14_<tf>, entry_macd_hist_<tf>,
+    entry_bb_pct_b_<tf>, entry_atr_pct_<tf>
 """
 from __future__ import annotations
 
@@ -39,12 +39,16 @@ _SOURCE_TO_OUT: dict[str, str] = {
     "expected_move_1sigma_7d":  "expected_move_1sigma_7d",
     "expected_move_1sigma_14d": "expected_move_1sigma_14d",
     "expected_move_1sigma_30d": "expected_move_1sigma_30d",
-    "rsi_14_5m":                "entry_rsi_14_5m",
-    "macd_hist_5m":             "entry_macd_hist_5m",
-    "bb_pct_b_5m":              "entry_bb_pct_b_5m",
-    "atr_pct_5m":               "entry_atr_pct_5m",
-    "rsi_14_4h":                "entry_rsi_14_4h",
 }
+# Spot technicals across all available timeframes (5m, 15m, 30m, 1h, 4h, 1d).
+# All four indicators (RSI, MACD histogram, Bollinger %B, ATR %) at every
+# timeframe — the source bars parquet computes them all already.
+_TFS = ["5m", "15m", "30m", "1h", "4h", "1d"]
+_TF_INDICATORS = ["rsi_14", "macd_hist", "bb_pct_b", "atr_pct"]
+for _tf in _TFS:
+    for _ind in _TF_INDICATORS:
+        src = f"{_ind}_{_tf}"
+        _SOURCE_TO_OUT[src] = f"entry_{src}"
 
 
 def _all_populated(parquet_path: str, cols: list[str], threshold: float = 0.95) -> bool:

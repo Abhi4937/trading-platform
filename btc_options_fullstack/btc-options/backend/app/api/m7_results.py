@@ -523,6 +523,20 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         # Calibration v2 outcomes (overall + pattern-keyed)
         "pattern_winrate", "expectancy_per_credit_pct",
         "bucket_overall_winrate", "n_trades_in_bucket", "bucket_sl_hit_rate",
+        # IV velocity / vol-of-vol (Chunk 2 additions)
+        "ivp_4h_delta_24h", "ivp_4h_delta_48h",
+        "iv_change_stdev_7d", "vov_ratio",
+        # Expected move USD at 7d/14d/30d
+        "expected_move_1sigma_7d", "expected_move_1sigma_14d", "expected_move_1sigma_30d",
+        # Spot technicals at entry — RSI, MACD hist, BB %B, ATR % across all
+        # timeframes (5m / 15m / 30m / 1h / 4h / 1d). Used by Chunk 3
+        # winners-vs-losers indicator analysis.
+        "entry_rsi_14_5m",  "entry_macd_hist_5m",  "entry_bb_pct_b_5m",  "entry_atr_pct_5m",
+        "entry_rsi_14_15m", "entry_macd_hist_15m", "entry_bb_pct_b_15m", "entry_atr_pct_15m",
+        "entry_rsi_14_30m", "entry_macd_hist_30m", "entry_bb_pct_b_30m", "entry_atr_pct_30m",
+        "entry_rsi_14_1h",  "entry_macd_hist_1h",  "entry_bb_pct_b_1h",  "entry_atr_pct_1h",
+        "entry_rsi_14_4h",  "entry_macd_hist_4h",  "entry_bb_pct_b_4h",  "entry_atr_pct_4h",
+        "entry_rsi_14_1d",  "entry_macd_hist_1d",  "entry_bb_pct_b_1d",  "entry_atr_pct_1d",
     ]
     keep_trade_cols = [c for c in keep_trade_cols if c in trades.columns]
     merged = trades[keep_trade_cols].merge(exits, on="trade_id", how="inner")
@@ -2349,12 +2363,31 @@ _M7_LOSS_INDICATORS: list[tuple[str, str, str]] = [
     # Spot regime
     ("ctx_adx_14_4h",          "ADX 14 (4h)",          "Spot regime"),
     ("ctx_atr_pct_4h",         "ATR % (4h)",           "Spot regime"),
-    # Spot technicals at entry (Chunk 2 additions)
-    ("entry_rsi_14_5m",        "RSI 14 (5m, entry)",   "Spot technicals"),
-    ("entry_macd_hist_5m",     "MACD hist (5m, entry)","Spot technicals"),
-    ("entry_bb_pct_b_5m",      "BB %B (5m, entry)",    "Spot technicals"),
-    ("entry_atr_pct_5m",       "ATR % (5m, entry)",    "Spot technicals"),
-    ("entry_rsi_14_4h",        "RSI 14 (4h, entry)",   "Spot technicals"),
+    # Spot technicals at entry — all four indicators across 5m / 15m / 30m / 1h / 4h / 1d
+    ("entry_rsi_14_5m",        "RSI 14 (5m, entry)",     "Spot technicals 5m"),
+    ("entry_macd_hist_5m",     "MACD hist (5m, entry)",  "Spot technicals 5m"),
+    ("entry_bb_pct_b_5m",      "BB %B (5m, entry)",      "Spot technicals 5m"),
+    ("entry_atr_pct_5m",       "ATR % (5m, entry)",      "Spot technicals 5m"),
+    ("entry_rsi_14_15m",       "RSI 14 (15m, entry)",    "Spot technicals 15m"),
+    ("entry_macd_hist_15m",    "MACD hist (15m, entry)", "Spot technicals 15m"),
+    ("entry_bb_pct_b_15m",     "BB %B (15m, entry)",     "Spot technicals 15m"),
+    ("entry_atr_pct_15m",      "ATR % (15m, entry)",     "Spot technicals 15m"),
+    ("entry_rsi_14_30m",       "RSI 14 (30m, entry)",    "Spot technicals 30m"),
+    ("entry_macd_hist_30m",    "MACD hist (30m, entry)", "Spot technicals 30m"),
+    ("entry_bb_pct_b_30m",     "BB %B (30m, entry)",     "Spot technicals 30m"),
+    ("entry_atr_pct_30m",      "ATR % (30m, entry)",     "Spot technicals 30m"),
+    ("entry_rsi_14_1h",        "RSI 14 (1h, entry)",     "Spot technicals 1h"),
+    ("entry_macd_hist_1h",     "MACD hist (1h, entry)",  "Spot technicals 1h"),
+    ("entry_bb_pct_b_1h",      "BB %B (1h, entry)",      "Spot technicals 1h"),
+    ("entry_atr_pct_1h",       "ATR % (1h, entry)",      "Spot technicals 1h"),
+    ("entry_rsi_14_4h",        "RSI 14 (4h, entry)",     "Spot technicals 4h"),
+    ("entry_macd_hist_4h",     "MACD hist (4h, entry)",  "Spot technicals 4h"),
+    ("entry_bb_pct_b_4h",      "BB %B (4h, entry)",      "Spot technicals 4h"),
+    ("entry_atr_pct_4h",       "ATR % (4h, entry)",      "Spot technicals 4h"),
+    ("entry_rsi_14_1d",        "RSI 14 (1d, entry)",     "Spot technicals 1d"),
+    ("entry_macd_hist_1d",     "MACD hist (1d, entry)",  "Spot technicals 1d"),
+    ("entry_bb_pct_b_1d",      "BB %B (1d, entry)",      "Spot technicals 1d"),
+    ("entry_atr_pct_1d",       "ATR % (1d, entry)",      "Spot technicals 1d"),
     # Expected move (Chunk 2 additions) — USD
     ("expected_move_1sigma_7d", "Expected move 1σ 7d", "Expected move"),
     ("expected_move_1sigma_14d","Expected move 1σ 14d","Expected move"),
