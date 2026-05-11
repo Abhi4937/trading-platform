@@ -1,5 +1,154 @@
 # Claude's Work Log
 
+## Session 19 (2026-05-11) — Touched-band coverage toggle for M7 Full Coverage
+
+### Headline
+Added a new `touched_band` coverage mode to the M7 Full Coverage view as
+an alternative to the existing `force_fit` classifier. Force-fit places
+any missed Friday into a cell as long as `(hour × expiry × delta)`
+matches — band is ignored, tiebreak is the Friday's own trade P&L. The
+new touched-band mode constrains the relaxed match: a missed Friday can
+only land in a cell whose **band the Friday's IV actually visited at
+some hour during the day**, and tiebreak is the cell's *historical*
+avg net P&L (option a from the alignment discussion with user). Closest-
+fallback is skipped — Fridays with no touched-band match are honestly
+counted as uncovered instead of being distance-fit into the nearest
+cell.
+
+This gives the user two views of the missed-Friday recovery picture:
+- **Force-fit (default)**: "if I'm willing to trade out-of-regime, what
+  do I pick up?" Aggregates the 32 missed Fridays into a +$447 / 61% WR
+  pool — useful for retail-style upper-bound estimates.
+- **Touched-band**: "what's the disciplined recovery if I require the
+  IV to match the band?" Recovers 29 of 31 missed Fridays at +$275 /
+  41.4% WR — meaningfully smaller because requiring band-touching
+  filters down to the genuinely harder Fridays the force-fit view was
+  inflating by ignoring regime.
+
+### Files modified (committed in `cc6f313`)
+- `backend/app/api/m7_full_coverage.py` — `_classify_fridays_to_cells()`
+  now accepts `coverage_mode` ∈ {`force_fit`, `touched_band`}. In
+  `touched_band` mode: step-2 candidates are filtered to cells whose
+  band is in the Friday's touched-bands set (the set of distinct
+  `entry_atm_iv_band` values across all of that Friday's trades).
+  Tiebreak switches to cell historical avg (`best_cells['score']`).
+  Closest-fallback is skipped entirely. Endpoint accepts new
+  `coverage_mode` query param; response adds `coverage_mode`,
+  `n_touched_band_fridays`, plus per-row `n_touched_band`.
+- `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx` —
+  added a `[Force-fit | Touched-band]` button group in the header
+  strip styled to match the existing dashboard chrome. Selection
+  persists to localStorage under `m7:fullcoverage:coverage_mode`.
+  Footer adapts: force-fit + closest-fb counts in one mode, only the
+  touched-band count in the other. "All ▸" sub-row tooltip is
+  mode-aware.
+
+### Files added (committed in `cc6f313`)
+- `scripts/m7_missed_friday_recovery.py` — standalone CLI driver used
+  to debug the algorithm before wiring into the production endpoint.
+  Loads the v3 best-combo grid, identifies missed Fridays, simulates
+  the 10 headline picks across them, and prints aggregate +
+  per-Friday + per-band recovery numbers. Useful for ad-hoc analysis
+  without restarting the backend.
+
+### Verification (live via Playwright MCP)
+- Force-fit mode (default): footer reads `89 rule · 32 force-fit ·
+  0 closest-fallback`.
+- Touched-band mode: footer reads `89 rule · 32 touched-band` (uncovered
+  hidden when zero).
+- Toggle round-trips cleanly; localStorage persistence works.
+- Required a frontend dev-server restart to pick up the file change —
+  Vite HMR didn't fire, probably a WSL/Windows file-watcher quirk.
+  `fuser -k 3000/tcp && npm run dev` did the trick.
+
+### Algorithm subtleties (for future reference)
+- The Friday's touched-band set is computed from `derived[entry_atm_iv_band]`
+  across all hours, NOT just at the picked entry hour. So 2024-08-30,
+  which cycled through bands 0-20 → 80-90 across 7 hours, qualifies for
+  ALL of those bands' picked cells (provided hour-expiry-delta matches).
+- The cell's `score` column is the strict-subset's avg_net_pnl (the
+  metric chosen for ranking). In touched-band tiebreak we use this as
+  "hist avg net P&L of the cell's strict trades", which is the correct
+  meaning of option (a). Note this differs from force_fit's tiebreak,
+  which uses the trade's own actual net_pnl_estimate_usd — the legacy
+  semantics matter because force_fit is opportunistic ("which Friday
+  trade looks best") while touched_band is regime-conditioned ("which
+  band's strategy do I trust most").
+- In touched-band mode, closest-fallback is intentionally skipped.
+  Allowing it would defeat the band-touching constraint by re-letting
+  out-of-regime Fridays back in via distance. Honest uncovered count is
+  the point.
+
+## Session 18 (2026-05-08, alongside Session 19) — M7 best-combo grid v3 + loss anatomy expansion
+
+### Headline
+Two large items shipped together in commit `cc6f313`:
+
+1. **Best-combo grid v3 with `entry_hour_ist` as a sweep dimension** and
+   a standalone CLI builder so the heavy compute happens out-of-process
+   (the previous in-FastAPI thread was starving the event loop and
+   producing "Failed to fetch" errors during long warmups). Grid
+   schema bumped to v3 — 208,032 cells across 96 rule variants ×
+   7 expiries × 8 deltas × 10 IV bands × entry hours, persisted at
+   `/home/abhis/btc-data/derived/m7/m7_best_combo_grid_v3.parquet`.
+   Build is now `python -m app.scripts.build_m7_best_combo_grid`,
+   takes ~50 min cold, persisted across restarts.
+
+2. **65-indicator loss-anatomy panel** (was 46). Added RSI(14), MACD
+   histogram, Bollinger %B, ATR% across 4 new timeframes (15m, 30m,
+   1h, 1d) on top of the existing 5m and 4h — total 4 indicators × 6
+   timeframes = 24 entry_*_<tf> columns. Discovered AND FIXED a
+   latent bug in `_compute_all_exits` keep-list that was silently
+   dropping every `entry_*_<tf>` indicator from the enriched parquet
+   on its way into the cell-winners-vs-losers analysis. The same bug
+   had been hiding the original 5m+4h indicators all along — they
+   went unused for weeks before this expansion uncovered the
+   projection mistake.
+
+### Files modified
+- `backend/app/api/m7_best_combo.py` — v3 schema, CLI builder hookup,
+  `_pick_best_per_band` rewrite with secondary/tolerance_pct for
+  tiebreak mode, expanded ranking metrics with directional flags
+  (`_METRIC_DIRECTIONS` for max/min ranking).
+- `backend/app/api/m7_results.py` — added `pct_max_mtm_on_credit`,
+  `pct_min_mtm_on_credit` per-trade metrics; added `total_win_mtm`,
+  `total_loss_mtm` to winner/loser metric sets. Extended
+  `_M7_LOSS_INDICATORS` from 46 → 65. **Critical fix**: extended
+  `keep_trade_cols` in `_compute_all_exits` to include all
+  entry_*_<tf> + IV velocity + expected-move columns; without this
+  the new indicators are silently dropped before the per-cell
+  analysis runs.
+- `backend/app/main.py` — removed in-process warmup, replaced with
+  `try_load_grid_only()` + log message about manual CLI build.
+
+### Files added
+- `backend/app/scripts/build_m7_best_combo_grid.py` — out-of-process
+  grid builder (CLI). Calls `m7bc._build_grid(progress_cb=...)` then
+  `_persist_grid_to_disk()`. Prints progress to stdout for visibility.
+- `docs/m7_friday_classification_and_missed_trades.md` — full writeup
+  of the 4-tier Friday classifier (rule / force_fit / closest_fallback
+  / uncovered), the 32 force-fit Fridays' aggregate numbers, and the
+  trading-discipline argument for the strict view.
+- `docs/m7_loss_indicators.md` — every indicator in the 65-item
+  `_M7_LOSS_INDICATORS` list, by category (IV term structure, IV
+  velocity, RV/VRP, skew, spot regime, spot technicals × 6 timeframes,
+  expected move, OI/GEX, premium structure, Greeks ratios, per-leg
+  skew). Includes a note about the spot-technicals timeframe expansion
+  and why each timeframe was added.
+
+### Files added/modified — scripts
+- `scripts/extend_m7_enrichment_for_loss_anatomy.py` — extended
+  `_SOURCE_TO_OUT` to map all 24 new entry_*_<tf> columns dynamically
+  via a nested loop (`_TFS × _TF_INDICATORS`).
+
+### Verification
+- v3 grid built in ~50 min, persisted, loads in ~50ms on subsequent
+  starts.
+- All 10 IV bands have valid picks via `_pick_best_per_band(grid,
+  'avg_net_pnl')`.
+- Frontend best-combo table renders the new v3 picks; Pure/Tiebreak
+  toggle works as expected.
+
 ## Session 17 (2026-05-07) — M8 current-expiry IV / ATM Δ / 25Δ skew analytics
 
 ### Headline

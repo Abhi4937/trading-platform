@@ -2,8 +2,87 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-07 (Session 17 — M8 current-expiry IV / ATM Δ / 25Δ skew analytics shipped)
+**Date:** 2026-05-11 (Session 19 — Touched-band coverage toggle for M7 Full Coverage)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 19 highlights
+- **Touched-band coverage mode for M7 Full Coverage — SHIPPED (committed).**
+  Added a new alternative to the existing `force_fit` Friday classifier:
+  `touched_band` mode only allows a missed Friday to land in a band whose
+  IV the Friday actually touched at SOME entry hour during the day. No
+  closest-fallback; uncovered Fridays are exposed honestly.
+  - **Why**: force-fit can place a Friday into a band the Friday's IV never
+    matched (any-band-with-matching-hour-expiry-delta qualifies). Touched-
+    band keeps coverage band-conditioned — cleaner for disciplined live
+    trading where IV regime conditioning matters.
+  - **Backend**: `backend/app/api/m7_full_coverage.py` —
+    `_classify_fridays_to_cells()` now takes `coverage_mode` param. In
+    `touched_band` mode, step-2 candidates are filtered to cells whose
+    band is in the Friday's touched-bands set (computed from each Friday's
+    trades' `entry_atm_iv_band` values). Tiebreak by cell historical
+    avg_net_pnl (the cell's `score` column) rather than trade P&L.
+    Closest-fallback is skipped entirely → unmatched Fridays count as
+    `uncovered` in the footer. Response adds `coverage_mode`,
+    `n_touched_band_fridays`, plus per-row `n_touched_band`.
+  - **Frontend**: `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx`
+    — new `[Force-fit | Touched-band]` button group in the table header.
+    Selection persists to localStorage under `m7:fullcoverage:coverage_mode`.
+    Footer + tooltips adapt to active mode.
+  - **Read-only analysis driver**: `scripts/m7_missed_friday_recovery.py`
+    — standalone python script that loads the v3 grid, identifies missed
+    Fridays, and simulates touched-band recovery across the 10 headline
+    cells. Used during this session to debug the algorithm + tiebreak
+    semantics before wiring into the production endpoint.
+  - **Verified live via Playwright MCP**:
+    - Force-fit mode: 89 rule + 32 force-fit + 0 closest-fb + 0 uncovered = 121
+    - Touched-band mode: 89 rule + 32 touched-band + 0 uncovered = 121
+    - Round-trip toggle round-trips cleanly. localStorage persistence works.
+  - **Note on Vite HMR**: file change wasn't picked up via HMR after the
+    edit; required a frontend dev-server restart (`fuser -k 3000/tcp &&
+    npm run dev`) before the toggle rendered. Probably a WSL/Windows
+    file-watcher issue.
+  - **Per-Friday recovery numbers** (using v3 grid's 10 headline picks,
+    band-touching constraint, hist-avg tiebreak): 29 of 31 missed Fridays
+    find a candidate; 12 wins / 17 losses (41.4% WR); +$274.73 total net;
+    $9.47/trade avg. Recovery is real but modest vs. strict-cell edges
+    ($25-100+/trade); win rate drops to 41% (vs 75-100% for strict cells)
+    because requiring band-touching filters down to harder Fridays.
+  - **Files touched (already committed in `cc6f313`)**:
+    - `backend/app/api/m7_full_coverage.py` (M)
+    - `backend/app/api/m7_best_combo.py` (M, separate work)
+    - `backend/app/api/m7_results.py` (M, separate work)
+    - `backend/app/main.py` (M)
+    - `backend/app/scripts/build_m7_best_combo_grid.py` (new, separate work)
+    - `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx` (M)
+    - `scripts/m7_missed_friday_recovery.py` (new)
+    - `scripts/extend_m7_enrichment_for_loss_anatomy.py` (M)
+    - `docs/m7_friday_classification_and_missed_trades.md` (new)
+    - `docs/m7_loss_indicators.md` (new)
+
+### Session 18 highlights (committed in cc6f313 alongside Session 19)
+- **M7 best-combo grid v3 + standalone CLI builder.** Bumped grid schema
+  to v3 to include `entry_hour_ist` as a sweep dimension. Build now runs
+  via `python -m app.scripts.build_m7_best_combo_grid` (single-process
+  CLI) instead of FastAPI background-thread warmup, which was starving
+  the event loop and causing "Failed to fetch" errors. Persisted parquet
+  at `/home/abhis/btc-data/derived/m7/m7_best_combo_grid_v3.parquet` —
+  208,032 cells.
+- **65-indicator loss-anatomy panel.** Extended the cell-winners-vs-losers
+  panel from 46 to 65 entry-time indicators: added RSI(14), MACD
+  histogram, Bollinger %B, and ATR% across 4 new timeframes (15m, 30m,
+  1h, 1d) on top of the existing 5m/4h. Also: fixed a latent bug in
+  `_compute_all_exits` keep-list that was silently dropping every
+  `entry_*_<tf>` indicator from the enriched parquet — same bug had been
+  hiding the 5m+4h indicators all along. Documented in
+  `docs/m7_loss_indicators.md` (46 → 65 across 11 categories).
+- **Force-fit vs touched-band documentation**:
+  `docs/m7_friday_classification_and_missed_trades.md` — full writeup of
+  the 4-tier classifier, the 32 force-fit Fridays, recovery numbers, and
+  the discipline argument for the strict view.
+
+### Session 17 highlights
+- **M8 SHIPPED (UNCOMMITTED)** — new analytics module
+  `backend/app/analytics/m8_current_expiry_skew.py` (~330 LOC). Per-minute
 
 ### Session 17 highlights
 - **M8 SHIPPED (UNCOMMITTED)** — new analytics module

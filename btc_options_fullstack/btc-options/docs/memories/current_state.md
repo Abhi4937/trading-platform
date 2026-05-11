@@ -1,6 +1,45 @@
 # Current Project State
 
 ## Active Projects
+- **M7 Full Coverage — Force-fit ⇄ Touched-band toggle SHIPPED (Session 19, 2026-05-11, committed in `cc6f313`):**
+  New `coverage_mode` toggle on the M7 Full Coverage table:
+  - `force_fit` (default — today's behavior): missed Fridays go into any
+    cell whose `(hour × expiry × delta)` matches; band is ignored;
+    tiebreak by trade P&L; closest-fallback for non-matchers.
+  - `touched_band` (new): missed Fridays go only into cells whose band
+    the Friday's IV touched at SOME hour during the day; tiebreak by
+    cell historical avg net P&L; no closest-fallback (unmatched =
+    uncovered).
+  Backend: `m7_full_coverage.py` (`_classify_fridays_to_cells` takes
+  `coverage_mode` param, endpoint exposes it as query string).
+  Frontend: `M7IvBandFullCoverageTable.tsx` (button group, localStorage
+  persistence, mode-aware footer + tooltips). Verified live in Playwright.
+  Recovery comparison on 32 missed Fridays:
+  - Force-fit: 31 recovered / 61% WR / +$447 / $14.43 avg
+  - Touched-band: 29 recovered / 41.4% WR / +$275 / $9.47 avg
+  Touched-band is the disciplined view for live trading; force-fit is
+  the upper-bound retail estimate.
+
+- **M7 best-combo grid v3 + standalone CLI builder SHIPPED (Session 18, committed in `cc6f313`):**
+  Schema bumped to v3 to include `entry_hour_ist` as a sweep dimension.
+  208,032 cells across 96 rule variants × 7 expiries × 8 deltas × 10 IV
+  bands × entry hours. Persisted at
+  `/home/abhis/btc-data/derived/m7/m7_best_combo_grid_v3.parquet`.
+  Build now runs out-of-process via
+  `python -m app.scripts.build_m7_best_combo_grid` (the previous
+  in-FastAPI thread was starving the event loop and causing "Failed to
+  fetch" during warmups). Persists across restarts in ~50ms cold load.
+
+- **M7 loss-anatomy panel — 65 indicators across 11 categories (Session 18, committed in `cc6f313`):**
+  Extended from 46 → 65 by adding RSI(14), MACD histogram, Bollinger %B,
+  and ATR% across 4 new timeframes (15m, 30m, 1h, 1d) on top of the
+  existing 5m+4h. Full list in `docs/m7_loss_indicators.md`.
+  **Critical fix**: `_compute_all_exits` keep-list was silently dropping
+  every `entry_*_<tf>` indicator before the cell-winners-vs-losers
+  analysis. The same latent bug had been hiding the original 5m+4h
+  indicators all along. Now fixed — all 65 indicators reach the analysis
+  panel.
+
 - **M7 loss-trade analysis refinement — IN PROGRESS (Session 18+):**
   Active work surface is the Session-16 loss-classifier + losses-explorer
   + cell-winners-vs-losers components (UNCOMMITTED in branch). Goal:
