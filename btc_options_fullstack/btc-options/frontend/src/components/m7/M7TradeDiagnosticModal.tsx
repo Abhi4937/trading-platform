@@ -5,6 +5,7 @@
 // theta-driven vs gamma-driven vs directional losses.
 
 import React, { useEffect, useState } from 'react';
+import { InfoIcon } from './InfoIcon';
 import {
   fetchM7TradeDiagnostic,
   type M7TradeDiagnosticResponse,
@@ -475,14 +476,19 @@ function Grid({ children }: { children: React.ReactNode }) {
   );
 }
 
-function KV({ label, value, color }: { label: string; value: React.ReactNode; color?: string }) {
+function KV({ label, value, color, info }: { label: string; value: React.ReactNode; color?: string; info?: string }) {
+  // info lookup — applied automatically when explicit info isn't passed,
+  // so callers don't have to thread descriptions to every existing <KV>.
+  const auto = info ?? KV_INFO[label.toLowerCase()];
   return (
     <div style={{
       padding: '6px 10px', background: '#0d1421', border: '1px solid #1a2d42',
       borderRadius: 4,
     }}>
       <div style={{ fontSize: 9, color: '#7a9bb5',
-                    textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+                    textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        {label}{auto && <InfoIcon text={auto} />}
+      </div>
       <div style={{ fontSize: 12, color: color || '#cfd9e3', fontWeight: 600,
                     marginTop: 3, fontVariantNumeric: 'tabular-nums' }}>
         {value}
@@ -490,6 +496,51 @@ function KV({ label, value, color }: { label: string; value: React.ReactNode; co
     </div>
   );
 }
+
+// Centralized info-text lookup for the trade-diagnostic <KV> cells. Keys are
+// the lowercased KV label. Add new entries here rather than threading info=
+// to every call site.
+const KV_INFO: Record<string, string> = {
+  // Overview / P&L
+  'net p&l': 'Realised net P&L (entry slip + entry brokerage + exit slip + exit brokerage all subtracted).',
+  'gross p&l': 'Path-engine gross P&L at exit (no costs subtracted). gross = credit − (exit_call_mark + exit_put_mark) × qty × 0.001.',
+  'credit': 'Upfront credit collected at entry: (call_entry_mark + put_entry_mark) × qty × 0.001 BTC.',
+  'margin': 'Delta Exchange portfolio margin required at entry (29-scenario engine).',
+  'max mtm': 'Peak unrealized P&L during the hold (entry costs only — what you would have seen on screen at the best moment).',
+  'min mtm': 'Trough unrealized P&L during the hold (entry costs only — worst moment on screen).',
+  'exit mtm': 'On-screen P&L at the moment of exit (gross − entry costs only). NOT the realised number (exit costs not yet deducted).',
+  'duration': 'Time from entry to exit, in minutes / hours.',
+  'rel time @ peak': 'Fraction of the entry→exit window where peak MTM occurred. 0 = at entry, 1 = at exit. Half a window = 0.5.',
+  'rel time @ trough': 'Fraction of the entry→exit window where trough MTM occurred.',
+  '% return / credit': 'net_pnl ÷ credit_collected. ROI on premium captured.',
+  '% return / margin': 'net_pnl ÷ margin_at_entry. Capital efficiency.',
+  // Skew
+  'δ skew': 'call_entry_delta + put_entry_delta. ±0 = perfectly hedged at entry; +ve = net long delta; −ve = net short delta.',
+  'iv skew %': '(call_iv − put_iv) ÷ atm_iv. >0 = call side richer; <0 = put side richer.',
+  'premium skew $': 'call_entry_mark − put_entry_mark. >0 = call premium > put premium.',
+  'premium skew %': 'premium skew normalised by total credit.',
+  'iv bucket': 'Categorical IV skew bucket: put_richer_strong / put_richer / balanced / call_richer / call_richer_strong.',
+  'δ bucket': 'Categorical delta skew bucket.',
+  'premium bucket': 'Categorical premium skew bucket.',
+  'leg p&l diff': 'call_leg_pnl − put_leg_pnl. Reveals which leg carried the trade.',
+  // Vol regime
+  'atm iv (entry)': 'Annualised ATM IV at entry (decimal: 0.45 = 45%).',
+  'atm iv 7d': 'Mean ATM IV across the 7d tenor at entry.',
+  'atm iv 14d': 'Mean ATM IV across the 14d tenor at entry.',
+  'atm iv 30d': 'Mean ATM IV across the 30d tenor at entry.',
+  'atm iv 60d': 'Mean ATM IV across the 60d tenor at entry.',
+  'ivp 4h': 'IV percentile of the entry 4h-window ATM IV vs the last 4h.',
+  'ivp 7d/90': '7d-tenor ATM IV percentile rank vs 90d history (0-100).',
+  'ivp 14d/90': '14d-tenor ATM IV percentile rank vs 90d history.',
+  'ivp 30d/90': '30d-tenor ATM IV percentile rank vs 90d history.',
+  'δivp 4h vs 24h': 'Change in 4h-IVP over the last 24h.',
+  'δivp 4h vs 48h': 'Change in 4h-IVP over the last 48h.',
+  'iv_change σ 7d': 'Stdev of hourly IV changes over the last 7d.',
+  'vov_ratio': 'Vol-of-vol ratio: how variable IV itself has been recently.',
+  'rv 7d': 'Realised volatility over last 7d (annualised).',
+  'rv 14d': 'Realised volatility over last 14d.',
+  'rv 30d': 'Realised volatility over last 30d.',
+};
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (

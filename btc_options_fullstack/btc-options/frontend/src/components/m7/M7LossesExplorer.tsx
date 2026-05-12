@@ -21,6 +21,7 @@ import {
   type M7LossesTradesSort,
 } from '../../services/m7_api';
 import type { M7ExitRule, M7Filters } from '../../types/m7';
+import { InfoIcon } from './InfoIcon';
 import { M7TradeDiagnosticModal } from './M7TradeDiagnosticModal';
 
 interface Props {
@@ -206,11 +207,11 @@ export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
                                 borderCollapse: 'collapse' }}>
                   <thead>
                     <tr style={{ color: '#7a9bb5' }}>
-                      <th style={{ textAlign: 'left', padding: '2px 8px' }}>Band</th>
-                      <th style={{ textAlign: 'left', padding: '2px 8px' }}>Expiry</th>
-                      <th style={{ textAlign: 'right', padding: '2px 8px' }}>Δ</th>
-                      <th style={{ textAlign: 'left', padding: '2px 8px' }}>Rule</th>
-                      <th style={{ textAlign: 'right', padding: '2px 8px' }}>n</th>
+                      <th style={{ textAlign: 'left', padding: '2px 8px' }}>Band <InfoIcon text="ATM IV bucket." /></th>
+                      <th style={{ textAlign: 'left', padding: '2px 8px' }}>Expiry <InfoIcon text="Expiry bucket of the picked combo." /></th>
+                      <th style={{ textAlign: 'right', padding: '2px 8px' }}>Δ <InfoIcon text="Picked combo's per-leg delta target." /></th>
+                      <th style={{ textAlign: 'left', padding: '2px 8px' }}>Rule <InfoIcon text="Exit rule of the picked combo for this band (e.g. sl75_max_profit_25)." /></th>
+                      <th style={{ textAlign: 'right', padding: '2px 8px' }}>n <InfoIcon text="Number of Friday trades that hit this rule on this band." /></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -255,16 +256,20 @@ export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
               }}>
                 <KPI label="Loss rate"
                      value={`${(data.loss_rate * 100).toFixed(1)}%`}
-                     color="#cfd9e3" />
+                     color="#cfd9e3"
+                     info="n_losses ÷ n_trades across the current scope (rule-matched, force-fit, or all trades depending on the scope toggle)." />
                 <KPI label="Avg loser"
                      value={fmtUsd(data.avg_loss_usd)}
-                     color="#f85149" />
+                     color="#f85149"
+                     info="Mean net P&L across losing trades only (negative)." />
                 <KPI label="Total loss"
                      value={fmtUsd(data.total_loss_usd)}
-                     color="#f85149" />
+                     color="#f85149"
+                     info="Sum of net P&L across all losing trades in scope." />
                 <KPI label="Worst single loss"
                      value={fmtUsd(data.worst_loss_usd)}
-                     color="#f85149" />
+                     color="#f85149"
+                     info="Most negative net P&L of any single trade in scope." />
               </div>
 
               {/* By-cause distribution bars */}
@@ -350,22 +355,22 @@ export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
                                     fontFamily: 'ui-monospace, monospace' }}>
                       <thead style={{ background: '#0d1421' }}>
                         <tr style={{ color: '#7a9bb5' }}>
-                          <th style={{ padding: 4, textAlign: 'left', borderBottom: '1px solid #1a2d42' }}>IV band</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>n</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>n loss</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>SL hits</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Hard cap</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg loss</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total loss</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest loss</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg loss MTM</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total loss MTM</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest loss MTM</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg max MTM (L)</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg min MTM (L)</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Max MTM (L)</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Min MTM (L)</th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>L &gt; avg max MTM</th>
+                          <th style={{ padding: 4, textAlign: 'left', borderBottom: '1px solid #1a2d42' }}>IV band <InfoIcon text="ATM IV bucket at entry hour." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>n <InfoIcon text="Number of trades in this band." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>n loss <InfoIcon text="Number of losing trades (net P&L ≤ 0)." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>SL hits <InfoIcon text="Trades exited because any rule fired (premium_sl OR max_profit OR margin_target). For take-profit families this includes profit-take fires." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Hard cap <InfoIcon text="Trades that ran to Sat 17:30 IST (settlement) without any rule firing." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg loss <InfoIcon text="Mean net P&L across losers (negative number)." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total loss <InfoIcon text="Sum of net P&L across losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest loss <InfoIcon text="Most negative net P&L of any single loser." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg loss MTM <InfoIcon text="Mean exit-time MTM across losers (entry costs only)." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total loss MTM <InfoIcon text="Sum of exit-time MTM across all losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest loss MTM <InfoIcon text="Min exit-time MTM among losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg max MTM (L) <InfoIcon text="Mean peak MTM across losers — how high they went before turning losing." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg min MTM (L) <InfoIcon text="Mean trough MTM across losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Max MTM (L) <InfoIcon text="Highest peak MTM observed across all losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Min MTM (L) <InfoIcon text="Worst trough MTM across all losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>L &gt; avg max MTM <InfoIcon text="Losers whose max MTM rose above the band's avg-max-MTM (losers) — missed exit opportunity." /></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -470,15 +475,15 @@ export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
                                         fontSize: 11, color: '#cfd9e3' }}>
                           <thead style={{ background: '#0d1421' }}>
                             <tr style={{ color: '#7a9bb5' }}>
-                              <th style={th}>Friday</th>
-                              <th style={th}>Band</th>
-                              <th style={th}>Hour</th>
-                              <th style={th}>Expiry</th>
-                              <th style={{...th, textAlign: 'right'}}>Δ</th>
-                              <th style={th}>Exit</th>
-                              <th style={th}>Cause</th>
-                              <th style={{...th, textAlign: 'right'}}>Net P&amp;L</th>
-                              <th style={{...th, textAlign: 'right'}}>Largest swing</th>
+                              <th style={th}>Friday <InfoIcon text="Friday date (IST) of the trade." /></th>
+                              <th style={th}>Band <InfoIcon text="ATM IV bucket at entry hour." /></th>
+                              <th style={th}>Hour <InfoIcon text="Hour-of-day IST the trade opened." /></th>
+                              <th style={th}>Expiry <InfoIcon text="Expiry bucket (current/next/next_to_next/weekly/biweekly/monthly)." /></th>
+                              <th style={{...th, textAlign: 'right'}}>Δ <InfoIcon text="Per-leg target delta at entry." /></th>
+                              <th style={th}>Exit <InfoIcon text="How the trade exited: rule_trigger (premium_sl/max_profit/margin_target fired), fixed_hour_ist (timed exit), or hard_cap (Sat 17:30 settlement)." /></th>
+                              <th style={th}>Cause <InfoIcon text="Auto-classified loss cause: directional (large spot move), vol_expansion (IV jumped at the worst-MTM bar), gamma_squeeze (early SL hit + net delta blew past entry), skew_flip (both legs lost + directional balance inverted), path_dependent (gave back >30% peak), or unclassified." /></th>
+                              <th style={{...th, textAlign: 'right'}}>Net P&amp;L <InfoIcon text="Realised net P&L (all four cost components subtracted)." /></th>
+                              <th style={{...th, textAlign: 'right'}}>Largest swing <InfoIcon text="Max(peak MTM) − min(trough MTM) during the trade's hold — how volatile the P&L path was before settling at the exit number." /></th>
                               <th style={th}></th>
                             </tr>
                           </thead>
@@ -666,14 +671,16 @@ const pagBtn = (disabled: boolean): React.CSSProperties => ({
   cursor: disabled ? 'not-allowed' : 'pointer',
 });
 
-function KPI({ label, value, color }: { label: string; value: string; color: string }) {
+function KPI({ label, value, color, info }: { label: string; value: string; color: string; info?: string }) {
   return (
     <div style={{
       padding: '8px 12px', background: '#0d1421', border: '1px solid #1a2d42',
       borderRadius: 4,
     }}>
       <div style={{ fontSize: 9, color: '#7a9bb5',
-                    textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+                    textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        {label}{info && <InfoIcon text={info} />}
+      </div>
       <div style={{ fontSize: 16, color, fontWeight: 600, marginTop: 4,
                     fontVariantNumeric: 'tabular-nums' }}>{value}</div>
     </div>

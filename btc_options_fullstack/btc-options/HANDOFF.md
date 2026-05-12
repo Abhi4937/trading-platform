@@ -2,8 +2,35 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-11 (Session 19 — Touched-band coverage toggle for M7 Full Coverage)
+**Date:** 2026-05-12 (Session 20 — M7 capital deployment + 5-scenario loss/target/DD comparison)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 20 highlights (analysis-only, no code changes)
+- **5-scenario per-cell comparison** for `20-30 IV × next_to_next (Mon) × Δ=0.5`:
+  (1) 11pm + max_profit_20%, (2) 11pm + max_profit_25%,
+  (3) 12am + max_profit_20%, (4) 12am + max_profit_25%,
+  (5) 12am + Fixed Exit @15:00 IST + SL100%.
+  Each derived via `m7_results._derive_exits()` + per-trade path walk
+  (`m7_paths/friday_date=*/part.parquet`) using `gross_pnl_usd` for
+  target-hit detection and `net_pnl_unwind_usd` for capture/DD math.
+- **Winner by every measure: setup 5 (12am + Exit @15:00).** 91.7% WR,
+  $23.46 avg P&L, smallest worst-case DD-before-target (−$13.93),
+  smallest worst-case loss (−$30.17). Median time-to-trough for the 2
+  losers = 4.2h (early, recoverable).
+- **Loss-timing finding**: 11pm-entry losers (6/25) trough at median
+  3.8h after entry (mostly 00:00-03:00 IST). 12am-entry losers (3/24)
+  trough at median 16.2h (= ~16:00 IST, the late Saturday afternoon
+  US-open window). Setup 5's 15:00 IST exit specifically dodges the
+  12am-entry-trough cluster at 16:00.
+- **Capital-deployment recommendation for ₹1 lakh wallet** (USD ≈ $1,200):
+  Deploy 40% (≈$480 margin, ~225 lots at 100-lot historical scale) on
+  setup 5. Worst-case Friday loss ≈ −₹5,650 (−5.7% of wallet). Expected
+  over 24 Fridays ≈ +₹1,05,000 (~100% wallet return). 3-tier table also
+  shown for 60% / 80% deploys.
+- **Output**: `scripts/m7_4setup_comparison.xlsx` (~30 KB, ~9 sheets):
+  5_scenarios_summary, per-trade detail for each setup, MTM capture
+  analysis, DD-before-target, setup definitions. **Untracked data** —
+  not committed (follows the calibration/exit-rule sweep convention).
 
 ### Session 19 highlights
 - **Touched-band coverage mode for M7 Full Coverage — SHIPPED (committed).**

@@ -4,6 +4,7 @@
 // modal (Chunk 7) and the universe Losses Explorer (Chunk 6).
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { InfoIcon } from './InfoIcon';
 import {
   fetchM7CellWinnersVsLosers,
   type M7Cell,
@@ -124,19 +125,14 @@ export function M7CellWinnersVsLosersTable({
           <thead style={{ position: 'sticky', top: 0, background: '#0d1421',
                           zIndex: 1 }}>
             <tr style={{ borderBottom: '1px solid #1a2d42', color: '#7a9bb5' }}>
-              <th style={{ padding: 4, textAlign: 'left' }}>Indicator</th>
-              <th style={{ padding: 4, textAlign: 'left' }}>Category</th>
-              <th style={{ padding: 4, textAlign: 'right' }}>Avg win</th>
-              <th style={{ padding: 4, textAlign: 'right' }}>Avg loss</th>
-              <th style={{ padding: 4, textAlign: 'right' }}>Gap</th>
-              <th style={{ padding: 4, textAlign: 'right' }}>σ (universe)</th>
-              <th style={{ padding: 4, textAlign: 'right' }} title="Effect size: |gap| / σ">
-                |gap|/σ
-              </th>
-              <th style={{ padding: 4, textAlign: 'right' }}
-                  title="Welch's t-test p-value (informational; null when scipy unavailable)">
-                p
-              </th>
+              <th style={{ padding: 4, textAlign: 'left' }}>Indicator <InfoIcon text="Name of the entry-context indicator being compared (RSI, MACD hist, BB %B, ATR%, IV percentile, IV-RV spread, Greeks, etc.)." /></th>
+              <th style={{ padding: 4, textAlign: 'left' }}>Category <InfoIcon text="Indicator family: technicals (price-based momentum/oscillators), vol (IV / IVP / VRP / RV), greeks (entry Δ/Γ/Θ/ν and ratios), or skew." /></th>
+              <th style={{ padding: 4, textAlign: 'right' }}>Avg win <InfoIcon text="Mean indicator value at entry across the cell's winning trades." /></th>
+              <th style={{ padding: 4, textAlign: 'right' }}>Avg loss <InfoIcon text="Mean indicator value at entry across the cell's losing trades." /></th>
+              <th style={{ padding: 4, textAlign: 'right' }}>Gap <InfoIcon text="Avg(winners) − Avg(losers). Positive = indicator runs higher when the trade wins; negative = runs lower." /></th>
+              <th style={{ padding: 4, textAlign: 'right' }}>σ (universe) <InfoIcon text="Stdev of this indicator across ALL trades (not just this cell). Used to normalise the gap into an effect size." /></th>
+              <th style={{ padding: 4, textAlign: 'right' }}>|gap|/σ <InfoIcon text="Effect size: |avg_win − avg_loss| ÷ universe σ. >0.5 = noticeable separation; >1.0 = strong. Bold rows pass the discriminating threshold." /></th>
+              <th style={{ padding: 4, textAlign: 'right' }}>p <InfoIcon text="Welch's t-test p-value for the win/loss mean difference. Informational only — small p doesn't imply causation; null when scipy unavailable." /></th>
             </tr>
           </thead>
           <tbody>

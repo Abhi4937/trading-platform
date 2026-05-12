@@ -1,4 +1,5 @@
 import React from 'react';
+import { InfoIcon } from './InfoIcon';
 import type { M7Summary } from '../../types/m7';
 
 export function M7HeadlineStrip({ summary, loading }: { summary: M7Summary | null; loading: boolean }) {
@@ -22,21 +23,21 @@ export function M7HeadlineStrip({ summary, loading }: { summary: M7Summary | nul
   const pnlColor = summary && summary.avg_net_pnl_usd >= 0 ? '#3fb950' : '#f85149';
   return (
     <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
-      <div style={cell}><div style={lab}>Trades</div>
+      <div style={cell}><div style={lab}>Trades <InfoIcon text="Total number of Friday→Saturday trades in the current filter view." /></div>
         <div style={val}>{loading ? '…' : (summary?.n_trades ?? 0).toLocaleString()}</div></div>
-      <div style={cell}><div style={lab}>Wins</div>
+      <div style={cell}><div style={lab}>Wins <InfoIcon text="Trades with net P&L > 0 after all costs." /></div>
         <div style={val}>{loading ? '…' : (summary?.n_wins ?? 0).toLocaleString()}</div></div>
-      <div style={cell}><div style={lab}>Win rate</div>
+      <div style={cell}><div style={lab}>Win rate <InfoIcon text="n_wins ÷ n_trades." /></div>
         <div style={{ ...val, color: winColor }}>
           {loading ? '…' : summary ? `${(summary.win_rate * 100).toFixed(1)}%` : '—'}</div></div>
-      <div style={cell}><div style={lab}>Avg net P&L</div>
+      <div style={cell}><div style={lab}>Avg net P&L <InfoIcon text="Mean net P&L per trade across the current filter view (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></div>
         <div style={{ ...val, color: pnlColor }}>
           {loading ? '…' : fmtUsd(summary?.avg_net_pnl_usd)}</div></div>
-      <div style={cell}><div style={lab}>Total net P&L</div>
+      <div style={cell}><div style={lab}>Total net P&L <InfoIcon text="Sum of net P&L across all trades in the filter." /></div>
         <div style={{ ...val, color: pnlColor }}>{loading ? '…' : fmtUsd(summary?.total_net_pnl_usd)}</div></div>
-      <div style={cell}><div style={lab}>Avg credit</div>
+      <div style={cell}><div style={lab}>Avg credit <InfoIcon text="Mean upfront credit collected per trade." /></div>
         <div style={val}>{loading ? '…' : fmtUsd(summary?.avg_credit_usd)}</div></div>
-      <div style={cell}><div style={lab}>Avg margin</div>
+      <div style={cell}><div style={lab}>Avg margin <InfoIcon text="Mean Delta Exchange portfolio margin required at entry." /></div>
         <div style={val}>{loading ? '…' : fmtUsd(summary?.avg_margin_usd)}</div></div>
     </div>
   );

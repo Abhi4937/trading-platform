@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { InfoIcon } from './InfoIcon';
 import { fetchM7IvBandSummary } from '../../services/m7_api';
 import type { M7ExitRule, M7Filters, M7IvBandSummaryRow } from '../../types/m7';
 
@@ -31,6 +32,15 @@ const usd = (v: number | null | undefined, dp = 2) =>
 const usd0 = (v: number | null | undefined) => usd(v, 0);
 const pct = (v: number | null | undefined, dp = 2) =>
   v == null || isNaN(v as number) ? '—' : `${((v as number) * 100).toFixed(dp)}%`;
+function fmtMinutes(min: number | null | undefined): string {
+  if (min == null || isNaN(min as number)) return '—';
+  const m = Math.round(min as number);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m - h * 60;
+  return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
+}
+
 const pnlColor = (v: number | null | undefined) =>
   v == null ? '#7a9bb5' : v >= 0 ? '#3fb950' : '#f85149';
 
@@ -101,60 +111,57 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
           }}>
             <thead>
               <tr style={{ textAlign: 'left' }}>
-                <th style={th}>IV band</th>
-                <th style={th}>Best entry hr</th>
-                <th style={th}>Best expiry</th>
-                <th style={th}>Best Δ</th>
-                <th style={thR}>Score</th>
-                <th style={thR}>n</th>
-                <th style={{ ...thR, color: '#3fb950' }}>n wins</th>
-                <th style={{ ...thR, color: '#f85149' }}>n loss</th>
-                <th style={thR}>SL hits</th>
-                <th style={thR}>Hard cap</th>
-                <th style={{ ...thR, color: '#f85149' }}>Max losing streak</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Max winning streak</th>
-                <th style={thR}>Max SL streak</th>
-                <th style={thR}>Win %</th>
-                <th style={thR}>Avg net</th>
-                <th style={thR}>Avg exit MTM</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Avg win (W)</th>
-                <th style={{ ...thR, color: '#f85149' }}>Avg loss (L)</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Largest win (W)</th>
-                <th style={{ ...thR, color: '#f85149' }}>Largest loss (L)</th>
+                <th style={th}>IV band <InfoIcon text="ATM IV bucket at entry hour (e.g., 0-20 = annualised IV in [0%, 20%); 100+ = ≥100%)." /></th>
+                <th style={th}>Best entry hr <InfoIcon text="Hour-of-day IST at which the cell's trades were opened (Friday). Picked per band by the chosen score." /></th>
+                <th style={th}>Best expiry <InfoIcon text="Expiry bucket — current (same Sat), next (Sun), next_to_next (Mon), weekly/biweekly/monthly." /></th>
+                <th style={th}>Best Δ <InfoIcon text="Per-leg target delta at entry. 0.50 = ATM straddle, 0.10 = far-OTM strangle." /></th>
+                <th style={thR}>Score <InfoIcon text="Cell's value of the chosen ranking metric (see metric dropdown above). The picked cell per band maxes (or mins) this." /></th>
+                <th style={thR}>n <InfoIcon text="Number of Friday trades in this cell." /></th>
+                <th style={thR}>n wins <InfoIcon text="Trades with net P&L > 0 (entry slip + brokerage + exit slip + brokerage all subtracted)." /></th>
+                <th style={thR}>n loss <InfoIcon text="Trades with net P&L ≤ 0." /></th>
+                <th style={thR}>Rule hits <InfoIcon text="Trades that exited because ANY rule fired (premium_sl OR max_profit OR margin_target). For take-profit families this INCLUDES profit-take fires — it's a 'rule triggered an exit' count, not a loss-cut count." /></th>
+                <th style={thR}>SL hits <InfoIcon text="Trades where premium-SL specifically fired (one leg's mark crossed entry × (1 + premium_sl_pct/100)). Strict loss-cut count — excludes take-profit fires." /></th>
+                <th style={thR}>Hard cap <InfoIcon text="Trades that ran past all rules and exited at Saturday 17:30 IST (settlement)." /></th>
+                <th style={thR}>Max losing streak <InfoIcon text="Longest run of consecutive losing trades when Fridays are ordered chronologically." /></th>
+                <th style={thR}>Max winning streak <InfoIcon text="Longest run of consecutive winning trades when Fridays are ordered chronologically." /></th>
+                <th style={thR}>Max rule streak <InfoIcon text="Longest run of consecutive rule-trigger exits (any rule). Companion of 'Rule hits' — includes profit-take fires." /></th>
+                <th style={thR}>Max SL streak <InfoIcon text="Longest run of consecutive trades that exited via real premium-SL (excludes take-profit fires)." /></th>
+                <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
+                <th style={thR}>Avg net <InfoIcon text="Mean net P&L per trade (all four cost components subtracted)." /></th>
+                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time MTM = mean(gross_pnl − entry costs). The on-screen P&L at the moment of exit (exit costs not deducted)." /></th>
+                <th style={thR}>Avg win (W) <InfoIcon text="Mean net P&L across winners only." /></th>
+                <th style={thR}>Avg loss (L) <InfoIcon text="Mean net P&L across losers only (negative)." /></th>
+                <th style={thR}>Largest win (W) <InfoIcon text="Max net P&L of any single winner." /></th>
+                <th style={thR}>Largest loss (L) <InfoIcon text="Min net P&L of any single loser (most negative)." /></th>
                 {/* Winners-only — exit MTM + path MTM (peak/trough) */}
-                <th style={{ ...thR, color: '#3fb950' }}>Avg win MTM</th>
-                <th style={{ ...thR, color: '#3fb950' }}
-                    title="Sum of exit-time MTM across all winning trades (entry costs only).">
-                  Total win MTM
-                </th>
-                <th style={{ ...thR, color: '#3fb950' }}>Largest win MTM</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Avg max MTM (W)</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Avg min MTM (W)</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Max MTM (W)</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Min MTM (W)</th>
-                <th style={{ ...thR, color: '#3fb950' }} title="Winners whose min MTM dipped below the group's avg min MTM (winners) — i.e. winners with a worse-than-typical drawdown">
-                  W &lt; avg min MTM
-                </th>
+                <th style={thR}>Avg win MTM <InfoIcon text="Mean exit-time MTM across winners (entry costs only)." /></th>
+                <th style={thR}>Total win MTM <InfoIcon text="Sum of exit-time MTM across all winning trades (entry costs only)." /></th>
+                <th style={thR}>Largest win MTM <InfoIcon text="Max exit-time MTM among winners." /></th>
+                <th style={thR}>Avg max MTM (W) <InfoIcon text="Mean peak MTM across winners (best unrealized point during the hold)." /></th>
+                <th style={thR}>Avg min MTM (W) <InfoIcon text="Mean trough MTM across winners — how deep winners dipped before recovering." /></th>
+                <th style={thR}>Max MTM (W) <InfoIcon text="Highest peak MTM observed across all winners." /></th>
+                <th style={thR}>Min MTM (W) <InfoIcon text="Worst trough MTM observed across all winners." /></th>
+                <th style={thR}>W &lt; avg min MTM <InfoIcon text="Count of winners whose min MTM dipped below the cell's avg min-MTM-winners — i.e. winners that endured a worse-than-typical drawdown before recovering." /></th>
                 {/* Losers-only — exit MTM + path MTM (peak/trough) */}
-                <th style={{ ...thR, color: '#f85149' }}>Avg loss MTM</th>
-                <th style={{ ...thR, color: '#f85149' }}
-                    title="Sum of exit-time MTM across all losing trades (entry costs only).">
-                  Total loss MTM
-                </th>
-                <th style={{ ...thR, color: '#f85149' }}>Largest loss MTM</th>
-                <th style={{ ...thR, color: '#f85149' }}>Avg max MTM (L)</th>
-                <th style={{ ...thR, color: '#f85149' }}>Avg min MTM (L)</th>
-                <th style={{ ...thR, color: '#f85149' }}>Max MTM (L)</th>
-                <th style={{ ...thR, color: '#f85149' }}>Min MTM (L)</th>
-                <th style={{ ...thR, color: '#f85149' }} title="Losers whose max MTM rose above the group's avg max MTM (losers) — i.e. losers that showed a better-than-typical peak before turning into losses">
-                  L &gt; avg max MTM
-                </th>
-                <th style={thR}>Avg credit</th>
-                <th style={thR}>Avg margin</th>
-                <th style={thR}>Ret/margin</th>
-                <th style={thR}>Ret/credit</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Ret/margin (W)</th>
-                <th style={{ ...thR, color: '#3fb950' }}>Ret/credit (W)</th>
+                <th style={thR}>Avg loss MTM <InfoIcon text="Mean exit-time MTM across losers (entry costs only)." /></th>
+                <th style={thR}>Total loss MTM <InfoIcon text="Sum of exit-time MTM across all losing trades (entry costs only)." /></th>
+                <th style={thR}>Largest loss MTM <InfoIcon text="Min exit-time MTM among losers." /></th>
+                <th style={thR}>Avg max MTM (L) <InfoIcon text="Mean peak MTM across losers — how high losers went before turning losing." /></th>
+                <th style={thR}>Avg min MTM (L) <InfoIcon text="Mean trough MTM across losers (worst point in the hold)." /></th>
+                <th style={thR}>Max MTM (L) <InfoIcon text="Highest peak MTM observed across all losers." /></th>
+                <th style={thR}>Min MTM (L) <InfoIcon text="Worst trough MTM observed across all losers." /></th>
+                <th style={thR}>L &gt; avg max MTM <InfoIcon text="Count of losers whose max MTM rose above the cell's avg max-MTM-losers — i.e. losers that showed a better-than-typical peak before turning into losses (missed exit opportunity)." /></th>
+                <th style={thR}>Avg credit <InfoIcon text="Mean upfront credit collected per trade." /></th>
+                <th style={thR}>Avg margin <InfoIcon text="Mean Delta Exchange portfolio margin required at entry." /></th>
+                <th style={thR}>Ret/margin <InfoIcon text="Mean per-trade net_pnl ÷ margin_at_entry. Capital efficiency view." /></th>
+                <th style={thR}>Ret/credit <InfoIcon text="Mean per-trade net_pnl ÷ credit_collected. ROI on premium captured." /></th>
+                <th style={thR}>Ret/margin (W) <InfoIcon text="Ret/margin restricted to winning trades only." /></th>
+                <th style={thR}>Ret/credit (W) <InfoIcon text="Ret/credit restricted to winning trades only." /></th>
+                <th style={thR}>Peak % <InfoIcon text="Mean of per-trade max_mtm ÷ credit. Average peak unrealized return as % of credit — shows what was theoretically achievable before exit." /></th>
+                <th style={thR}>Trough % <InfoIcon text="Mean of per-trade min_mtm ÷ credit. Average trough unrealized return as % of credit. Negative — how deep the trade dipped below water at any point." /></th>
+                <th style={thR}>Avg exit time <InfoIcon text="Mean hold time (entry → exit) across all trades, in hours and minutes." /></th>
+                <th style={thR}>Avg winner exit <InfoIcon text="Mean hold time restricted to winning trades." /></th>
+                <th style={thR}>Avg loser exit <InfoIcon text="Mean hold time restricted to losing trades." /></th>
               </tr>
             </thead>
             <tbody>
@@ -171,10 +178,12 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                   <td style={{ ...tdR, color: '#3fb950' }}>{r.n_wins ?? '—'}</td>
                   <td style={{ ...tdR, color: '#f85149' }}>{r.n_losses ?? '—'}</td>
                   <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>
+                  <td style={{ ...tdR, color: '#f85149' }}>{r.n_premium_sl_hit ?? '—'}</td>
                   <td style={{ ...tdR, color: '#7a9bb5' }}>{r.n_hard_cap ?? '—'}</td>
                   <td style={{ ...tdR, color: '#f85149' }}>{r.max_consec_losses ?? '—'}</td>
                   <td style={{ ...tdR, color: '#3fb950' }}>{r.max_consec_wins ?? '—'}</td>
                   <td style={tdR}>{r.max_consec_sl_hits ?? '—'}</td>
+                  <td style={{ ...tdR, color: '#f85149' }}>{r.max_consec_premium_sl_hits ?? '—'}</td>
                   <td style={tdR}>{pct(r.win_rate, 1)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(r.avg_net_pnl)}</td>
                   <td style={{ ...tdR, color: pnlColor(r.avg_exit_mtm) }}>{usd(r.avg_exit_mtm)}</td>
@@ -213,6 +222,21 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                   </td>
                   <td style={{ ...tdR, color: '#3fb950' }}>
                     {pct(r.avg_pct_return_on_credit_winners)}
+                  </td>
+                  <td style={{ ...tdR, color: '#3fb950' }}>
+                    {pct(r.avg_pct_max_mtm_on_credit)}
+                  </td>
+                  <td style={{ ...tdR, color: '#f85149' }}>
+                    {pct(r.avg_pct_min_mtm_on_credit)}
+                  </td>
+                  <td style={{ ...tdR, color: '#f0b300' }}>
+                    {fmtMinutes(r.avg_exit_offset_minutes)}
+                  </td>
+                  <td style={{ ...tdR, color: '#3fb950' }}>
+                    {fmtMinutes(r.avg_winner_exit_offset_minutes)}
+                  </td>
+                  <td style={{ ...tdR, color: '#f85149' }}>
+                    {fmtMinutes(r.avg_loser_exit_offset_minutes)}
                   </td>
                 </tr>
               ))}

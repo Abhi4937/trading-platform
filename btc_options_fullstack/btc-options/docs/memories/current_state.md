@@ -1,6 +1,18 @@
 # Current Project State
 
 ## Active Projects
+- **M7 capital-deployment analysis — DELIVERED (Session 20, 2026-05-12):**
+  Comprehensive 5-scenario per-cell comparison for
+  `20-30 IV × next_to_next (Mon) × Δ=0.5`. Winner identified:
+  **Setup 5 = 12am IST entry + SL100% + Fixed Exit @15:00 IST**
+  (91.7% WR, $23.46 avg P&L, smallest worst-case loss −$30.17).
+  Recommended deployment for ₹1 lakh wallet: 40% (~$480 margin / 225 lots
+  scaled from 100-lot historical) → worst-Friday loss ≈ −5.7% wallet,
+  expected ~100% wallet return over 6 months at this size. Analysis
+  output `scripts/m7_4setup_comparison.xlsx` (9 sheets, untracked).
+  No code changes — this was an analysis-only session driven by
+  `m7_results._derive_exits()` + per-trade path walks.
+
 - **M7 Full Coverage — Force-fit ⇄ Touched-band toggle SHIPPED (Session 19, 2026-05-11, committed in `cc6f313`):**
   New `coverage_mode` toggle on the M7 Full Coverage table:
   - `force_fit` (default — today's behavior): missed Fridays go into any

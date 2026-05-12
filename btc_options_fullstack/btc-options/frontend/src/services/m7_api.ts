@@ -171,10 +171,11 @@ export interface M7IvBandBestComboRow {
   max_mtm_winners: number | null;     min_mtm_winners: number | null;
   avg_max_mtm_losers: number | null;  avg_min_mtm_losers: number | null;
   max_mtm_losers: number | null;      min_mtm_losers: number | null;
-  n_rule_trigger: number | null; n_hard_cap: number | null;
+  n_rule_trigger: number | null; n_premium_sl_hit: number | null; n_hard_cap: number | null;
   n_wins: number | null; n_losses: number | null;
   max_consec_wins: number | null; max_consec_losses: number | null;
   max_consec_sl_hits: number | null;
+  max_consec_premium_sl_hits: number | null;
   n_winners_below_avg_min_mtm: number | null;
   n_losers_above_avg_max_mtm: number | null;
   // Exit-time means (NEW)
@@ -201,10 +202,13 @@ export interface M7IvBandBestComboResponse {
   n_cells?: number;
 }
 
+export type M7RuleFamily = 'all' | 'max_profit' | 'margin_target';
+
 export interface FetchBestComboArgs {
   ranking?: M7Ranking;
   secondary?: M7Ranking | null;
   tolerance_pct?: number;
+  rule_family?: M7RuleFamily;
 }
 
 export function fetchM7IvBandBestCombo(
@@ -221,6 +225,9 @@ export function fetchM7IvBandBestCombo(
     if (opts.tolerance_pct != null) {
       params.set('tolerance_pct', String(opts.tolerance_pct));
     }
+  }
+  if (opts.rule_family && opts.rule_family !== 'all') {
+    params.set('rule_family', opts.rule_family);
   }
   return jsonFetch<M7IvBandBestComboResponse>(
     `${BASE}/iv_band_best_combo?${params.toString()}`, signal);

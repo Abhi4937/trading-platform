@@ -179,8 +179,8 @@ export function M7SweepDashboard() {
 
       <M7IvBandSummaryTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
       <M7IvBandFullCoverageTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
-      <M7IvBandBestComboTable />
       <M7MissedFridaysTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
+      <M7IvBandBestComboTable />
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric} />
 
       {/* Chunk 1 — Per-leg Attribution: skew heatmap + per-trade table.

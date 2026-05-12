@@ -41,7 +41,11 @@ log = logging.getLogger(__name__)
 # Persist the final grid to disk so backend restarts skip the ~10 min rebuild.
 # Invalidated by trades-parquet mtime — when the dataset changes, the grid
 # file is recomputed.
-GRID_PARQUET_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v3.parquet")
+GRID_PARQUET_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v4.parquet")
+# v3 fallback — v4 adds n_premium_sl_hit (actual premium-SL fires, distinct
+# from any rule trigger). Load v3 while v4 is still rebuilding so the UI
+# keeps working; n_premium_sl_hit will simply be None for those cells.
+_GRID_FALLBACK_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v3.parquet")
 
 
 # ── Sweep dimensions ──────────────────────────────────────────────────────────
@@ -107,8 +111,19 @@ _METRIC_DIRECTIONS: dict[str, str] = {
     # Risk (drawdown / streaks)
     "avg_min_mtm_losers":    "max",  # negative → less negative is better
     "avg_min_mtm_winners":   "max",
+    "avg_max_mtm_losers":    "max",  # higher peak among losers = they showed more profit before turning
+    "min_mtm_losers":        "max",  # most-negative trough across all losers; less negative = better
+    "max_mtm_losers":        "max",  # highest peak across all losers
+    "avg_loss_mtm":          "max",  # less negative = better
+    "largest_loss_mtm":      "max",  # less negative = better
     "max_consec_losses":     "min",
     "max_consec_sl_hits":    "min",
+    "max_consec_premium_sl_hits": "min",  # fewer back-to-back real SL fires = better
+    "n_premium_sl_hit":      "min",  # fewer real SL fires = better
+    "n_rule_trigger":        "min",  # fewer rule-driven exits = better (loose interpretation)
+    "n_hard_cap":            "min",  # fewer "ran to settlement" trades — proxy for "rule didn't fire"
+    "n_losers_above_avg_max_mtm": "min",  # fewer missed-opportunity losers = better
+    "avg_loser_exit_offset_minutes":  "min",  # shorter loser holds = less drag time
     # Win counts
     "win_rate":              "max",
     "n_wins":                "max",
@@ -134,8 +149,9 @@ _EXTRA_METRICS = [
     "avg_win_mtm", "largest_win_mtm", "total_win_mtm",
     "avg_loss_mtm", "largest_loss_mtm", "total_loss_mtm",
     "avg_pct_max_mtm_on_credit", "avg_pct_min_mtm_on_credit",
-    "n_rule_trigger", "n_hard_cap", "n_losses", "n_wins",
-    "max_consec_losses", "max_consec_wins", "max_consec_sl_hits",
+    "n_rule_trigger", "n_premium_sl_hit", "n_hard_cap", "n_losses", "n_wins",
+    "max_consec_losses", "max_consec_wins",
+    "max_consec_sl_hits", "max_consec_premium_sl_hits",
     "n_winners_below_avg_min_mtm", "n_losers_above_avg_max_mtm",
 ]
 
@@ -312,12 +328,12 @@ def _unflatten_after_load(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _grid_cache_is_valid() -> bool:
-    """True if the parquet snapshot exists AND is newer than the trades
-    parquet (i.e. the dataset hasn't changed since we last computed)."""
-    if not os.path.exists(GRID_PARQUET_PATH):
+def _grid_path_is_valid(path: str) -> bool:
+    """True if the parquet snapshot at `path` exists AND is newer than the
+    trades parquet (i.e. the dataset hasn't changed since we last computed)."""
+    if not os.path.exists(path):
         return False
-    grid_mtime = os.path.getmtime(GRID_PARQUET_PATH)
+    grid_mtime = os.path.getmtime(path)
     trades_path = (m7r.TRADES_ENRICHED_PATH
                    if os.path.exists(m7r.TRADES_ENRICHED_PATH)
                    else m7r.TRADES_PATH)
@@ -326,17 +342,27 @@ def _grid_cache_is_valid() -> bool:
     return grid_mtime >= os.path.getmtime(trades_path)
 
 
+def _grid_cache_is_valid() -> bool:
+    """Back-compat alias — primary grid path validity."""
+    return _grid_path_is_valid(GRID_PARQUET_PATH)
+
+
 def _try_load_grid_from_disk() -> Optional[pd.DataFrame]:
-    """Load persisted grid if present and fresh; else None."""
-    if not _grid_cache_is_valid():
-        return None
-    try:
-        df = pd.read_parquet(GRID_PARQUET_PATH)
-        return _unflatten_after_load(df)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to load M7 best-combo grid from %s: %s",
-                    GRID_PARQUET_PATH, exc)
-        return None
+    """Load persisted grid if present and fresh; else None.
+
+    Tries v4 first, then v3. v3 lacks the n_premium_sl_hit column — that's
+    OK, the field flows through as None / NaN to the API consumers.
+    """
+    for path in (GRID_PARQUET_PATH, _GRID_FALLBACK_PATH):
+        if not _grid_path_is_valid(path):
+            continue
+        try:
+            df = pd.read_parquet(path)
+            return _unflatten_after_load(df)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to load M7 best-combo grid from %s: %s",
+                        path, exc)
+    return None
 
 
 def _persist_grid_to_disk(df: pd.DataFrame) -> None:
@@ -555,6 +581,21 @@ def _records(df: pd.DataFrame) -> list[dict]:
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 _VALID_RANKINGS = set(_METRIC_DIRECTIONS.keys()) | {"credit", "margin"}
+_VALID_RULE_FAMILIES = {"all", "max_profit", "margin_target"}
+
+
+def _filter_grid_by_family(grid: pd.DataFrame, rule_family: str) -> pd.DataFrame:
+    """Restrict the grid to a take-profit family before per-band picking.
+
+    'max_profit'    → only sl{X}_max_profit_{Y} rules
+    'margin_target' → only sl{X}_margin_target_{Y} rules
+    'all'           → no filter (every variant in play)
+    """
+    if rule_family == "max_profit":
+        return grid[grid["rule_label"].str.contains("_max_profit_", na=False)]
+    if rule_family == "margin_target":
+        return grid[grid["rule_label"].str.contains("_margin_target_", na=False)]
+    return grid
 
 
 @router.get("/iv_band_best_combo")
@@ -565,6 +606,8 @@ def get_iv_band_best_combo(
                                      description="Tiebreak metric. When given, cells within tolerance_pct of the per-band primary best are re-ranked by this."),
     tolerance_pct: float = Query(5.0, ge=0.0, le=100.0,
                                   description="Relative tolerance (% of |primary best|). Only used when secondary is provided."),
+    rule_family: str = Query("all",
+                             description="Restrict rule space. 'all' | 'max_profit' | 'margin_target'."),
     include_grid: bool = Query(False,
                                description="If true, also return the full grid"),
 ):
@@ -588,6 +631,9 @@ def get_iv_band_best_combo(
     if secondary is not None and secondary not in _VALID_RANKINGS:
         raise HTTPException(status_code=400,
                             detail=f"secondary must be one of {sorted(_VALID_RANKINGS)}")
+    if rule_family not in _VALID_RULE_FAMILIES:
+        raise HTTPException(status_code=400,
+                            detail=f"rule_family must be one of {sorted(_VALID_RULE_FAMILIES)}")
 
     # Try fast disk-load (idempotent — no-op if already ready).
     try_load_grid_only()
@@ -612,10 +658,13 @@ def get_iv_band_best_combo(
     if grid is None or grid.empty:
         return {"ranking": ranking, "secondary": secondary,
                 "tolerance_pct": tolerance_pct,
+                "rule_family": rule_family,
                 "status": "ready", "rows": [],
                 "n_rules": 0, "n_cells": 0}
+
+    family_grid = _filter_grid_by_family(grid, rule_family)
     best = _pick_best_per_band(
-        grid, ranking,
+        family_grid, ranking,
         secondary=secondary,
         tolerance_pct=tolerance_pct if secondary else None,
     )
@@ -624,13 +673,14 @@ def get_iv_band_best_combo(
         "ranking": ranking,
         "secondary": secondary,
         "tolerance_pct": tolerance_pct,
+        "rule_family": rule_family,
         "status": "ready",
         "rows": _records(best),
         "n_rules": len(_rule_variants()),
-        "n_cells": int(len(grid)),
+        "n_cells": int(len(family_grid)),
     }
     if include_grid:
-        payload["grid"] = _records(grid)
+        payload["grid"] = _records(family_grid)
     return payload
 
 

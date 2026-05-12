@@ -667,6 +667,26 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
     )
     merged["is_win"] = merged["net_pnl_estimate_usd"] > 0
 
+    # is_premium_sl_hit: True iff the exit fired because EITHER leg's mark
+    # crossed the premium_sl threshold (not because max_profit / margin_target
+    # / fixed_hour fired). Without this we can't disambiguate "rule trigger
+    # was a take-profit" from "rule trigger was a real stop loss".
+    if (exit_rule.get("premium_sl_pct") is not None
+            and "exit_call_mark" in merged.columns
+            and "exit_put_mark" in merged.columns
+            and "call_entry_mark" in merged.columns
+            and "put_entry_mark" in merged.columns):
+        mult = 1.0 + float(exit_rule["premium_sl_pct"]) / 100.0
+        crossed = (
+            (merged["exit_call_mark"] >= merged["call_entry_mark"] * mult)
+            | (merged["exit_put_mark"] >= merged["put_entry_mark"] * mult)
+        )
+        merged["is_premium_sl_hit"] = (
+            (merged["exit_reason"] == "rule_trigger") & crossed
+        )
+    else:
+        merged["is_premium_sl_hit"] = False
+
     # MTM (peak / trough / exit-time) reflects what's on the option mark
     # while the position is open: subtract ONLY entry slippage. Entry
     # brokerage is a flat fee charged at trade time; it doesn't change the
@@ -1422,6 +1442,9 @@ def _count_rule_trigger(g): return int((g["exit_reason"] == "rule_trigger").sum(
 def _count_hard_cap(g):     return int((g["exit_reason"] == "hard_cap").sum())
 def _count_losses(g):       return int((~g["is_win"]).sum())
 def _count_wins(g):         return int(g["is_win"].sum())
+def _count_premium_sl_hit(g):
+    # Actual premium-SL fires only (excludes take-profit rule fires).
+    return int(g["is_premium_sl_hit"].sum()) if "is_premium_sl_hit" in g.columns else 0
 
 def _max_run_length(mask: pd.Series) -> int:
     """Max consecutive run of True values in a boolean Series."""
@@ -1441,6 +1464,31 @@ def _max_consecutive_losses(g):
 def _max_consecutive_sl_hits(g):
     s = g.sort_values("friday_date_ist", kind="stable")["exit_reason"]
     return _max_run_length(s == "rule_trigger")
+
+def _max_consecutive_premium_sl_hits(g):
+    # Real premium-SL streak — excludes max_profit / margin_target rule fires.
+    if "is_premium_sl_hit" not in g.columns:
+        return 0
+    s = g.sort_values("friday_date_ist", kind="stable")["is_premium_sl_hit"]
+    return _max_run_length(s.astype(bool))
+
+def _avg_exit_offset_minutes(g):
+    # Mean hold time (entry → exit) across all trades in the group, in minutes.
+    if "exit_ts" not in g.columns or "entry_ts_utc" not in g.columns or g.empty:
+        return float("nan")
+    return float(((g["exit_ts"].astype(float) - g["entry_ts_utc"].astype(float)) / 60.0).mean())
+
+def _avg_winner_exit_offset_minutes(g):
+    winners = g[g["is_win"]]
+    if winners.empty or "exit_ts" not in winners.columns:
+        return float("nan")
+    return float(((winners["exit_ts"].astype(float) - winners["entry_ts_utc"].astype(float)) / 60.0).mean())
+
+def _avg_loser_exit_offset_minutes(g):
+    losers = g[~g["is_win"]]
+    if losers.empty or "exit_ts" not in losers.columns:
+        return float("nan")
+    return float(((losers["exit_ts"].astype(float) - losers["entry_ts_utc"].astype(float)) / 60.0).mean())
 
 def _max_consecutive_wins(g):
     s = g.sort_values("friday_date_ist", kind="stable")["is_win"]
@@ -1476,12 +1524,18 @@ def _count_cause(label: str):
 
 _SPECIAL_METRICS = {
     "n_rule_trigger": _count_rule_trigger,  # # of trades that hit any rule (SL/max-profit/margin)
+    "n_premium_sl_hit": _count_premium_sl_hit,  # # that hit premium_sl specifically (excludes take-profits)
     "n_hard_cap":     _count_hard_cap,      # # of trades that exited at Sat 17:30 (no rule fired)
     "n_losses":       _count_losses,        # # of losing trades
     "n_wins":         _count_wins,          # # of winning trades
     "max_consec_losses":  _max_consecutive_losses,   # longest streak of losing trades (chronological)
     "max_consec_wins":    _max_consecutive_wins,     # longest streak of winning trades
     "max_consec_sl_hits": _max_consecutive_sl_hits,  # longest streak of rule-triggered (SL) exits
+    "max_consec_premium_sl_hits": _max_consecutive_premium_sl_hits,  # longest streak of actual premium-SL fires
+    # Exit-time means (entry → exit hold duration, in minutes)
+    "avg_exit_offset_minutes":         _avg_exit_offset_minutes,
+    "avg_winner_exit_offset_minutes":  _avg_winner_exit_offset_minutes,
+    "avg_loser_exit_offset_minutes":   _avg_loser_exit_offset_minutes,
     "n_winners_below_avg_min_mtm": _n_winners_below_avg_min_mtm,  # winners w/ worse-than-avg drawdown
     "n_losers_above_avg_max_mtm":  _n_losers_above_avg_max_mtm,   # losers w/ better-than-avg peak
     # Loss-cause counts (Chunk 1) — # of losers in the group with each cause
@@ -1524,10 +1578,16 @@ def _round_score(metric: str, val: float) -> float:
                   "avg_pct_return_on_margin_winners", "avg_pct_return_on_credit_winners") \
             or metric.endswith("_share"):  # leg-winner outcome shares
         return round(float(val), 6)
-    if metric in ("count", "n_rule_trigger", "n_hard_cap", "n_losses", "n_wins",
-                  "max_consec_losses", "max_consec_wins", "max_consec_sl_hits",
+    if metric in ("count", "n_rule_trigger", "n_premium_sl_hit",
+                  "n_hard_cap", "n_losses", "n_wins",
+                  "max_consec_losses", "max_consec_wins",
+                  "max_consec_sl_hits", "max_consec_premium_sl_hits",
                   "n_winners_below_avg_min_mtm", "n_losers_above_avg_max_mtm"):
         return int(val)
+    if metric in ("avg_exit_offset_minutes",
+                  "avg_winner_exit_offset_minutes",
+                  "avg_loser_exit_offset_minutes"):
+        return round(float(val), 1)
     return round(float(val), 4)
 
 
@@ -1927,11 +1987,15 @@ def get_iv_band_summary(
         # Peak/trough unrealized return as % of credit
         "avg_pct_max_mtm_on_credit", "avg_pct_min_mtm_on_credit",
         # Counts
-        "n_rule_trigger", "n_hard_cap", "n_losses", "n_wins",
+        "n_rule_trigger", "n_premium_sl_hit", "n_hard_cap", "n_losses", "n_wins",
         # Streaks (chronological by friday_date_ist)
-        "max_consec_losses", "max_consec_wins", "max_consec_sl_hits",
+        "max_consec_losses", "max_consec_wins",
+        "max_consec_sl_hits", "max_consec_premium_sl_hits",
         # Outlier counts vs group-average MTM
         "n_winners_below_avg_min_mtm", "n_losers_above_avg_max_mtm",
+        # Exit-time means
+        "avg_exit_offset_minutes", "avg_winner_exit_offset_minutes",
+        "avg_loser_exit_offset_minutes",
     ]
     for m in EXTRA_METRICS:
         col = f"_{m}"

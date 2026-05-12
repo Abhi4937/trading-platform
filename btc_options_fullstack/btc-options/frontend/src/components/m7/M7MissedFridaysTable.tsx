@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { InfoIcon } from './InfoIcon';
 import { fetchM7MissedFridays } from '../../services/m7_api';
 import type { M7ExitRule, M7Filters, M7MissedFridayRow } from '../../types/m7';
 
@@ -91,20 +92,20 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
               }}>
                 <thead>
                   <tr style={{ textAlign: 'left' }}>
-                    <th style={th}>Friday</th>
-                    <th style={th}>Best entry hr</th>
-                    <th style={th}>Best expiry</th>
-                    <th style={th}>Best Δ</th>
-                    <th style={th}>IV band</th>
-                    <th style={thR}>ATM IV %</th>
-                    <th style={thR}>Net P&L</th>
-                    <th style={thR}>Exit MTM</th>
-                    <th style={thR}>Max MTM</th>
-                    <th style={thR}>Min MTM</th>
-                    <th style={thR}>Credit</th>
-                    <th style={thR}>Margin</th>
-                    <th style={th}>Win?</th>
-                    <th style={th}>Exit reason</th>
+                    <th style={th}>Friday <InfoIcon text="Friday date (IST) of the trade." /></th>
+                    <th style={th}>Best entry hr <InfoIcon text="Hour-of-day IST the trade was opened." /></th>
+                    <th style={th}>Best expiry <InfoIcon text="Expiry bucket of the strangle/straddle." /></th>
+                    <th style={th}>Best Δ <InfoIcon text="Per-leg delta target at entry." /></th>
+                    <th style={th}>IV band <InfoIcon text="ATM IV bucket the trade actually belongs to (based on entry IV)." /></th>
+                    <th style={thR}>ATM IV % <InfoIcon text="Annualised ATM IV at entry, in percent." /></th>
+                    <th style={thR}>Net P&L <InfoIcon text="Realised net P&L (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></th>
+                    <th style={thR}>Exit MTM <InfoIcon text="On-screen P&L at the moment of exit (gross − entry costs only)." /></th>
+                    <th style={thR}>Max MTM <InfoIcon text="Peak unrealized P&L during the hold (entry costs only)." /></th>
+                    <th style={thR}>Min MTM <InfoIcon text="Trough unrealized P&L during the hold (entry costs only)." /></th>
+                    <th style={thR}>Credit <InfoIcon text="Upfront credit collected at entry (call + put marks × qty × 0.001 BTC)." /></th>
+                    <th style={thR}>Margin <InfoIcon text="Delta Exchange portfolio margin required at entry (29-scenario engine)." /></th>
+                    <th style={th}>Win? <InfoIcon text="✓ if net P&L > 0, ✗ otherwise." /></th>
+                    <th style={th}>Exit reason <InfoIcon text="rule_trigger (premium_sl / max_profit / margin_target fired), fixed_hour_ist (timed exit), or hard_cap (Sat 17:30 settlement)." /></th>
                   </tr>
                 </thead>
                 <tbody>

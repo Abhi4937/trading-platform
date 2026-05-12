@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { InfoIcon } from './InfoIcon';
 import { fetchM7LegAttribution } from '../../services/m7_api';
 import type {
   M7ExitRule, M7Filters, M7LegAttributionResponse, M7LegAttributionRow,
@@ -149,31 +150,31 @@ export function M7LegAttributionTable({ filters, exitRule, onSelectTrade }: Prop
         }}>
           <thead style={{ position: 'sticky', top: 0, background: '#0d1421', zIndex: 1 }}>
             <tr style={{ color: sty.head }}>
-              <th style={{ padding: cellPad, textAlign: 'left' }}>Friday</th>
-              <th style={{ padding: cellPad, textAlign: 'left' }}>Hour</th>
-              <th style={{ padding: cellPad, textAlign: 'left' }}>Expiry</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Δ</th>
-              <th style={{ padding: cellPad, textAlign: 'left' }}>IV band</th>
-              <th style={{ padding: cellPad, textAlign: 'left' }}>Leg</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Strike</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Entry mark</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Exit mark</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Entry Δ</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Entry IV</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Leg P&L</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Leg max MTM</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Leg min MTM</th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Friday <InfoIcon text="Friday date (IST) of the trade." /></th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Hour <InfoIcon text="Hour-of-day IST the trade opened." /></th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Expiry <InfoIcon text="Expiry bucket (current/next/next_to_next/weekly/biweekly/monthly)." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Δ <InfoIcon text="Per-leg target delta at entry." /></th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>IV band <InfoIcon text="ATM IV bucket at entry hour." /></th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Leg <InfoIcon text="CE (call) or PE (put). Each trade renders as two stacked rows, one per leg." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Strike <InfoIcon text="Strike price of this leg (USD)." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Entry mark <InfoIcon text="Mid-mark of the leg at entry (USD per BTC)." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Exit mark <InfoIcon text="Mid-mark of the leg at exit (USD per BTC)." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Entry Δ <InfoIcon text="Black-Scholes delta of the leg at entry." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Entry IV <InfoIcon text="Implied volatility of the leg at entry." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Leg P&L <InfoIcon text="(entry_mark − exit_mark) × qty × 0.001 BTC. Positive = premium decayed in our favor (we sold)." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Leg max MTM <InfoIcon text="Peak unrealized P&L of this leg alone during the hold." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Leg min MTM <InfoIcon text="Trough unrealized P&L of this leg alone during the hold." /></th>
               {/* Shared (rowSpan=2) cells start here */}
-              <th style={{ padding: cellPad, textAlign: 'left' }}>Winner</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Δ skew</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>IV skew</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Prem skew</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Credit</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Margin</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Gross P&L</th>
-              <th style={{ padding: cellPad, textAlign: 'right' }}>Net P&L</th>
-              <th style={{ padding: cellPad, textAlign: 'left' }} title="What caused the loss (winners blank)">Cause</th>
-              <th style={{ padding: cellPad, textAlign: 'left' }}>Exit</th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Winner <InfoIcon text="Which leg(s) ended profitable: both / call_only / put_only / neither." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Δ skew <InfoIcon text="call_entry_delta + put_entry_delta. 0 = perfectly hedged; +ve = net long delta; −ve = net short delta." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>IV skew <InfoIcon text="(call_iv − put_iv) ÷ atm_iv. >0 = call side richer; <0 = put side richer." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Prem skew <InfoIcon text="call_entry_mark − put_entry_mark. >0 = call premium > put premium." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Credit <InfoIcon text="Upfront credit collected at entry." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Margin <InfoIcon text="Delta Exchange portfolio margin required at entry." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Gross P&L <InfoIcon text="credit − (exit_call_mark + exit_put_mark) × qty × 0.001. No costs subtracted." /></th>
+              <th style={{ padding: cellPad, textAlign: 'right' }}>Net P&L <InfoIcon text="Realised net P&L (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Cause <InfoIcon text="Auto-classified loss cause for losers (blank for winners): directional / vol_expansion / gamma_squeeze / skew_flip / path_dependent / unclassified." /></th>
+              <th style={{ padding: cellPad, textAlign: 'left' }}>Exit <InfoIcon text="Exit reason: rule_trigger (premium_sl/max_profit/margin_target fired), fixed_hour_ist, or hard_cap (Sat 17:30)." /></th>
             </tr>
           </thead>
           <tbody>

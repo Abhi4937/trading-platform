@@ -1,5 +1,96 @@
 # Claude's Work Log
 
+## Session 20 (2026-05-12) — M7 capital deployment + 5-scenario loss/target/DD comparison
+
+### Headline
+Pure analysis session — no code edits. Built a comprehensive per-cell
+comparison for the `20-30 IV × next_to_next (Mon) × Δ=0.5` cell across
+5 entry-hour × exit-rule combinations to determine the right deployment
+size for ₹1 lakh of capital and to characterize where losses come from.
+
+### Setups compared
+1. 11pm IST entry + SL100% + max_profit_20%
+2. 11pm IST entry + SL100% + max_profit_25%
+3. 12am IST entry + SL100% + max_profit_20%
+4. 12am IST entry + SL100% + max_profit_25%
+5. 12am IST entry + SL100% + Fixed Exit @15:00 IST  ← winner
+
+### Per-trade derivation
+- Used `m7_results._derive_exits({}, rule)` for each rule.
+- Filtered to the cell (entry_atm_iv_band='20-30', expiry_bucket='next_to_next (Mon)',
+  delta_target=0.5, entry_hour_ist ∈ {0, 23}).
+- Loaded per-trade path from
+  `/home/abhis/btc-data/derived/m7/m7_paths/friday_date=*/part.parquet`.
+- Used `gross_pnl_usd` for target-crossing detection (matches the
+  max_profit rule's running MTM signal — not `net_pnl_unwind_usd` which
+  includes unwind costs and runs ~$5 below gross).
+- Tracked per-trade hold duration, peak/trough timing, target-hit time,
+  max drawdown before target, capture ratio (exit / peak).
+
+### Master findings (5-scenario summary)
+
+| Setup           | n  | Hold | WR   | Avg P&L | Hit% | Hr→target | DD-before |
+|-----------------|----|------|------|---------|------|-----------|-----------|
+| 1: 11pm+20%     | 25 |  8.99| 76.0%| $13.02  | 68.0%| 7.32      | −$4.30    |
+| 2: 11pm+25%     | 25 | 12.11| 76.0%| $16.40  | 52.0%| 10.71     | −$3.67    |
+| 3: 12am+20%     | 24 | 12.24| 87.5%| $18.47  | 58.3%| 8.75      | −$5.13    |
+| 4: 12am+25%     | 24 | 14.35| 87.5%| $22.63  | 45.8%| 11.23     | −$4.23    |
+| 5: 12am+Exit@15 | 24 | 14.42| 91.7%| $23.46  | 45.8%*| 11.23    | −$4.23    |
+
+(*Setup 5 has no max_profit rule; hit-rate is theoretical "did peak ever cross 25% credit".)
+
+### Loss-timing finding
+- 11pm-entry losers (6/25): median trough at 3.8 hrs after entry =
+  ~02:48 IST. Spread across 00-06 IST and 16 IST. Only 1 of 6 troughs
+  was within the first hour of hold (the 23:00-00:00 IST window).
+- 12am-entry losers (3/24): median trough at 16.2 hrs = ~16:00 IST.
+  2 of 3 troughs landed at 16:00 IST (the late Saturday afternoon
+  US-open window).
+- Setup 5 specifically dodges the 16:00 cluster by exiting at 15:00.
+
+### Capital deployment for ₹1 lakh wallet (~$1,200 USD)
+
+Recommended: 40% deploy → ~$480 margin → ~225 lots (vs 100-lot
+historical scale) on Setup 5.
+
+| Plan | Margin | Lots | Worst-Friday loss (₹) | % wallet |
+|------|--------|------|-----------------------|----------|
+| 40%  | $480   | 225  | ≈ ₹5,650              | −5.7%    |
+| 60%  | $720   | 340  | ≈ ₹8,500              | −8.5%    |
+| 80%  | $960   | 450  | ≈ ₹11,300             | −11.3%   |
+
+Expected at 40% deploy over 24 Fridays:
+- 22 wins × ~$61 = ~+$1,339
+- 2 losses × ~$36 = ~−$72
+- Net ≈ +$1,266 ≈ ₹1,05,000 (~100% wallet return over 6 months)
+
+### Caveats
+- Sample = 24 Fridays of Setup 5 (in a small cell). Confidence interval
+  on WR is wide; a single 2025-10-10-style shock would compress P&L
+  meaningfully.
+- The 91.7% WR comes from a benign 2024-2025 regime; a vol-expansion
+  regime would degrade it.
+- Recommend going live at 40% deployment, then re-evaluating after 50+
+  live Fridays.
+
+### Output artifact
+- `scripts/m7_4setup_comparison.xlsx` (~30 KB, 9 sheets):
+  - `5_scenarios_summary` — master table
+  - `1_11pm_20%`, `2_11pm_25%`, `3_12am_20%`, `4_12am_25%`, `5_12am_Exitat15:00`
+    — per-trade detail per setup
+  - `C_MTM_capture_per_trade`, `C_MTM_capture_summary` — capture ratio
+  - `C_DD_before_target`, `C_DD_before_target_summary` — drawdown
+  - `Setup_definitions` — A/B/C/D rule cheatsheet
+- File is untracked (matches `m7_exit_rule_sweep.xlsx` /
+  `m7_iv_band_best_combo.xlsx` / `calibration_*.xlsx` convention).
+
+### No code changes this session
+The 15 modified backend/frontend files staged for the upcoming commit
+are ongoing M7 UI polish + best-combo iteration done between
+Session 19's commit and now — not from this analysis session.
+
+---
+
 ## Session 19 (2026-05-11) — Touched-band coverage toggle for M7 Full Coverage
 
 ### Headline

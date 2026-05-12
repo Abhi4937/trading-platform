@@ -3,6 +3,7 @@
 // Click a row → opens the Trade Path Chart for that Friday's trade.
 
 import React, { useEffect, useState } from 'react';
+import { InfoIcon } from './InfoIcon';
 import {
   fetchM7CellWorstFridays,
   type M7Cell,
@@ -95,15 +96,14 @@ export function M7CellWorstFridaysTable({
                       fontSize: 11, color: '#cfd9e3' }}>
         <thead>
           <tr style={{ borderBottom: '1px solid #1a2d42', color: '#7a9bb5' }}>
-            <th style={{ padding: 4, textAlign: 'left' }}>Friday</th>
-            <th style={{ padding: 4, textAlign: 'left' }}>Cause</th>
-            <th style={{ padding: 4, textAlign: 'right' }}>Net P&L</th>
-            <th style={{ padding: 4, textAlign: 'right' }}>Spot move</th>
-            <th style={{ padding: 4, textAlign: 'right' }} title="Peak ATM IV vs entry">IV peak</th>
-            <th style={{ padding: 4, textAlign: 'right' }}
-                title="Relative time (0=entry, 1=exit) when MTM hit its trough">t(min MTM)</th>
-            <th style={{ padding: 4, textAlign: 'right' }}>Max MTM</th>
-            <th style={{ padding: 4, textAlign: 'right' }}>Min MTM</th>
+            <th style={{ padding: 4, textAlign: 'left' }}>Friday <InfoIcon text="Date (IST) of the losing trade." /></th>
+            <th style={{ padding: 4, textAlign: 'left' }}>Cause <InfoIcon text="Auto-classified loss cause: directional (large spot move), vol_expansion (IV jumped at trough), gamma_squeeze (early SL + net Δ blew past entry), skew_flip (both legs lost + balance inverted), path_dependent (gave back >30% peak profit), or unclassified." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>Net P&L <InfoIcon text="Realised net P&L (all four cost components subtracted)." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>Spot move <InfoIcon text="|spot_at_min_mtm − spot_at_entry|. The dollar move that drove the trade to its trough." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>IV peak <InfoIcon text="Max ATM IV within the hold window − entry ATM IV. Positive = IV expanded during the trade (volatility-expansion losers)." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>t(min MTM) <InfoIcon text="Relative time (0 = entry, 1 = exit) when MTM hit its trough. Closer to 0 = pain came early; closer to 1 = late-trade reversal." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>Max MTM <InfoIcon text="Peak unrealized P&L during the hold (entry costs only)." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>Min MTM <InfoIcon text="Trough unrealized P&L during the hold (entry costs only)." /></th>
             <th style={{ padding: 4 }}></th>
           </tr>
         </thead>

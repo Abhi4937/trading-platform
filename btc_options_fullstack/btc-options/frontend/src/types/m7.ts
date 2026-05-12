@@ -172,6 +172,7 @@ export interface M7IvBandSummaryRow {
   total_loss_mtm?: number | null;
   // Counts
   n_rule_trigger?: number | null;
+  n_premium_sl_hit?: number | null;
   n_hard_cap?: number | null;
   n_losses?: number | null;
   n_wins?: number | null;
@@ -179,9 +180,17 @@ export interface M7IvBandSummaryRow {
   max_consec_losses?: number | null;
   max_consec_wins?: number | null;
   max_consec_sl_hits?: number | null;
+  max_consec_premium_sl_hits?: number | null;
   // Outlier counts vs group-average MTM
   n_winners_below_avg_min_mtm?: number | null;
   n_losers_above_avg_max_mtm?: number | null;
+  // Peak / trough unrealized as % of credit
+  avg_pct_max_mtm_on_credit?: number | null;
+  avg_pct_min_mtm_on_credit?: number | null;
+  // Exit-time means
+  avg_exit_offset_minutes?: number | null;
+  avg_winner_exit_offset_minutes?: number | null;
+  avg_loser_exit_offset_minutes?: number | null;
 }
 
 export interface M7BestComboRow {
