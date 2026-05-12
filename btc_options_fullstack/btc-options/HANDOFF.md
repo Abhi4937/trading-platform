@@ -2,8 +2,105 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-12 (Session 20 — M7 capital deployment + 5-scenario loss/target/DD comparison)
+**Date:** 2026-05-12 (Session 21 — Phase 0/1 backend ship for Capital-Preservation plan)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 21 highlights — Phase 0 + Phase 1 backend (frontend still pending)
+Plan: `/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md`
+Approved by user 2026-05-12; implementation in progress.
+
+**Phase 0A — Data integrity fix (NaN-gross trades dropped at aggregation):**
+- Root cause: `put_entry_mark = NaN` for some 0.10Δ trades (low-IV regimes
+  where the put strike wasn't quoted) → gross_pnl/net/MTM all NaN →
+  `is_win = NaN > 0 = False` counted as loss but mean = NaN displayed `—`.
+- Fix in 4 sites (drop trades where `gross_pnl_usd.isna()` before grouping):
+  - `m7_best_combo.py:_build_grid` (grid construction)
+  - `m7_results.py:_best_cells_for_metric` (helper used by Losses Explorer)
+  - `m7_results.py:get_iv_band_summary` (live picker)
+  - `m7_results.py:get_missed_fridays` (orphan Friday classifier)
+  - `m7_full_coverage.py:get_iv_band_full_coverage` (force-fit / touched-band)
+- VERIFIED: `/iv_band_summary` now picks `22:00 / 0.5Δ / next_to_next (Mon) /
+  n=22` for 20-30 band instead of the NaN-tainted `23:00 / 0.10Δ / n=3`.
+- Best Combo grid still serves v4 (buggy) until v6 rebuild — see Phase 2.
+
+**Phase 0B — Picker filters (no rebuild needed):**
+- `_pick_best_per_band` accepts 3 new pre-rank filters that compose AND:
+  - `min_hit_pct` (default 50): drops cells where labelled rule didn't fire
+    on ≥X% of trades. Hit % = `(n_trades − n_hard_cap) / n_trades` — counts
+    ANY non-hard-cap exit (rule_trigger, premium_sl, max_profit, margin_target,
+    fixed_hour) as effective. Set to 0 to disable.
+  - `max_loss_cap_pct`: drops cells where scaled |max_loss| × lots/100 >
+    deployable × cap%. Only effective with capital sizing on.
+  - `max_drop_peak_to_trough_pct`: drops cells where avg pct_drop > cap.
+    Only effective after v6 lands (column exists).
+- Endpoint params + payload echoes added.
+- VERIFIED with curl: 20-30 pick under `?ranking=avg_net_pnl&total_capital_usd=600&min_hit_pct=50&max_loss_cap_pct=25`
+  → `sl50_exit_hr_15` (effective fixed-hour rule), not max_profit_75.
+
+**Phase 1 backend code (lands ONE commit; rebuilds in v6):**
+- `m7_results.py:_compute_all_exits` — extended `mtm_sql` with CTE for
+  per-trade trough-ts, plus per-trade peak-before / peak-after trough
+  fields. Pandas-derived columns: `peak_before_trough_mtm`,
+  `peak_after_trough_mtm`, `rel_time_peak_before_trough`,
+  `rel_time_peak_after_trough`, `pct_drop_peak_to_trough`,
+  `pct_recovery_trough_to_peak`, `alt_net_if_exit_at_peak1`.
+- `m7_results.py:_SIMPLE_METRICS` — 11 new aggregators (peak/trough averages,
+  drop/recovery means, alt-net, `stdev_net_pnl`).
+- `m7_results.py:_SPECIAL_METRICS` — 7 new: `n_fixed_hour_ist`,
+  `stdev_losses_only`, `worst_5_avg_net`, `var_95_net`, `cvar_95_net`,
+  `max_consec_loss_dollars`, `avg_net_pnl_last_26w`, `win_rate_last_26w`.
+- `m7_results.py:_round_score` — adds rounding rules for new % and int metrics.
+- `m7_best_combo.py:_EXTRA_METRICS` — full list extended; grid build now
+  computes all new fields per cell.
+- `m7_best_combo.py:_METRIC_DIRECTIONS` — 14 new metric directions
+  (composite_score, peak/trough, sharpe/sortino/calmar, tail risk, recent_*).
+- `m7_best_combo.py:_attach_composite_score` — grid-load enrichment using
+  existing cell columns (no rebuild needed for composite_score itself).
+- `m7_best_combo.py:_attach_risk_adjusted` — grid-load Sharpe/Sortino/Calmar
+  from `stdev_net_pnl` / `stdev_losses_only` (populated after v6 rebuild).
+- `m7_best_combo.py:GRID_PARQUET_PATH` → `m7_best_combo_grid_v6.parquet`.
+  v4 stays as fallback.
+- `m7_best_combo.py` — three new endpoints:
+  - `GET /iv_band_best_combo/rule_comparison?band&expiry&Δ&hour`: all 96
+    rules at a fixed (band, expiry, delta, hour). Verified — returns 96 rows
+    sorted by hit_pct desc.
+  - `GET /iv_band_best_combo/cross_band_check?band&expiry&Δ&hour&rule`: same
+    rule across all 10 bands (regime fragility check). Verified — shows
+    `sl100_exit_hr_15 @ 0.5Δ / 00:00 IST` works in all 6 covered bands.
+  - `GET /iv_band_best_combo/single_combo_simulation?expiry&Δ&hour&rule&capital`:
+    "what if I always traded this combo?" counterfactual. Verified — that
+    combo across all bands: n=119, win=81.5%, avg=$20.38, $77.44 scaled at
+    $600 capital.
+- `build_m7_best_combo_grid.py` — docstring updated to RECOMMEND
+  `docker compose run -d --rm --name m7-grid-builder-v6 backend python -m
+  app.scripts.build_m7_best_combo_grid` (separate container — backend
+  restarts during the 14h build won't kill it).
+
+**Phase 2 — v6 grid rebuild NOT yet started.** Will be kicked off after
+the frontend lands. Backend currently serves v4 with NaN-tainted Best Combo
+aggregates (the cell-level data the grid baked in pre-fix). Live endpoints
+(`/iv_band_summary`, `/missed_fridays`, `/full_coverage`) already serve
+correctly because they apply the NaN-drop at request time.
+
+**Phase 1 frontend NOT yet started.** Pending tasks:
+- m7_api.ts: add `min_hit_pct`, `max_loss_cap_pct`, `max_drop_peak_to_trough_pct`
+  to FetchBestComboArgs; add new row-type fields; new fetch funcs for the
+  three new endpoints.
+- M7IvBandBestComboTable: Conservative preset toggle, new inputs, Hit %
+  column, new path columns, composite_score / Sharpe / Calmar / Kelly columns,
+  edge-stability badges.
+- New M7RuleComparisonModal component.
+- Friday Coverage drilldown UI (Features A/B/C from plan).
+
+### Plan-file location
+`/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md` (1450+ lines).
+Full context including Hybrid Rule options (C now / B Phase 2 / A Phase 3),
+rebuild execution model (separate container), 34-test verification protocol.
+
+---
+
+## Session 20 (prior — analysis only)
+**Date:** 2026-05-12 (Session 20 — M7 capital deployment + 5-scenario loss/target/DD comparison)
 
 ### Session 20 highlights (analysis-only, no code changes)
 - **5-scenario per-cell comparison** for `20-30 IV × next_to_next (Mon) × Δ=0.5`:

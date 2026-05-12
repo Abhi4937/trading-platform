@@ -41,11 +41,13 @@ log = logging.getLogger(__name__)
 # Persist the final grid to disk so backend restarts skip the ~10 min rebuild.
 # Invalidated by trades-parquet mtime — when the dataset changes, the grid
 # file is recomputed.
-GRID_PARQUET_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v4.parquet")
-# v3 fallback — v4 adds n_premium_sl_hit (actual premium-SL fires, distinct
-# from any rule trigger). Load v3 while v4 is still rebuilding so the UI
-# keeps working; n_premium_sl_hit will simply be None for those cells.
-_GRID_FALLBACK_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v3.parquet")
+# v6 adds path peak-trough-peak fields, risk-adjusted metrics, tail risk
+# (VaR/CVaR), drawdown sequence, edge stability — and bakes in the Phase 0A
+# NaN-gross drop so cells reflect only valid strangle trades.
+GRID_PARQUET_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v6.parquet")
+# v4 fallback — load v4 while v6 is still rebuilding so the UI keeps
+# working; new v6 columns will simply be None for those cells.
+_GRID_FALLBACK_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v4.parquet")
 
 
 # ── Sweep dimensions ──────────────────────────────────────────────────────────
@@ -110,10 +112,40 @@ _METRIC_DIRECTIONS: dict[str, str] = {
     "avg_pct_min_mtm_on_credit": "max",  # trough as % credit (less negative better)
     # Risk (drawdown / streaks)
     "avg_min_mtm_losers":    "max",  # negative → less negative is better
-    "avg_min_mtm_winners":   "max",
+    "avg_min_mtm_winners":   "max",  # winners' avg trough — drawdown winners endured
+    "min_mtm_winners":       "max",  # worst trough across any winner — deepest pain a winner endured
     "avg_max_mtm_losers":    "max",  # higher peak among losers = they showed more profit before turning
     "min_mtm_losers":        "max",  # most-negative trough across all losers; less negative = better
     "max_mtm_losers":        "max",  # highest peak across all losers
+    # Overall (all-trades) MTM composites — derived at grid-load time
+    "avg_min_mtm":           "max",  # weighted mean of avg_min_mtm_winners and avg_min_mtm_losers
+    "min_mtm":               "max",  # worst trough across any trade in cell
+    "avg_max_mtm":           "max",  # weighted mean peak across all trades
+    "max_mtm":               "max",  # best peak across any trade in cell
+    # Composite — derived at grid-load time
+    "composite_score":       "max",  # win_rate × ret_on_credit ÷ (1 + |avg_min_mtm|/avg_credit)
+    # Path peak-trough-peak (v6 — cell aggregates of per-trade path fields)
+    "avg_peak_before_trough": "max",  # higher peak-1 = more profit ridden before turn
+    "avg_peak_after_trough":  "max",  # higher peak-2 = stronger recovery
+    "avg_pct_drop_peak_to_trough":   "min",  # smaller drop = less stress
+    "avg_pct_recovery_trough_to_peak": "max",  # bigger recovery = more bounce
+    "avg_alt_net_if_exit_at_peak1":  "max",  # bigger alt-net = more left on the table by actual exit
+    # Risk-adjusted (v6 — computed at grid-load from stdev_net_pnl / stdev_losses_only)
+    "sharpe_per_trade":      "max",  # avg_net / stdev_net
+    "sortino_per_trade":     "max",  # avg_net / stdev_losses_only
+    "calmar_like":           "max",  # avg_net / |max_loss|
+    # Tail-risk (v6 — special metrics aggregated at grid build)
+    "worst_5_avg_net":       "max",  # mean of 5 worst trades; less-negative = better
+    "var_95_net":            "max",  # 5th percentile; less-negative = better
+    "cvar_95_net":           "max",  # expected loss in tail; less-negative = better
+    # Drawdown sequence
+    "max_consec_loss_dollars": "max",  # negative $; less-negative = better
+    # Edge stability (v6)
+    "avg_net_pnl_last_26w":  "max",
+    "win_rate_last_26w":     "max",
+    # Fixed-hour exit count (v6 — separate from rule_trigger / hard_cap)
+    "n_fixed_hour_ist":      "max",  # higher = rule was time-driven (deterministic)
+    "stdev_net_pnl":         "min",  # lower vol = better consistency
     "avg_loss_mtm":          "max",  # less negative = better
     "largest_loss_mtm":      "max",  # less negative = better
     "max_consec_losses":     "min",
@@ -153,6 +185,20 @@ _EXTRA_METRICS = [
     "max_consec_losses", "max_consec_wins",
     "max_consec_sl_hits", "max_consec_premium_sl_hits",
     "n_winners_below_avg_min_mtm", "n_losers_above_avg_max_mtm",
+    # v6 additions — path peak-trough-peak (cells from new _SIMPLE_METRICS)
+    "avg_peak_before_trough", "avg_peak_after_trough",
+    "avg_rel_time_peak_before", "avg_rel_time_peak_after",
+    "avg_rel_time_trough", "avg_rel_time_peak",
+    "avg_pct_drop_peak_to_trough", "avg_pct_recovery_trough_to_peak",
+    "avg_alt_net_if_exit_at_peak1",
+    # v6 — risk-adjusted base columns
+    "stdev_net_pnl", "stdev_losses_only",
+    # v6 — tail risk / drawdown sequence / edge stability
+    "worst_5_avg_net", "var_95_net", "cvar_95_net",
+    "max_consec_loss_dollars",
+    "avg_net_pnl_last_26w", "win_rate_last_26w",
+    # v6 — fixed-hour exit counter
+    "n_fixed_hour_ist",
 ]
 
 
@@ -252,11 +298,18 @@ def _build_grid(progress_cb=None) -> pd.DataFrame:
             progress_cb(i + 1, len(variants))
 
         if derived is not None and not derived.empty:
+            # Drop trades with NaN gross_pnl — these are missing-leg-quote
+            # trades (e.g. 0.10Δ put unpriced at entry) that aren't valid
+            # strangles. Keeping them propagates NaN into cell aggregates:
+            # is_win = NaN>0 = False (counted as loss) but mean/std are NaN
+            # (displayed as —). Drop them so n_trades reflects only valid
+            # observations.
             keep = derived[
                 derived["entry_atm_iv_band"].notna()
                 & derived["expiry_bucket"].notna()
                 & derived["delta_target"].notna()
                 & derived["entry_hour_ist"].notna()
+                & derived["gross_pnl_usd"].notna()
             ]
             if not keep.empty:
                 grouped = keep.groupby(
@@ -347,18 +400,115 @@ def _grid_cache_is_valid() -> bool:
     return _grid_path_is_valid(GRID_PARQUET_PATH)
 
 
+def _enrich_grid_with_overall_mtm(df: pd.DataFrame) -> pd.DataFrame:
+    """Add 'overall' (all-trades) MTM aggregates derived from per-side fields.
+
+    These are mathematically exact composites of existing cell columns, so we
+    can attach them at load time instead of requiring a v6 grid rebuild:
+
+        avg_min_mtm = (avg_min_mtm_winners × n_wins + avg_min_mtm_losers × n_losses) / n_trades
+        avg_max_mtm = (avg_max_mtm_winners × n_wins + avg_max_mtm_losers × n_losses) / n_trades
+        min_mtm     = min(min_mtm_winners, min_mtm_losers)   — worst trough across any trade
+        max_mtm     = max(max_mtm_winners, max_mtm_losers)   — best peak across any trade
+
+    Skips cells where the required components are missing (cell has no
+    winners or no losers — falls back to whichever side has data).
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    n_w = pd.to_numeric(out.get("n_wins"), errors="coerce").fillna(0)
+    n_l = pd.to_numeric(out.get("n_losses"), errors="coerce").fillna(0)
+    n_t = pd.to_numeric(out.get("n_trades"), errors="coerce").replace(0, np.nan)
+    a_min_w = pd.to_numeric(out.get("avg_min_mtm_winners"), errors="coerce")
+    a_min_l = pd.to_numeric(out.get("avg_min_mtm_losers"),  errors="coerce")
+    a_max_w = pd.to_numeric(out.get("avg_max_mtm_winners"), errors="coerce")
+    a_max_l = pd.to_numeric(out.get("avg_max_mtm_losers"),  errors="coerce")
+    # Weighted mean — fill missing side with 0× weight = 0 contribution.
+    out["avg_min_mtm"] = (a_min_w.fillna(0) * n_w + a_min_l.fillna(0) * n_l) / n_t
+    out["avg_max_mtm"] = (a_max_w.fillna(0) * n_w + a_max_l.fillna(0) * n_l) / n_t
+    m_min_w = pd.to_numeric(out.get("min_mtm_winners"), errors="coerce")
+    m_min_l = pd.to_numeric(out.get("min_mtm_losers"),  errors="coerce")
+    m_max_w = pd.to_numeric(out.get("max_mtm_winners"), errors="coerce")
+    m_max_l = pd.to_numeric(out.get("max_mtm_losers"),  errors="coerce")
+    out["min_mtm"] = pd.concat([m_min_w, m_min_l], axis=1).min(axis=1, skipna=True)
+    out["max_mtm"] = pd.concat([m_max_w, m_max_l], axis=1).max(axis=1, skipna=True)
+    return out
+
+
+def _attach_composite_score(df: pd.DataFrame) -> pd.DataFrame:
+    """Composite-score column for capital-preservation ranking.
+
+        composite_score = win_rate × avg_pct_return_on_credit
+                          ÷ (1 + |avg_min_mtm| / avg_credit)
+
+    All inputs are existing cell columns (overall avg_min_mtm comes from
+    `_enrich_grid_with_overall_mtm` — call this AFTER that). Cells with
+    n_losses=0 have avg_min_mtm=NaN, in which case the dd penalty is
+    treated as 0 (no drawdown to penalise → composite = win_rate × ret).
+
+    Higher = better risk-adjusted edge. Returns a NEW frame with
+    `composite_score` column attached.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    def _series(col):
+        if col not in out.columns:
+            return pd.Series([np.nan] * len(out), index=out.index)
+        return pd.to_numeric(out[col], errors="coerce")
+    wr = _series("win_rate")
+    ret = _series("avg_pct_return_on_credit")
+    dd = _series("avg_min_mtm").abs()
+    cr = _series("avg_credit").replace(0, np.nan)
+    dd_norm = (dd / cr).fillna(0.0)
+    out["composite_score"] = wr * ret / (1.0 + dd_norm)
+    return out
+
+
+def _attach_risk_adjusted(df: pd.DataFrame) -> pd.DataFrame:
+    """Risk-adjusted ratios — computed at grid-load time when v6 columns exist.
+
+        sharpe_per_trade  = avg_net_pnl / stdev_net_pnl  (full-distribution vol)
+        sortino_per_trade = avg_net_pnl / stdev_losses_only  (downside vol)
+        calmar_like       = avg_net_pnl / |max_loss_usd|  (return per unit of worst-case)
+
+    Returns ratios as None when denominator is 0 or missing (avoids div-by-zero
+    on single-trade or no-loss cells).
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    def _series(col):
+        if col not in out.columns:
+            return pd.Series([np.nan] * len(out), index=out.index)
+        return pd.to_numeric(out[col], errors="coerce")
+    avg = _series("avg_net_pnl")
+    std = _series("stdev_net_pnl").replace(0, np.nan)
+    std_l = _series("stdev_losses_only").replace(0, np.nan)
+    ml = _series("max_loss_usd").abs().replace(0, np.nan)
+    out["sharpe_per_trade"] = avg / std
+    out["sortino_per_trade"] = avg / std_l
+    out["calmar_like"] = avg / ml
+    return out
+
+
 def _try_load_grid_from_disk() -> Optional[pd.DataFrame]:
     """Load persisted grid if present and fresh; else None.
 
-    Tries v4 first, then v3. v3 lacks the n_premium_sl_hit column — that's
-    OK, the field flows through as None / NaN to the API consumers.
+    Tries v6 first, then v4. v4 lacks path peak-trough-peak / risk-adjusted
+    columns — those flow through as None / NaN. After load we enrich with
+    overall (all-trades) MTM composites AND composite score.
     """
     for path in (GRID_PARQUET_PATH, _GRID_FALLBACK_PATH):
         if not _grid_path_is_valid(path):
             continue
         try:
             df = pd.read_parquet(path)
-            return _unflatten_after_load(df)
+            df = _unflatten_after_load(df)
+            df = _enrich_grid_with_overall_mtm(df)
+            df = _attach_composite_score(df)
+            return _attach_risk_adjusted(df)
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to load M7 best-combo grid from %s: %s",
                         path, exc)
@@ -474,12 +624,69 @@ def _idx_best(series: pd.Series, direction: str) -> int:
     return series.idxmin() if direction == "min" else series.idxmax()
 
 
+def _attach_lots_column(
+    grid: pd.DataFrame,
+    total_capital_usd: Optional[float],
+    pct_deploy: float,
+    dd_metric: Optional[str],
+    dd_threshold: Optional[float],
+) -> pd.DataFrame:
+    """Compute per-cell `lots` given capital + optional drawdown constraint.
+
+    Backtester sized every trade at 100 lots; cell metrics are mean/sum/etc.
+    over those 100-lot trades. Portfolio margin engine is linear in qty:
+    margin(N) = margin(100) × N/100 exactly. So:
+
+      lots_from_margin = floor(deployable_capital × 100 / avg_margin)
+      lots_from_dd     = floor(|dd_threshold| × 100 / |dd_metric_per_100|)
+      lots             = max(0, min(lots_from_margin, lots_from_dd))
+
+    Where deployable_capital = total_capital_usd × pct_deploy / 100.
+
+    If `total_capital_usd` is None or non-positive, `lots = 100` (unscaled —
+    metrics displayed as the backtester baseline). Returns a copy of `grid`
+    with `_lots` column attached.
+    """
+    out = grid.copy()
+    if total_capital_usd is None or total_capital_usd <= 0:
+        out["_lots"] = 100  # backtester baseline → no scaling
+        return out
+
+    deployable = float(total_capital_usd) * max(0.0, float(pct_deploy)) / 100.0
+    BIG = 10 ** 9  # effectively-infinite cap when a constraint isn't set
+    am = out["avg_margin"].astype(float) if "avg_margin" in out.columns else None
+    if am is None:
+        out["_lots"] = 0
+        return out
+    lots_margin = np.where(am > 0, np.floor(deployable * 100.0 / am.where(am > 0, 1.0)), 0)
+
+    if dd_metric and dd_threshold is not None and dd_metric in out.columns:
+        # Drawdown constraint — abs-value comparison so a negative threshold
+        # (e.g. avg_loss = −$100) works the same as a positive one.
+        mv = out[dd_metric].astype(float).abs()
+        thr = abs(float(dd_threshold))
+        lots_dd = np.where(mv > 0, np.floor(thr * 100.0 / mv.where(mv > 0, 1.0)), BIG)
+    else:
+        lots_dd = BIG
+
+    lots = np.minimum(lots_margin, lots_dd)
+    out["_lots"] = np.clip(lots, 0, None).astype(int)
+    return out
+
+
 def _pick_best_per_band(
     grid: pd.DataFrame,
     ranking: str,
     *,
     secondary: Optional[str] = None,
     tolerance_pct: Optional[float] = None,
+    total_capital_usd: Optional[float] = None,
+    pct_deploy: float = 100.0,
+    dd_metric: Optional[str] = None,
+    dd_threshold: Optional[float] = None,
+    min_hit_pct: Optional[float] = 50.0,
+    max_loss_cap_pct: Optional[float] = None,
+    max_drop_peak_to_trough_pct: Optional[float] = None,
 ) -> pd.DataFrame:
     """For each IV band, pick one cell.
 
@@ -492,13 +699,82 @@ def _pick_best_per_band(
     differs from the best by ≤ 5% of |best|. This works across metric units
     (USD, %, counts) without unit-specific logic.
 
+    Filters applied BEFORE ranking (compose with AND):
+    - `min_hit_pct` (default 50): drop cells where the labelled rule didn't
+      fire on ≥ X% of trades. Hit % = (n_trades − n_hard_cap) / n_trades,
+      which counts ANY deterministic non-hard-cap exit (rule_trigger,
+      premium_sl, max_profit, margin_target, fixed_hour) as "effective".
+      Set to 0 to disable.
+    - `max_loss_cap_pct`: when capital sizing is on, drop cells whose
+      scaled |max_loss| × lots/100 > deployable × cap%.
+    - `max_drop_peak_to_trough_pct`: drop cells whose avg peak→trough
+      drop exceeds this fraction. Only effective after v6 grid (column
+      `avg_pct_drop_peak_to_trough` exists).
+
     NO n-gate — every band that has any cells shows up.
     """
     primary_col = _resolve_metric(ranking)
     if grid.empty or primary_col not in grid.columns:
         return grid.iloc[0:0]
+
+    # Hit-% filter — done FIRST, before any sizing so it composes uniformly.
+    if min_hit_pct is not None and float(min_hit_pct) > 0 and "n_hard_cap" in grid.columns and "n_trades" in grid.columns:
+        n_tr = grid["n_trades"].astype(float)
+        nhc = grid["n_hard_cap"].astype(float)
+        # Effective hit % = fraction of trades that exited via a deterministic
+        # firing (rule_trigger, premium_sl_hit, max_profit, margin_target,
+        # fixed_hour). Hard-cap exits are the complement.
+        eff_hit = np.where(n_tr > 0, (n_tr - nhc) / n_tr * 100.0, 0.0)
+        grid = grid[eff_hit >= float(min_hit_pct)].copy()
+        if grid.empty:
+            return grid.iloc[0:0]
+
+    # Peak→trough hard filter (only after v6 grid lands).
+    if (max_drop_peak_to_trough_pct is not None
+            and float(max_drop_peak_to_trough_pct) > 0
+            and "avg_pct_drop_peak_to_trough" in grid.columns):
+        cap = float(max_drop_peak_to_trough_pct) / 100.0
+        drop_col = grid["avg_pct_drop_peak_to_trough"].astype(float)
+        # Keep cells where drop is unknown (NaN — pre-v6) OR within cap.
+        grid = grid[drop_col.isna() | (drop_col <= cap)].copy()
+        if grid.empty:
+            return grid.iloc[0:0]
+
+    # Capital-sizing: compute per-cell `lots` and re-rank on the scaled
+    # primary metric (primary × lots/100) when capital is provided. Cells
+    # where lots == 0 (margin too high or DD constraint blocks them) drop
+    # out of contention because their scaled primary is 0.
+    sizing_active = total_capital_usd is not None and total_capital_usd > 0
+    if sizing_active:
+        grid = _attach_lots_column(
+            grid, total_capital_usd, pct_deploy, dd_metric, dd_threshold,
+        )
+        # Max-loss cap — drop cells where scaled |max_loss| exceeds the cap.
+        if (max_loss_cap_pct is not None
+                and float(max_loss_cap_pct) > 0
+                and "max_loss_usd" in grid.columns):
+            deployable = float(total_capital_usd) * max(0.0, float(pct_deploy)) / 100.0
+            cap_dollars = deployable * float(max_loss_cap_pct) / 100.0
+            scaled_max_loss = (grid["max_loss_usd"].astype(float).abs()
+                               * grid["_lots"].astype(float) / 100.0)
+            # NaN max_loss → drop (we don't know the worst-case loss; can't
+            # certify it's within budget). This complements the upstream
+            # NaN-gross drop in _build_grid.
+            grid = grid[scaled_max_loss.notna() & (scaled_max_loss <= cap_dollars)].copy()
+            if grid.empty:
+                return grid.iloc[0:0]
+        # Build a scaled-primary column for ranking. Primary metric in $ or %
+        # scales linearly with lots; we use that for re-rank only — original
+        # per-100 columns stay untouched in `grid` for downstream display.
+        scaled_col = "_scaled_primary"
+        grid[scaled_col] = grid[primary_col].astype(float) * grid["_lots"] / 100.0
+        ranking_col_for_pick = scaled_col
+    else:
+        grid["_lots"] = 100  # baseline → no scaling factor
+        ranking_col_for_pick = primary_col
+
     primary_dir = _METRIC_DIRECTIONS.get(primary_col, "max")
-    valid = grid.dropna(subset=[primary_col])
+    valid = grid.dropna(subset=[ranking_col_for_pick])
     if valid.empty:
         return grid.iloc[0:0]
 
@@ -520,24 +796,22 @@ def _pick_best_per_band(
         if sub.empty:
             continue
         if not use_tiebreak:
-            idx = _idx_best(sub[primary_col], primary_dir)
+            idx = _idx_best(sub[ranking_col_for_pick], primary_dir)
             rows.append(sub.loc[idx])
             continue
         # Tiebreak: filter to within-tolerance of band's best, then pick by secondary.
-        best_val = (sub[primary_col].min() if primary_dir == "min"
-                    else sub[primary_col].max())
+        # Tolerance is computed on the *picking* column (scaled primary when
+        # sizing is active, plain primary otherwise).
+        best_val = (sub[ranking_col_for_pick].min() if primary_dir == "min"
+                    else sub[ranking_col_for_pick].max())
         if best_val is None or pd.isna(best_val):
             continue
-        # Use absolute-value of best as the relative-tolerance reference.
-        # If best is 0, fall back to a small absolute epsilon to avoid
-        # matching everything.
         denom = abs(float(best_val)) if best_val != 0 else 1e-9
-        delta = abs(sub[primary_col].astype(float) - float(best_val))
+        delta = abs(sub[ranking_col_for_pick].astype(float) - float(best_val))
         within = sub[(delta / denom) * 100.0 <= float(tolerance_pct)]
         sub_for_secondary = within.dropna(subset=[secondary_col])
         if sub_for_secondary.empty:
-            # Fall back to plain primary best when the secondary is missing.
-            idx = _idx_best(sub[primary_col], primary_dir)
+            idx = _idx_best(sub[ranking_col_for_pick], primary_dir)
             rows.append(sub.loc[idx])
             continue
         idx = _idx_best(sub_for_secondary[secondary_col], secondary_dir)
@@ -546,9 +820,14 @@ def _pick_best_per_band(
     if not rows:
         return valid.iloc[0:0]
     best = pd.DataFrame(rows).copy()
-    best["score"] = best[primary_col]
+    best["score"] = best[primary_col]  # report ORIGINAL per-100-lot primary
     if use_tiebreak and secondary_col is not None:
         best["secondary_score"] = best[secondary_col]
+    if "_lots" in best.columns:
+        best["lots"] = best["_lots"].astype(int)
+        best = best.drop(columns=["_lots"])
+    if "_scaled_primary" in best.columns:
+        best = best.drop(columns=["_scaled_primary"])
     best = best.sort_values(
         "iv_band",
         key=lambda s: s.map(_band_sort_key),
@@ -608,6 +887,20 @@ def get_iv_band_best_combo(
                                   description="Relative tolerance (% of |primary best|). Only used when secondary is provided."),
     rule_family: str = Query("all",
                              description="Restrict rule space. 'all' | 'max_profit' | 'margin_target'."),
+    total_capital_usd: Optional[float] = Query(None, ge=0,
+                                                description="Total deployable USD capital. When provided, per-cell lots is computed and the primary metric is re-ranked on the scaled-by-lots value."),
+    pct_deploy: float = Query(100.0, ge=0, le=100,
+                              description="Percent of total_capital_usd actually deployed (default 100). Deployable = capital × pct/100."),
+    dd_metric: Optional[str] = Query(None,
+                                      description="Optional drawdown-constraint metric (e.g. avg_loss_usd, avg_min_mtm_losers, max_loss_usd). Cell's per-100-lot value × lots/100 must be ≤ |dd_threshold|."),
+    dd_threshold: Optional[float] = Query(None,
+                                           description="Threshold for dd_metric (absolute value used for comparison). Lots are capped so the cell's scaled dd_metric stays within this."),
+    min_hit_pct: float = Query(50.0, ge=0.0, le=100.0,
+                                description="Filter out cells where the labelled rule didn't fire on ≥ X% of trades (effective hit % = (n_trades − n_hard_cap) / n_trades). Default 50 — set to 0 to disable."),
+    max_loss_cap_pct: Optional[float] = Query(None, ge=0.0, le=100.0,
+                                              description="When capital sizing is on, drop cells whose scaled |max_loss| × lots/100 exceeds this fraction of deployable capital."),
+    max_drop_peak_to_trough_pct: Optional[float] = Query(None, ge=0.0, le=100.0,
+                                                         description="Drop cells whose avg peak→trough drop exceeds this %. Effective after v6 grid lands (column avg_pct_drop_peak_to_trough)."),
     include_grid: bool = Query(False,
                                description="If true, also return the full grid"),
 ):
@@ -667,6 +960,13 @@ def get_iv_band_best_combo(
         family_grid, ranking,
         secondary=secondary,
         tolerance_pct=tolerance_pct if secondary else None,
+        total_capital_usd=total_capital_usd,
+        pct_deploy=pct_deploy,
+        dd_metric=dd_metric,
+        dd_threshold=dd_threshold,
+        min_hit_pct=min_hit_pct,
+        max_loss_cap_pct=max_loss_cap_pct,
+        max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
     )
 
     payload = {
@@ -674,6 +974,13 @@ def get_iv_band_best_combo(
         "secondary": secondary,
         "tolerance_pct": tolerance_pct,
         "rule_family": rule_family,
+        "total_capital_usd": total_capital_usd,
+        "pct_deploy": pct_deploy,
+        "dd_metric": dd_metric,
+        "dd_threshold": dd_threshold,
+        "min_hit_pct": min_hit_pct,
+        "max_loss_cap_pct": max_loss_cap_pct,
+        "max_drop_peak_to_trough_pct": max_drop_peak_to_trough_pct,
         "status": "ready",
         "rows": _records(best),
         "n_rules": len(_rule_variants()),
@@ -694,4 +1001,177 @@ def get_iv_band_best_combo_status():
         "started_at": _GRID_STATE["started_at"],
         "finished_at": _GRID_STATE["finished_at"],
         "error": _GRID_STATE["error"],
+    }
+
+
+# ── Diagnostic endpoints ──────────────────────────────────────────────────────
+
+
+@router.get("/iv_band_best_combo/rule_comparison")
+def get_rule_comparison(
+    band: str = Query(..., description="IV band, e.g. '20-30'"),
+    expiry_bucket: str = Query(..., description="Expiry bucket label"),
+    delta_target: float = Query(..., ge=0.0, le=1.0),
+    entry_hour_ist: int = Query(..., ge=0, le=23),
+):
+    """Return all rule variants for a fixed (band, expiry, delta, hour) cell.
+    Power-user view — lets the trader see what the picker chose vs alternatives.
+    """
+    try_load_grid_only()
+    if _GRID_STATE["status"] != "ready":
+        return {"rows": [], "status": _GRID_STATE["status"]}
+    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if grid is None or grid.empty:
+        return {"rows": [], "status": "empty"}
+    sub = grid[
+        (grid["iv_band"] == band)
+        & (grid["expiry_bucket"] == expiry_bucket)
+        & (np.isclose(grid["delta_target"].astype(float), float(delta_target), atol=0.001))
+        & (grid["entry_hour_ist"] == int(entry_hour_ist))
+    ].copy()
+    if sub.empty:
+        return {"rows": [], "status": "ready", "band": band,
+                "expiry_bucket": expiry_bucket,
+                "delta_target": delta_target,
+                "entry_hour_ist": entry_hour_ist}
+    # Add hit_pct = (n_trades - n_hard_cap) / n_trades for sortable column.
+    n_tr = sub["n_trades"].astype(float)
+    nhc = sub["n_hard_cap"].astype(float)
+    sub["hit_pct"] = np.where(n_tr > 0, (n_tr - nhc) / n_tr, np.nan)
+    sub = sub.sort_values(["hit_pct", "avg_net_pnl"], ascending=[False, False])
+    return {
+        "rows": _records(sub),
+        "status": "ready",
+        "band": band,
+        "expiry_bucket": expiry_bucket,
+        "delta_target": delta_target,
+        "entry_hour_ist": entry_hour_ist,
+        "n_rules": int(len(sub)),
+    }
+
+
+@router.get("/iv_band_best_combo/cross_band_check")
+def get_cross_band_check(
+    band: str = Query(..., description="The picked cell's band (e.g. '0-20')"),
+    expiry_bucket: str = Query(..., description="The picked cell's expiry bucket"),
+    delta_target: float = Query(..., ge=0.0, le=1.0),
+    entry_hour_ist: int = Query(..., ge=0, le=23),
+    rule_label: str = Query(..., description="Rule label of the picked cell, e.g. sl75_max_profit_25"),
+):
+    """For the picked cell (rule + entry_hour + expiry + delta), compute
+    its P&L decomposed by which IV band each Friday's actual entry IV landed
+    in. Answers 'does this combo's rule generalise across IV regimes?'
+    """
+    try_load_grid_only()
+    if _GRID_STATE["status"] != "ready":
+        return {"rows": [], "status": _GRID_STATE["status"]}
+    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if grid is None or grid.empty:
+        return {"rows": [], "status": "empty"}
+    # Same (expiry, delta, hour, rule) — all 10 bands' cells.
+    sub = grid[
+        (grid["expiry_bucket"] == expiry_bucket)
+        & (np.isclose(grid["delta_target"].astype(float), float(delta_target), atol=0.001))
+        & (grid["entry_hour_ist"] == int(entry_hour_ist))
+        & (grid["rule_label"] == rule_label)
+    ].copy()
+    if sub.empty:
+        return {"rows": [], "status": "ready"}
+    sub = sub.sort_values("iv_band", key=lambda s: s.map(_band_sort_key))
+    return {
+        "rows": _records(sub),
+        "status": "ready",
+        "picked_band": band,
+        "expiry_bucket": expiry_bucket,
+        "delta_target": delta_target,
+        "entry_hour_ist": entry_hour_ist,
+        "rule_label": rule_label,
+    }
+
+
+@router.get("/iv_band_best_combo/single_combo_simulation")
+def get_single_combo_simulation(
+    expiry_bucket: str = Query(...),
+    delta_target: float = Query(..., ge=0.0, le=1.0),
+    entry_hour_ist: int = Query(..., ge=0, le=23),
+    rule_label: str = Query(...),
+    total_capital_usd: Optional[float] = Query(None, ge=0.0),
+    pct_deploy: float = Query(100.0, ge=0.0, le=100.0),
+):
+    """Counterfactual: what if every Friday traded this single combo regardless
+    of IV regime? Aggregates the picked combo's cells across ALL bands and
+    returns one combined headline.
+    """
+    try_load_grid_only()
+    if _GRID_STATE["status"] != "ready":
+        return {"status": _GRID_STATE["status"]}
+    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if grid is None or grid.empty:
+        return {"status": "empty"}
+    sub = grid[
+        (grid["expiry_bucket"] == expiry_bucket)
+        & (np.isclose(grid["delta_target"].astype(float), float(delta_target), atol=0.001))
+        & (grid["entry_hour_ist"] == int(entry_hour_ist))
+        & (grid["rule_label"] == rule_label)
+    ].copy()
+    if sub.empty:
+        return {"status": "ready", "summary": None,
+                "expiry_bucket": expiry_bucket, "delta_target": delta_target,
+                "entry_hour_ist": entry_hour_ist, "rule_label": rule_label}
+    # Combine cells across all bands: weighted avg by n_trades, sum for
+    # *_total and *_count metrics, min/max for extremes.
+    n_tot = float(sub["n_trades"].sum())
+    if n_tot == 0:
+        return {"status": "ready", "summary": None}
+    def _w_mean(col):
+        if col not in sub.columns:
+            return None
+        vals = pd.to_numeric(sub[col], errors="coerce")
+        w = sub["n_trades"].astype(float)
+        mask = vals.notna() & (w > 0)
+        if not mask.any():
+            return None
+        return float((vals[mask] * w[mask]).sum() / w[mask].sum())
+    def _w_sum(col):
+        if col not in sub.columns:
+            return None
+        vals = pd.to_numeric(sub[col], errors="coerce")
+        return float(vals.sum())
+    summary = {
+        "n_trades": int(n_tot),
+        "n_wins": _w_sum("n_wins"),
+        "n_losses": _w_sum("n_losses"),
+        "win_rate": _w_mean("win_rate"),
+        "avg_net_pnl": _w_mean("avg_net_pnl"),
+        "total_net_pnl": _w_sum("avg_net_pnl") and _w_mean("avg_net_pnl") and (_w_mean("avg_net_pnl") * n_tot),
+        "avg_credit": _w_mean("avg_credit"),
+        "avg_margin": _w_mean("avg_margin"),
+        "max_loss_usd": float(sub["max_loss_usd"].min()) if "max_loss_usd" in sub.columns else None,
+        "n_rule_trigger": _w_sum("n_rule_trigger"),
+        "n_hard_cap": _w_sum("n_hard_cap"),
+        "avg_pct_return_on_credit": _w_mean("avg_pct_return_on_credit"),
+        "composite_score": _w_mean("composite_score"),
+        "sharpe_per_trade": _w_mean("sharpe_per_trade"),
+        "n_bands_covered": int(sub["iv_band"].nunique()),
+    }
+    # Optional scaling by capital.
+    if total_capital_usd is not None and total_capital_usd > 0:
+        deployable = float(total_capital_usd) * max(0.0, float(pct_deploy)) / 100.0
+        avg_margin = summary.get("avg_margin")
+        if avg_margin and avg_margin > 0:
+            lots = int(np.floor(deployable * 100.0 / avg_margin))
+            summary["lots"] = lots
+            summary["scaled_avg_net_pnl"] = summary["avg_net_pnl"] * lots / 100.0 if summary["avg_net_pnl"] is not None else None
+            summary["scaled_total_net_pnl"] = summary["total_net_pnl"] * lots / 100.0 if summary["total_net_pnl"] is not None else None
+            summary["scaled_max_loss_usd"] = summary["max_loss_usd"] * lots / 100.0 if summary["max_loss_usd"] is not None else None
+    return {
+        "status": "ready",
+        "summary": summary,
+        "per_band_breakdown": _records(sub.sort_values("iv_band", key=lambda s: s.map(_band_sort_key))),
+        "expiry_bucket": expiry_bucket,
+        "delta_target": delta_target,
+        "entry_hour_ist": entry_hour_ist,
+        "rule_label": rule_label,
+        "total_capital_usd": total_capital_usd,
+        "pct_deploy": pct_deploy,
     }

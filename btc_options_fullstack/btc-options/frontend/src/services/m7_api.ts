@@ -182,6 +182,42 @@ export interface M7IvBandBestComboRow {
   avg_exit_offset_minutes: number | null;
   avg_winner_exit_offset_minutes: number | null;
   avg_loser_exit_offset_minutes: number | null;
+  // Capital sizing — server-computed lots given total_capital / pct_deploy / DD constraint.
+  // 100 (= backtester baseline) when no sizing params were sent.
+  lots?: number | null;
+  // v6 — composite + overall-MTM (grid-load enrichments, available even on v4 fallback)
+  composite_score?: number | null;
+  avg_min_mtm?: number | null;
+  avg_max_mtm?: number | null;
+  min_mtm?: number | null;
+  max_mtm?: number | null;
+  // v6 — path peak-trough-peak (NaN on v4 fallback)
+  avg_peak_before_trough?: number | null;
+  avg_peak_after_trough?: number | null;
+  avg_rel_time_peak_before?: number | null;
+  avg_rel_time_peak_after?: number | null;
+  avg_rel_time_trough?: number | null;
+  avg_rel_time_peak?: number | null;
+  avg_pct_drop_peak_to_trough?: number | null;
+  avg_pct_recovery_trough_to_peak?: number | null;
+  avg_alt_net_if_exit_at_peak1?: number | null;
+  // v6 — risk-adjusted (grid-load from stdev cols, NaN on v4)
+  stdev_net_pnl?: number | null;
+  stdev_losses_only?: number | null;
+  sharpe_per_trade?: number | null;
+  sortino_per_trade?: number | null;
+  calmar_like?: number | null;
+  // v6 — tail risk
+  worst_5_avg_net?: number | null;
+  var_95_net?: number | null;
+  cvar_95_net?: number | null;
+  // v6 — drawdown sequence
+  max_consec_loss_dollars?: number | null;
+  // v6 — edge stability
+  avg_net_pnl_last_26w?: number | null;
+  win_rate_last_26w?: number | null;
+  // v6 — fixed-hour exit counter (separate from rule_trigger / hard_cap)
+  n_fixed_hour_ist?: number | null;
 }
 
 // Any of the metric keys backend exposes via _METRIC_DIRECTIONS, plus
@@ -209,6 +245,14 @@ export interface FetchBestComboArgs {
   secondary?: M7Ranking | null;
   tolerance_pct?: number;
   rule_family?: M7RuleFamily;
+  total_capital_usd?: number | null;
+  pct_deploy?: number;
+  dd_metric?: string | null;
+  dd_threshold?: number | null;
+  // Phase 0/1 — picker filters
+  min_hit_pct?: number | null;            // default 50; 0 disables
+  max_loss_cap_pct?: number | null;       // drop cells where scaled |max_loss| > cap%
+  max_drop_peak_to_trough_pct?: number | null;  // drop cells where avg drop > cap (v6 only)
 }
 
 export function fetchM7IvBandBestCombo(
@@ -229,8 +273,146 @@ export function fetchM7IvBandBestCombo(
   if (opts.rule_family && opts.rule_family !== 'all') {
     params.set('rule_family', opts.rule_family);
   }
+  if (opts.total_capital_usd != null && opts.total_capital_usd > 0) {
+    params.set('total_capital_usd', String(opts.total_capital_usd));
+    if (opts.pct_deploy != null) {
+      params.set('pct_deploy', String(opts.pct_deploy));
+    }
+    if (opts.dd_metric && opts.dd_threshold != null) {
+      params.set('dd_metric', opts.dd_metric);
+      params.set('dd_threshold', String(opts.dd_threshold));
+    }
+  }
+  // Picker filters
+  if (opts.min_hit_pct != null) {
+    params.set('min_hit_pct', String(opts.min_hit_pct));
+  }
+  if (opts.max_loss_cap_pct != null) {
+    params.set('max_loss_cap_pct', String(opts.max_loss_cap_pct));
+  }
+  if (opts.max_drop_peak_to_trough_pct != null) {
+    params.set('max_drop_peak_to_trough_pct', String(opts.max_drop_peak_to_trough_pct));
+  }
   return jsonFetch<M7IvBandBestComboResponse>(
     `${BASE}/iv_band_best_combo?${params.toString()}`, signal);
+}
+
+// ── New diagnostic endpoints (Phase 1) ────────────────────────────────────────
+
+export interface M7RuleComparisonRow extends M7IvBandBestComboRow {
+  hit_pct?: number | null;  // (n_trades - n_hard_cap) / n_trades
+}
+
+export interface M7RuleComparisonResponse {
+  rows: M7RuleComparisonRow[];
+  status: string;
+  band?: string;
+  expiry_bucket?: string;
+  delta_target?: number;
+  entry_hour_ist?: number;
+  n_rules?: number;
+}
+
+export function fetchM7RuleComparison(args: {
+  band: string;
+  expiry_bucket: string;
+  delta_target: number;
+  entry_hour_ist: number;
+}, signal?: AbortSignal): Promise<M7RuleComparisonResponse> {
+  const p = new URLSearchParams({
+    band: args.band,
+    expiry_bucket: args.expiry_bucket,
+    delta_target: String(args.delta_target),
+    entry_hour_ist: String(args.entry_hour_ist),
+  });
+  return jsonFetch<M7RuleComparisonResponse>(
+    `${BASE}/iv_band_best_combo/rule_comparison?${p}`, signal);
+}
+
+export interface M7CrossBandCheckResponse {
+  rows: M7IvBandBestComboRow[];
+  status: string;
+  picked_band?: string;
+  expiry_bucket?: string;
+  delta_target?: number;
+  entry_hour_ist?: number;
+  rule_label?: string;
+}
+
+export function fetchM7CrossBandCheck(args: {
+  band: string;
+  expiry_bucket: string;
+  delta_target: number;
+  entry_hour_ist: number;
+  rule_label: string;
+}, signal?: AbortSignal): Promise<M7CrossBandCheckResponse> {
+  const p = new URLSearchParams({
+    band: args.band,
+    expiry_bucket: args.expiry_bucket,
+    delta_target: String(args.delta_target),
+    entry_hour_ist: String(args.entry_hour_ist),
+    rule_label: args.rule_label,
+  });
+  return jsonFetch<M7CrossBandCheckResponse>(
+    `${BASE}/iv_band_best_combo/cross_band_check?${p}`, signal);
+}
+
+export interface M7SingleComboSummary {
+  n_trades: number;
+  n_wins: number | null;
+  n_losses: number | null;
+  win_rate: number | null;
+  avg_net_pnl: number | null;
+  total_net_pnl: number | null;
+  avg_credit: number | null;
+  avg_margin: number | null;
+  max_loss_usd: number | null;
+  n_rule_trigger: number | null;
+  n_hard_cap: number | null;
+  avg_pct_return_on_credit: number | null;
+  composite_score: number | null;
+  sharpe_per_trade: number | null;
+  n_bands_covered: number;
+  lots?: number;
+  scaled_avg_net_pnl?: number | null;
+  scaled_total_net_pnl?: number | null;
+  scaled_max_loss_usd?: number | null;
+}
+
+export interface M7SingleComboSimulationResponse {
+  status: string;
+  summary: M7SingleComboSummary | null;
+  per_band_breakdown?: M7IvBandBestComboRow[];
+  expiry_bucket?: string;
+  delta_target?: number;
+  entry_hour_ist?: number;
+  rule_label?: string;
+  total_capital_usd?: number | null;
+  pct_deploy?: number;
+}
+
+export function fetchM7SingleComboSimulation(args: {
+  expiry_bucket: string;
+  delta_target: number;
+  entry_hour_ist: number;
+  rule_label: string;
+  total_capital_usd?: number | null;
+  pct_deploy?: number;
+}, signal?: AbortSignal): Promise<M7SingleComboSimulationResponse> {
+  const p = new URLSearchParams({
+    expiry_bucket: args.expiry_bucket,
+    delta_target: String(args.delta_target),
+    entry_hour_ist: String(args.entry_hour_ist),
+    rule_label: args.rule_label,
+  });
+  if (args.total_capital_usd != null && args.total_capital_usd > 0) {
+    p.set('total_capital_usd', String(args.total_capital_usd));
+    if (args.pct_deploy != null) {
+      p.set('pct_deploy', String(args.pct_deploy));
+    }
+  }
+  return jsonFetch<M7SingleComboSimulationResponse>(
+    `${BASE}/iv_band_best_combo/single_combo_simulation?${p}`, signal);
 }
 
 // ── Loss-anatomy: Chunk 3 — per-cell winners-vs-losers ─────────────────────

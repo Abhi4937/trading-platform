@@ -15,7 +15,9 @@
 // while warming the API returns 202-style {status:"warming", rules_done…}.
 
 import React, { useEffect, useState } from 'react';
+import { M7RuleComparisonModal } from './M7RuleComparisonModal';
 import { InfoIcon } from './InfoIcon';
+import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import {
   fetchM7IvBandBestCombo,
   type FetchBestComboArgs,
@@ -27,7 +29,7 @@ import {
 
 // ── Metric catalog ──────────────────────────────────────────────────────────
 
-type MetricFmt = 'usd' | 'usd0' | 'pct' | 'count';
+type MetricFmt = 'usd' | 'usd0' | 'pct' | 'count' | 'num';
 
 interface MetricDef {
   key: string;
@@ -38,6 +40,15 @@ interface MetricDef {
 }
 
 const PRIMARY_GROUPS: { label: string; metrics: MetricDef[] }[] = [
+  {
+    label: 'Composite',
+    metrics: [
+      { key: 'composite_score', label: 'Composite score', fmt: 'num',  goodIsHigh: true },
+      { key: 'sharpe_per_trade', label: 'Sharpe (per trade)', fmt: 'num', goodIsHigh: true },
+      { key: 'sortino_per_trade', label: 'Sortino (per trade)', fmt: 'num', goodIsHigh: true },
+      { key: 'calmar_like',     label: 'Calmar (avg_net/|max_loss|)', fmt: 'num', goodIsHigh: true },
+    ],
+  },
   {
     label: 'P&L (net of all costs)',
     metrics: [
@@ -96,12 +107,26 @@ const SECONDARY_GROUPS: { label: string; metrics: MetricDef[] }[] = [
     ],
   },
   {
-    label: 'Drawdown depth',
+    label: 'Drawdown depth (losers)',
     metrics: [
       { key: 'avg_min_mtm_losers',        label: 'Avg min MTM (losers)', fmt: 'usd', goodIsHigh: true },
       { key: 'min_mtm_losers',            label: 'Min MTM (losers)',     fmt: 'usd', goodIsHigh: true },
       { key: 'avg_max_mtm_losers',        label: 'Avg max MTM (losers)', fmt: 'usd', goodIsHigh: true },
       { key: 'avg_pct_min_mtm_on_credit', label: 'Trough %',             fmt: 'pct', goodIsHigh: true },
+    ],
+  },
+  {
+    label: 'Drawdown depth (winners — pain endured before recovering)',
+    metrics: [
+      { key: 'avg_min_mtm_winners',       label: 'Avg min MTM (winners)', fmt: 'usd', goodIsHigh: true },
+      { key: 'min_mtm_winners',           label: 'Min MTM (winners)',     fmt: 'usd', goodIsHigh: true },
+    ],
+  },
+  {
+    label: 'Drawdown depth (overall — across all trades)',
+    metrics: [
+      { key: 'avg_min_mtm',                label: 'Avg min MTM (overall)', fmt: 'usd', goodIsHigh: true },
+      { key: 'min_mtm',                    label: 'Min MTM (overall)',     fmt: 'usd', goodIsHigh: true },
     ],
   },
   {
@@ -150,12 +175,16 @@ const pct = (v: number | null | undefined, dp = 2) =>
 const cnt = (v: number | null | undefined) =>
   v == null || isNaN(v as number) ? '—' : String(Math.round(v as number));
 
+const num = (v: number | null | undefined, dp = 3) =>
+  v == null || isNaN(v as number) ? '—' : (v as number).toFixed(dp);
+
 function fmtByType(v: number | null | undefined, t: MetricFmt): string {
   switch (t) {
     case 'usd':   return usd(v);
     case 'usd0':  return usd0(v);
     case 'pct':   return pct(v);
     case 'count': return cnt(v);
+    case 'num':   return num(v);
   }
 }
 
@@ -169,6 +198,23 @@ function fmtMinutes(min: number | null | undefined): string {
   const h = Math.floor(m / 60);
   const rem = m - h * 60;
   return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
+}
+
+// Format avg exit time as IST clock + hold duration in brackets.
+// Trade entered at `entry_hour_ist:00` IST on Friday; after `durationMin`
+// minutes of hold, IST clock at exit = (entry_hour_ist*60 + durationMin) mod 1440.
+function fmtExitClock(
+  entryHourIst: number | null | undefined,
+  durationMin: number | null | undefined,
+): string {
+  if (entryHourIst == null || durationMin == null || isNaN(durationMin as number)) return '—';
+  const totalMin = (entryHourIst as number) * 60 + (durationMin as number);
+  // Normalize into 0–1440 (clock minutes within a day), wrapping at day boundary.
+  const mod = ((Math.round(totalMin) % 1440) + 1440) % 1440;
+  const hh = Math.floor(mod / 60);
+  const mm = mod - hh * 60;
+  const clock = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  return `${clock} (${fmtMinutes(durationMin)})`;
 }
 
 // Rule labels follow the format `sl{X}_{family}_{Y}`.
@@ -263,17 +309,67 @@ export function M7IvBandBestComboTable() {
     () => loadLS('secondary', 'avg_min_mtm_losers'));
   const [tolerancePct, setTolerancePct] = useState<number>(
     () => loadLS('tolerance', 5));
+  // Sizing mode: "capital" (default) lets capital + deploy% + optional DD cap
+  // drive per-band lot count (varies). "lots" pins a fixed lot count for all
+  // bands (no re-rank — constant scale doesn't change ranking).
+  const [sizingMode, setSizingMode] = useState<'capital' | 'lots'>(
+    () => loadLS('sizing_mode', 'capital'));
+  // Fixed lot count used when sizingMode === 'lots'. Default 100 (backtester baseline).
+  const [fixedLots, setFixedLots] = useState<number>(
+    () => loadLS('fixed_lots', 100));
+  // Total deployable capital (USD). Per band, max lots = floor(capital * 100 / avg_margin)
+  // since the backtester sized every trade at QTY_LOTS = 100. Same capital across
+  // bands lets you compare what lot count each combo gets, then mentally multiply
+  // the per-100-lot P&L numbers by lots/100.
+  const [totalCapitalUsd, setTotalCapitalUsd] = useState<number>(
+    () => loadLS('total_capital_usd', 1000));
+  // % of total_capital actually deployed (default 100%).
+  const [pctDeploy, setPctDeploy] = useState<number>(
+    () => loadLS('pct_deploy', 100));
+  // Drawdown constraint metric (null = no DD constraint).
+  const [ddMetric, setDdMetric] = useState<string | null>(
+    () => loadLS('dd_metric', null));
+  // Threshold for the DD metric. The cell's per-100-lot value is scaled by
+  // lots/100; we cap lots so |scaled value| ≤ |dd_threshold|.
+  const [ddThreshold, setDdThreshold] = useState<number>(
+    () => loadLS('dd_threshold', 100));
+  // Phase 0/1 picker filters
+  // min_hit_pct: drop cells where (n_trades - n_hard_cap) / n_trades < X%.
+  // Default 50 — set to 0 to disable.
+  const [minHitPct, setMinHitPct] = useState<number>(
+    () => loadLS('min_hit_pct', 50));
+  // max_loss_cap_pct: drop cells where scaled |max_loss| × lots/100 > capital × X%.
+  const [maxLossCapPct, setMaxLossCapPct] = useState<number | null>(
+    () => loadLS('max_loss_cap_pct', null));
+  // max_drop_peak_to_trough_pct: drop cells where avg peak→trough drop > X%.
+  // Effective after v6 grid lands (column exists). Pre-v6 the filter is a no-op.
+  const [maxDropPct, setMaxDropPct] = useState<number | null>(
+    () => loadLS('max_drop_pct', null));
 
   const [resp, setResp] = useState<M7IvBandBestComboResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Rule comparison modal — opens on row click
+  const [drilldown, setDrilldown] = useState<{
+    band: string; expiry_bucket: string; delta_target: number;
+    entry_hour_ist: number; rule_label: string;
+  } | null>(null);
 
   // Persist state changes
-  useEffect(() => { saveLS('primary',      primary);      }, [primary]);
-  useEffect(() => { saveLS('family',       family);       }, [family]);
-  useEffect(() => { saveLS('modeByFamily', modeByFamily); }, [modeByFamily]);
-  useEffect(() => { saveLS('secondary',    secondary);    }, [secondary]);
-  useEffect(() => { saveLS('tolerance',    tolerancePct); }, [tolerancePct]);
+  useEffect(() => { saveLS('primary',           primary);         }, [primary]);
+  useEffect(() => { saveLS('family',            family);          }, [family]);
+  useEffect(() => { saveLS('modeByFamily',      modeByFamily);    }, [modeByFamily]);
+  useEffect(() => { saveLS('secondary',         secondary);       }, [secondary]);
+  useEffect(() => { saveLS('tolerance',         tolerancePct);    }, [tolerancePct]);
+  useEffect(() => { saveLS('total_capital_usd', totalCapitalUsd); }, [totalCapitalUsd]);
+  useEffect(() => { saveLS('pct_deploy',        pctDeploy);       }, [pctDeploy]);
+  useEffect(() => { saveLS('dd_metric',         ddMetric);        }, [ddMetric]);
+  useEffect(() => { saveLS('dd_threshold',      ddThreshold);     }, [ddThreshold]);
+  useEffect(() => { saveLS('sizing_mode',       sizingMode);      }, [sizingMode]);
+  useEffect(() => { saveLS('fixed_lots',        fixedLots);       }, [fixedLots]);
+  useEffect(() => { saveLS('min_hit_pct',       minHitPct);       }, [minHitPct]);
+  useEffect(() => { saveLS('max_loss_cap_pct',  maxLossCapPct);   }, [maxLossCapPct]);
+  useEffect(() => { saveLS('max_drop_pct',      maxDropPct);      }, [maxDropPct]);
 
   useEffect(() => {
     let active = true;
@@ -287,6 +383,26 @@ export function M7IvBandBestComboTable() {
       if (mode === 'tiebreak') {
         args.secondary = secondary;
         args.tolerance_pct = tolerancePct;
+      }
+      // Send capital params only in 'capital' mode. In 'lots' mode we keep
+      // the backend's 100-lot baseline pick (constant scale = same ranking)
+      // and apply the fixed-lot multiplier client-side.
+      if (sizingMode === 'capital' && totalCapitalUsd > 0) {
+        args.total_capital_usd = totalCapitalUsd;
+        args.pct_deploy = pctDeploy;
+        if (ddMetric && ddThreshold > 0) {
+          args.dd_metric = ddMetric;
+          args.dd_threshold = ddThreshold;
+        }
+      }
+      // Picker filters — always send (server defaults to 50 if absent, but we
+      // want explicit control from UI state, including "disabled" = 0).
+      args.min_hit_pct = minHitPct;
+      if (maxLossCapPct != null && maxLossCapPct > 0 && sizingMode === 'capital') {
+        args.max_loss_cap_pct = maxLossCapPct;
+      }
+      if (maxDropPct != null && maxDropPct > 0) {
+        args.max_drop_peak_to_trough_pct = maxDropPct;
       }
       fetchM7IvBandBestCombo(args, ac.signal)
         .then(r => {
@@ -302,7 +418,10 @@ export function M7IvBandBestComboTable() {
     tick();
 
     return () => { active = false; ac.abort(); };
-  }, [primary, family, mode, secondary, tolerancePct]);
+  }, [primary, family, mode, secondary, tolerancePct,
+      sizingMode, fixedLots,
+      totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
+      minHitPct, maxLossCapPct, maxDropPct]);
 
   const isWarming = resp?.status === 'warming';
   const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
@@ -424,12 +543,155 @@ export function M7IvBandBestComboTable() {
               </select>
             </>
           )}
+          {/* Sizing-mode toggle: Capital → backend re-ranks on scaled total,
+              Lots → fixed lot count for all bands, no re-rank (constant scale). */}
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Size by:</span>
+          <div style={{
+            display: 'inline-flex', border: '1px solid #1a2d42', borderRadius: 4,
+            overflow: 'hidden',
+          }}
+            title="Capital → enter $ capital and the backend picks the best combo per band that maximises scaled total at that capital (lot count varies per band, low-margin combos win). Lots → enter a fixed lot count; ranking stays at the 100-lot baseline and all $ values scale by lots/100.">
+            {(['capital', 'lots'] as const).map(m => (
+              <button key={m}
+                onClick={() => setSizingMode(m)}
+                style={{
+                  padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+                  background: sizingMode === m ? '#1f6feb' : 'transparent',
+                  color: sizingMode === m ? '#fff' : '#cfd9e3',
+                  border: 'none',
+                }}>
+                {m === 'capital' ? 'Capital' : 'Lots'}
+              </button>
+            ))}
+          </div>
+          {/* Capital-mode inputs (greyed when sizing by Lots). */}
+          <span style={{ fontSize: 11, color: sizingMode === 'lots' ? '#3a4a5a' : '#7a9bb5' }}>Capital $</span>
+          <input
+            type="number" min={0} step={50}
+            value={totalCapitalUsd}
+            disabled={sizingMode === 'lots'}
+            onChange={e => setTotalCapitalUsd(Math.max(0, Number(e.target.value) || 0))}
+            style={{ ...inputStyle, width: 80, opacity: sizingMode === 'lots' ? 0.4 : 1 }}
+            title="Total USD capital. Disabled when sizing by Lots." />
+          <span style={{ fontSize: 11, color: sizingMode === 'lots' ? '#3a4a5a' : '#7a9bb5' }}>× Deploy</span>
+          <input
+            type="number" min={0} max={100} step={5}
+            value={pctDeploy}
+            disabled={sizingMode === 'lots'}
+            onChange={e => setPctDeploy(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+            style={{ ...inputStyle, width: 55, opacity: sizingMode === 'lots' ? 0.4 : 1 }}
+            title="Percent of total capital to deploy. Disabled when sizing by Lots." />
+          <span style={{ fontSize: 11, color: sizingMode === 'lots' ? '#3a4a5a' : '#7a9bb5' }}>%, DD cap</span>
+          <select
+            value={ddMetric ?? ''}
+            disabled={sizingMode === 'lots'}
+            onChange={e => setDdMetric(e.target.value || null)}
+            style={{ ...selectStyle, minWidth: 130, opacity: sizingMode === 'lots' ? 0.4 : 1 }}
+            title="Optional drawdown-cap metric. Disabled when sizing by Lots.">
+            <option value="">— none —</option>
+            {SECONDARY_GROUPS.map(g => (
+              <optgroup key={g.label} label={g.label}>
+                {g.metrics.map(md => (
+                  <option key={md.key} value={md.key}>{md.label}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          {ddMetric && sizingMode === 'capital' && (
+            <input
+              type="number" min={0} step={10}
+              value={ddThreshold}
+              onChange={e => setDdThreshold(Math.max(0, Number(e.target.value) || 0))}
+              style={{ ...inputStyle, width: 70 }}
+              title="DD threshold (absolute USD or %)." />
+          )}
+          {/* Lots-mode input (greyed when sizing by Capital). */}
+          <span style={{ fontSize: 11, color: sizingMode === 'capital' ? '#3a4a5a' : '#7a9bb5' }}>Lots</span>
+          <input
+            type="number" min={1} step={10}
+            value={fixedLots}
+            disabled={sizingMode === 'capital'}
+            onChange={e => setFixedLots(Math.max(1, Number(e.target.value) || 1))}
+            style={{ ...inputStyle, width: 70, opacity: sizingMode === 'capital' ? 0.4 : 1 }}
+            title="Fixed lot count applied to every band. All $ cells scale by lots/100. Best-combo ranking stays at the per-100-lot baseline (constant scale doesn't change which cell wins). Default 100 (backtester baseline)." />
+          {/* Phase 0/1 picker filters */}
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Hit % ≥</span>
+          <input
+            type="number" min={0} max={100} step={5}
+            value={minHitPct}
+            onChange={e => setMinHitPct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+            style={{ ...inputStyle, width: 55 }}
+            title="Drop cells where the labelled rule fires on less than X% of trades. Hit % = (n_trades − n_hard_cap) / n_trades. Counts ANY non-hard-cap exit (rule_trigger, premium_sl, max_profit, margin_target, fixed_hour) as effective. Default 50 — set to 0 to disable." />
+          <span style={{ fontSize: 11, color: sizingMode === 'lots' ? '#3a4a5a' : '#7a9bb5' }}>Max loss %</span>
+          <input
+            type="number" min={0} max={100} step={5}
+            placeholder="off"
+            value={maxLossCapPct ?? ''}
+            disabled={sizingMode === 'lots'}
+            onChange={e => {
+              const v = e.target.value;
+              setMaxLossCapPct(v === '' ? null : Math.max(0, Math.min(100, Number(v) || 0)));
+            }}
+            style={{ ...inputStyle, width: 55, opacity: sizingMode === 'lots' ? 0.4 : 1 }}
+            title="Drop cells where scaled |max_loss| × lots/100 exceeds X% of deployable capital. Effective only with Capital sizing on. Leave blank to disable." />
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Max drop %</span>
+          <input
+            type="number" min={0} max={100} step={5}
+            placeholder="off"
+            value={maxDropPct ?? ''}
+            onChange={e => {
+              const v = e.target.value;
+              setMaxDropPct(v === '' ? null : Math.max(0, Math.min(100, Number(v) || 0)));
+            }}
+            style={{ ...inputStyle, width: 55 }}
+            title="Drop cells where avg pct_drop_peak_to_trough > X%. Effective after v6 grid lands (column exists). Leave blank to disable." />
+          {/* Conservative preset */}
+          <button
+            onClick={() => {
+              setSizingMode('capital');
+              setTotalCapitalUsd(600);
+              setPctDeploy(100);
+              setPrimary('composite_score');
+              setDdMetric('avg_min_mtm');
+              setDdThreshold(30);
+              setMinHitPct(50);
+              setMaxLossCapPct(25);
+              setMaxDropPct(30);
+              setModeByFamily(prev => ({ ...prev, [family]: 'pure' }));
+            }}
+            style={{
+              padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+              background: '#1a3d2a', color: '#3fb950',
+              border: '1px solid #3fb950', borderRadius: 4,
+              fontWeight: 700,
+            }}
+            title="Sets: Capital $600, Deploy 100%, Composite score primary, DD cap avg_min_mtm @ $30, Max loss 25%, Max drop 30%, Hit % ≥ 50, Pure mode. Picker chooses bounded-drawdown, rule-effective combos.">
+            ◇ Conservative
+          </button>
           <div style={{ fontSize: 11, color: '#7a9bb5' }}>
             {err ? <span style={{ color: '#f85149' }}>{err}</span>
               : isWarming ? `Warming ${resp?.rules_done ?? 0}/${resp?.rules_total ?? 96} rules…`
               : loading ? 'Loading…'
               : `${rows.length} bands`}
           </div>
+          <ExcelButton
+            disabled={rows.length === 0}
+            title="Download the rows shown above as an .xlsx file. Numbers are exported in their raw (per-100-lot) form plus a 'lots' and 'scale_factor' column for downstream scaling in Excel."
+            onClick={() => {
+              const tag = `${primary}_${family}${mode === 'tiebreak' ? `_tie_${secondary}` : ''}`;
+              const filename = `m7_best_combo_${tag}.xlsx`;
+              // Flatten the rule dict into separate columns; otherwise pass-through.
+              const flat = rows.map(r => ({
+                ...r,
+                rule_premium_sl_pct: r.rule?.premium_sl_pct ?? null,
+                rule_max_profit_pct: r.rule?.max_profit_pct ?? null,
+                rule_margin_target_pct: r.rule?.margin_target_pct ?? null,
+                rule_fixed_exit_hour_ist: r.rule?.fixed_exit_hour_ist ?? null,
+                scale_factor: (r.lots ?? 100) / 100,
+                rule: undefined,  // drop nested object — xlsx can't serialize it
+              }));
+              exportRowsAsXlsx(filename, 'BestCombo', flat);
+            }} />
         </div>
       </div>
 
@@ -461,151 +723,225 @@ export function M7IvBandBestComboTable() {
           }}>
             <thead>
               <tr style={{ textAlign: 'left' }}>
+                {/* — Identity — */}
                 <th style={th}>IV band <InfoIcon text="ATM IV bucket at entry hour. 0-20 = annualized IV in [0%, 20%); 20-30 = [20%, 30%); …; 100+ = ≥ 100%." /></th>
                 <th style={th}>Best entry hr <InfoIcon text="Hour-of-day IST when the trade was opened (Friday). The grid is swept per entry hour; this column shows the hour that won for this band." /></th>
                 <th style={th}>Best expiry <InfoIcon text="Expiry bucket: current = same Saturday settlement; next = following Sunday; next_to_next = following Monday; weekly/biweekly/monthly = standard Delta expiries." /></th>
                 <th style={th}>Best Δ <InfoIcon text="Target delta of each strangle/straddle leg at entry. 0.50 = ATM, 0.10 = OTM." /></th>
                 <th style={th}>Exit rule <InfoIcon text="Combined exit predicate (OR-of-clauses). SL{X} = premium stop-loss at X% (one leg's mark ≥ entry × (1+X/100)). MaxProfit Y% = exit when total MTM ≥ Y% of credit. MarginTgt Y% = exit when total MTM ≥ Y% of margin (take-profit). Exit @HH:MM = fixed Saturday IST exit. Whichever fires first wins; if none fires the trade rides to Sat 17:30 settlement (hard cap)." /></th>
+
+                {/* — Score — */}
                 <th style={thR}>{primaryDef.label} <InfoIcon text={`Primary score (currently '${primaryDef.label}'). The cell shown per band is the one that maxes (or mins) this metric across the grid.`} /></th>
                 {showTiebreakChip && (
                   <th style={thR}>
                     Tiebreak ({secondaryDef.label}) <InfoIcon text={`Tiebreak: among cells within ±${tolerancePct}% of the per-band best on ${primaryDef.label}, the cell with best ${secondaryDef.label} is picked.`} />
                   </th>
                 )}
+
+                {/* — Trade counts — */}
                 <th style={thR}>n <InfoIcon text="Number of Friday trades in this cell." /></th>
                 <th style={thR}>n wins <InfoIcon text="Count of trades that ended with net P&L > 0 (after entry slip, entry brokerage, exit slip, exit brokerage)." /></th>
                 <th style={thR}>n loss <InfoIcon text="Count of trades that ended with net P&L ≤ 0." /></th>
-                <th style={thR}>Rule hits <InfoIcon text="Trades that exited because ANY rule fired (premium_sl OR max_profit OR margin_target). For take-profit families this INCLUDES profit-take fires, so 'Rule hits' can exceed losses — it's a 'rule triggered an exit' count, not a loss-cut count." /></th>
-                <th style={thR}>SL hits <InfoIcon text="Trades where the premium-SL specifically fired (one leg's mark crossed entry × (1 + premium_sl_pct/100)). Strict loss-cut count — excludes take-profit fires. Populates after the v4 grid finishes building." /></th>
-                <th style={thR}>Hard cap <InfoIcon text="Trades that ran past all rules and exited at Saturday 17:30 IST (settlement)." /></th>
-                <th style={thR}>Max losing streak <InfoIcon text="Longest run of consecutive losing trades when Fridays are ordered chronologically." /></th>
-                <th style={thR}>Max winning streak <InfoIcon text="Longest run of consecutive winning trades when Fridays are ordered chronologically." /></th>
-                <th style={thR}>Max rule streak <InfoIcon text="Longest run of consecutive trades that exited via ANY rule fire (premium_sl + max_profit + margin_target). Companion of 'Rule hits' — same caveat (includes take-profit fires)." /></th>
-                <th style={thR}>Max SL streak <InfoIcon text="Longest run of consecutive trades that exited via real premium-SL (excludes take-profit fires). Populates after the v4 grid finishes building." /></th>
                 <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
+                <th style={thR}>Hard cap <InfoIcon text="Trades that ran past all rules and exited at Saturday 17:30 IST (settlement)." /></th>
+                <th style={thR}>Hit % <InfoIcon text="(n_trades − n_hard_cap) / n_trades — fraction of trades where some deterministic exit fired (rule_trigger, premium_sl, max_profit, margin_target, fixed_hour) BEFORE hard cap. Phase 0B picker filter drops cells below the Hit % threshold by default (50%)." /></th>
+
+                {/* — Rule mechanics — */}
+                <th style={thR}>Rule hits <InfoIcon text="Trades that exited because ANY rule fired (premium_sl OR max_profit OR margin_target). For take-profit families this INCLUDES profit-take fires, so 'Rule hits' can exceed losses — it's a 'rule triggered an exit' count, not a loss-cut count." /></th>
+                <th style={thR}>SL hits <InfoIcon text="Trades where the premium-SL specifically fired (one leg's mark crossed entry × (1 + premium_sl_pct/100)). Strict loss-cut count — excludes take-profit fires." /></th>
+                <th style={thR}>Max rule streak <InfoIcon text="Longest run of consecutive trades that exited via ANY rule fire (premium_sl + max_profit + margin_target). Companion of 'Rule hits' — same caveat (includes take-profit fires)." /></th>
+                <th style={thR}>Max SL streak <InfoIcon text="Longest run of consecutive trades that exited via real premium-SL (excludes take-profit fires)." /></th>
+
+                {/* — Outcome streaks — */}
+                <th style={thR}>Max winning streak <InfoIcon text="Longest run of consecutive winning trades when Fridays are ordered chronologically." /></th>
+                <th style={thR}>Max losing streak <InfoIcon text="Longest run of consecutive losing trades when Fridays are ordered chronologically." /></th>
+
+                {/* — Net P&L — */}
                 <th style={thR}>Avg net <InfoIcon text="Mean net P&L per trade (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></th>
-                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time gross P&L with entry costs (slip + brokerage) only subtracted. This is the on-screen P&L at the moment of exit — NOT the realized number (exit costs not deducted)." /></th>
+                <th style={thR}>Total net <InfoIcon text="Sum of net P&L across all trades in the cell = n_trades × Avg net. Bottom-line cumulative P&L the cell produced (per 100-lot backtester baseline)." /></th>
                 <th style={thR}>Avg win <InfoIcon text="Mean net P&L across winners only (all 4 cost components subtracted)." /></th>
-                <th style={thR}>Total win MTM <InfoIcon text="Sum of exit-time MTM across all winning trades (entry costs only, like Avg exit MTM)." /></th>
-                <th style={thR}>Avg win MTM <InfoIcon text="Mean exit-time MTM across winners (entry costs only)." /></th>
-                <th style={thR}>Largest win MTM <InfoIcon text="Max exit-time MTM among winners." /></th>
+                <th style={thR}>Avg loss <InfoIcon text="Mean net P&L across losers only (negative number)." /></th>
+                <th style={thR}>Largest win <InfoIcon text="Max net P&L of any single trade in the cell." /></th>
+                <th style={thR}>Largest loss <InfoIcon text="Min net P&L of any single trade in the cell (most negative)." /></th>
+
+                {/* — Exit MTM (gross − entry slip only) — winners then losers — */}
+                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time gross P&L with entry slippage only subtracted. This is the on-screen P&L at the moment of exit — NOT the realized number (entry brokerage + exit slip + exit brokerage not deducted)." /></th>
+                <th style={thR}>Avg exit MTM (W) <InfoIcon text="Mean exit-time MTM across winners (entry slip only)." /></th>
+                <th style={thR}>Largest exit MTM (W) <InfoIcon text="Max exit-time MTM among winners." /></th>
+                <th style={thR}>Total exit MTM (W) <InfoIcon text="Sum of exit-time MTM across all winning trades (entry slip only)." /></th>
+                <th style={thR}>Avg exit MTM (L) <InfoIcon text="Mean exit-time MTM across losers (entry slip only)." /></th>
+                <th style={thR}>Largest exit MTM (L) <InfoIcon text="Min exit-time MTM among losers." /></th>
+                <th style={thR}>Total exit MTM (L) <InfoIcon text="Sum of exit-time MTM across all losing trades (entry slip only)." /></th>
+
+                {/* — Winners path MTM — */}
                 <th style={thR}>Avg max MTM (W) <InfoIcon text="Mean peak MTM across winners (best unrealized point during the hold)." /></th>
                 <th style={thR}>Avg min MTM (W) <InfoIcon text="Mean trough MTM across winners — how deep winners dipped before recovering." /></th>
                 <th style={thR}>Max MTM (W) <InfoIcon text="Highest peak MTM observed across all winners." /></th>
                 <th style={thR}>Min MTM (W) <InfoIcon text="Worst trough MTM observed across all winners." /></th>
                 <th style={thR}>W &lt; avg min MTM <InfoIcon text="Count of winners whose min MTM dipped below the cell's avg-min-MTM-winners — winners that endured a worse-than-typical drawdown before recovering." /></th>
-                <th style={thR}>Avg loss <InfoIcon text="Mean net P&L across losers only (negative number)." /></th>
-                <th style={thR}>Total loss MTM <InfoIcon text="Sum of exit-time MTM across all losing trades (entry costs only)." /></th>
-                <th style={thR}>Avg loss MTM <InfoIcon text="Mean exit-time MTM across losers (entry costs only)." /></th>
-                <th style={thR}>Largest loss MTM <InfoIcon text="Min exit-time MTM among losers." /></th>
+
+                {/* — Losers path MTM — */}
                 <th style={thR}>Avg max MTM (L) <InfoIcon text="Mean peak MTM across losers — how high they went before turning losing." /></th>
                 <th style={thR}>Avg min MTM (L) <InfoIcon text="Mean trough MTM across losers (worst point in the hold)." /></th>
                 <th style={thR}>Max MTM (L) <InfoIcon text="Highest peak MTM observed across all losers." /></th>
                 <th style={thR}>Min MTM (L) <InfoIcon text="Worst trough MTM observed across all losers." /></th>
                 <th style={thR}>L &gt; avg max MTM <InfoIcon text="Count of losers whose max MTM rose above the cell's avg-max-MTM-losers — losers that showed a better-than-typical peak before turning into losses (missed exit opportunity)." /></th>
-                <th style={thR}>Largest win <InfoIcon text="Max net P&L of any single trade in the cell." /></th>
-                <th style={thR}>Largest loss <InfoIcon text="Min net P&L of any single trade in the cell (most negative)." /></th>
-                <th style={thR}>Avg credit <InfoIcon text="Mean upfront credit collected per trade (call_entry_mark + put_entry_mark × qty × 0.001 BTC)." /></th>
-                <th style={thR}>Avg margin <InfoIcon text="Mean Delta Exchange portfolio margin required at entry (29-scenario engine)." /></th>
+
+                {/* — % returns — */}
                 <th style={thR}>Ret / margin <InfoIcon text="Mean per-trade ratio: net_pnl ÷ margin_at_entry. Capital-efficiency view of the strategy." /></th>
                 <th style={thR}>Ret / credit <InfoIcon text="Mean per-trade ratio: net_pnl ÷ credit_collected. ROI on premium captured." /></th>
                 <th style={thR}>Ret/margin (W) <InfoIcon text="Ret/margin restricted to winning trades only." /></th>
                 <th style={thR}>Ret/credit (W) <InfoIcon text="Ret/credit restricted to winning trades only." /></th>
                 <th style={thR}>Peak % <InfoIcon text="Mean of per-trade max_mtm ÷ credit. Average peak unrealized return as % of credit — shows what was theoretically achievable before exit. For time-based / take-profit exits, the gap to actual exit reveals what was 'left on the table'." /></th>
                 <th style={thR}>Trough % <InfoIcon text="Mean of per-trade min_mtm ÷ credit. Average trough unrealized return as % of credit. Negative — shows how deep the trade dipped below water at any point." /></th>
-                <th style={thR}>Avg exit time <InfoIcon text="Mean hold time (entry → exit) across all trades, in hours and minutes." /></th>
-                <th style={thR}>Avg winner exit <InfoIcon text="Mean hold time restricted to winning trades." /></th>
-                <th style={thR}>Avg loser exit <InfoIcon text="Mean hold time restricted to losing trades." /></th>
+
+                {/* — Capital (all values are scaled to the sized lot count when sizing is on) — */}
+                <th style={thR}>Avg credit <InfoIcon text="Mean upfront credit collected per trade at the sized lot count (scales linearly with lots vs the 100-lot backtester baseline)." /></th>
+                <th style={thR}>Avg margin <InfoIcon text="Mean portfolio margin required at the sized lot count (29-scenario engine, linear in qty). When sizing is off this falls back to the 100-lot baseline." /></th>
+                <th style={thR}>Lots <InfoIcon text="Lot count chosen by the sizing engine for this band's picked combo. lots = floor(min(deployable_capital × 100 / avg_margin, |DD threshold| × 100 / |DD metric per 100 lots|)). When no capital is set, lots = 100 (backtester baseline)." /></th>
+
+                {/* — Time — */}
+                <th style={thR}>Avg exit time <InfoIcon text="Mean exit IST clock time across all trades = (entry hour + avg hold duration) mod 24h. Format: HH:MM (Xh Ym) where the bracketed value is the average hold duration." /></th>
+                <th style={thR}>Avg winner exit <InfoIcon text="Mean exit IST clock time restricted to winning trades, with avg winners' hold duration in brackets." /></th>
+                <th style={thR}>Avg loser exit <InfoIcon text="Mean exit IST clock time restricted to losing trades, with avg losers' hold duration in brackets." /></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => (
+              {rows.map(r => {
+                // Sizing-mode resolution. In 'lots' mode every band uses the
+                // same user-fixed lot count → backend's r.lots (= 100 baseline)
+                // is overridden. In 'capital' mode we use server-computed lots.
+                const lots = sizingMode === 'lots' ? fixedLots : (r.lots ?? 100);
+                const k = lots / 100;
+                const sk = (v: number | null | undefined) =>
+                  v == null || isNaN(v as number) ? null : (v as number) * k;
+                // Score formatter — scale only USD-type primary metrics. The
+                // backend returns the original per-100-lot value as `score`;
+                // we multiply by k for display so it matches the ranking used.
+                const scaledScore = (primaryDef.fmt === 'usd' || primaryDef.fmt === 'usd0')
+                  ? sk(r.score) : r.score;
+                const scaledSecondary = (showTiebreakChip
+                  && (secondaryDef.fmt === 'usd' || secondaryDef.fmt === 'usd0'))
+                  ? sk(r.secondary_score) : r.secondary_score;
+                return (
                 <tr key={`${r.iv_band}-${r.expiry_bucket}-${r.delta_target}-${r.entry_hour_ist}-${r.rule_label}`}
-                    style={{ borderTop: '1px solid #1a2d42' }}>
+                    onClick={() => {
+                      if (r.entry_hour_ist == null) return;
+                      setDrilldown({
+                        band: r.iv_band,
+                        expiry_bucket: r.expiry_bucket,
+                        delta_target: r.delta_target,
+                        entry_hour_ist: r.entry_hour_ist,
+                        rule_label: r.rule_label,
+                      });
+                    }}
+                    style={{ borderTop: '1px solid #1a2d42', cursor: 'pointer' }}
+                    title="Click to compare all 96 rules at this (band, expiry, Δ, hour) combo.">
+                  {/* — Identity — */}
                   <td style={{ ...td, fontWeight: 600 }}>{r.iv_band}</td>
                   <td style={td}>{r.entry_hour_ist == null ? '—' : `${String(r.entry_hour_ist).padStart(2, '0')}:00`}</td>
                   <td style={td}>{r.expiry_bucket}</td>
                   <td style={td}>{r.delta_target.toFixed(2)}</td>
                   <td style={{ ...td, color: '#f0b300' }}>{fmtRuleLabel(r.rule_label)}</td>
+
+                  {/* — Score (scaled when sizing is active) — */}
                   <td style={{
                     ...tdR,
-                    color: primaryDef.goodIsHigh ? pnlColor(r.score) : pnlColor(r.score == null ? null : -r.score),
+                    color: primaryDef.goodIsHigh ? pnlColor(scaledScore) : pnlColor(scaledScore == null ? null : -scaledScore),
                     fontWeight: 600,
                   }}>
-                    {fmtByType(r.score, primaryDef.fmt)}
+                    {fmtByType(scaledScore, primaryDef.fmt)}
                   </td>
                   {showTiebreakChip && (
                     <td style={{
                       ...tdR,
-                      color: secondaryDef.goodIsHigh ? pnlColor(r.secondary_score) : pnlColor(r.secondary_score == null ? null : -r.secondary_score),
+                      color: secondaryDef.goodIsHigh ? pnlColor(scaledSecondary) : pnlColor(scaledSecondary == null ? null : -scaledSecondary),
                     }}>
-                      {fmtByType(r.secondary_score, secondaryDef.fmt)}
+                      {fmtByType(scaledSecondary, secondaryDef.fmt)}
                     </td>
                   )}
+
+                  {/* — Trade counts — */}
                   <td style={tdR}>{r.n_trades}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{r.n_wins ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{r.n_losses ?? '—'}</td>
-                  <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{r.n_premium_sl_hit ?? '—'}</td>
-                  <td style={tdR}>{r.n_hard_cap ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{r.max_consec_losses ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{r.max_consec_wins ?? '—'}</td>
-                  <td style={tdR}>{r.max_consec_sl_hits ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{r.max_consec_premium_sl_hits ?? '—'}</td>
+                  <td style={tdR}>{r.n_wins ?? '—'}</td>
+                  <td style={tdR}>{r.n_losses ?? '—'}</td>
                   <td style={tdR}>{pct(r.win_rate)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(r.avg_net_pnl)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_exit_mtm) }}>{usd(r.avg_exit_mtm)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.avg_win_usd)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.total_win_mtm)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.avg_win_mtm)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.largest_win_mtm)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.avg_max_mtm_winners)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.avg_min_mtm_winners)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.max_mtm_winners)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.min_mtm_winners)}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{r.n_winners_below_avg_min_mtm ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.avg_loss_usd)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.total_loss_mtm)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.avg_loss_mtm)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.largest_loss_mtm)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.avg_max_mtm_losers)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.avg_min_mtm_losers)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.max_mtm_losers)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.min_mtm_losers)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{r.n_losers_above_avg_max_mtm ?? '—'}</td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>{usd(r.max_win_usd)}</td>
-                  <td style={{ ...tdR, color: '#f85149' }}>{usd(r.max_loss_usd)}</td>
-                  <td style={tdR}>{usd(r.avg_credit)}</td>
-                  <td style={tdR}>{usd0(r.avg_margin)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_margin) }}>
-                    {pct(r.avg_pct_return_on_margin)}
+                  <td style={tdR}>{r.n_hard_cap ?? '—'}</td>
+                  <td style={tdR}>{(() => {
+                    const n = r.n_trades;
+                    const hc = r.n_hard_cap;
+                    if (n == null || hc == null || n === 0) return '—';
+                    const hit = (n - hc) / n;
+                    const color = hit >= 0.5 ? '#3fb950' : hit >= 0.25 ? '#f0b300' : '#f85149';
+                    return <span style={{ color }}>{(hit * 100).toFixed(0)}%</span>;
+                  })()}</td>
+
+                  {/* — Rule mechanics — */}
+                  <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>
+                  <td style={tdR}>{r.n_premium_sl_hit ?? '—'}</td>
+                  <td style={tdR}>{r.max_consec_sl_hits ?? '—'}</td>
+                  <td style={tdR}>{r.max_consec_premium_sl_hits ?? '—'}</td>
+
+                  {/* — Outcome streaks — */}
+                  <td style={tdR}>{r.max_consec_wins ?? '—'}</td>
+                  <td style={tdR}>{r.max_consec_losses ?? '—'}</td>
+
+                  {/* — Net P&L (scaled by lots/100, sign-coloured) — */}
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_net_pnl)) }}>{usd(sk(r.avg_net_pnl))}</td>
+                  <td style={{
+                    ...tdR,
+                    color: pnlColor(r.avg_net_pnl == null ? null : (r.avg_net_pnl * r.n_trades) * k),
+                  }}>
+                    {r.avg_net_pnl == null ? '—' : usd((r.avg_net_pnl * r.n_trades) * k)}
                   </td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit) }}>
-                    {pct(r.avg_pct_return_on_credit)}
-                  </td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>
-                    {pct(r.avg_pct_return_on_margin_winners)}
-                  </td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>
-                    {pct(r.avg_pct_return_on_credit_winners)}
-                  </td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>
-                    {pct(r.avg_pct_max_mtm_on_credit)}
-                  </td>
-                  <td style={{ ...tdR, color: '#f85149' }}>
-                    {pct(r.avg_pct_min_mtm_on_credit)}
-                  </td>
-                  <td style={{ ...tdR, color: '#f0b300' }}>
-                    {fmtMinutes(r.avg_exit_offset_minutes)}
-                  </td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>
-                    {fmtMinutes(r.avg_winner_exit_offset_minutes)}
-                  </td>
-                  <td style={{ ...tdR, color: '#f85149' }}>
-                    {fmtMinutes(r.avg_loser_exit_offset_minutes)}
-                  </td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_win_usd)) }}>{usd(sk(r.avg_win_usd))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_loss_usd)) }}>{usd(sk(r.avg_loss_usd))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.max_win_usd)) }}>{usd(sk(r.max_win_usd))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.max_loss_usd)) }}>{usd(sk(r.max_loss_usd))}</td>
+
+                  {/* — Exit MTM (scaled, winners then losers) — */}
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_exit_mtm)) }}>{usd(sk(r.avg_exit_mtm))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_win_mtm)) }}>{usd(sk(r.avg_win_mtm))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.largest_win_mtm)) }}>{usd(sk(r.largest_win_mtm))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.total_win_mtm)) }}>{usd(sk(r.total_win_mtm))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_loss_mtm)) }}>{usd(sk(r.avg_loss_mtm))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.largest_loss_mtm)) }}>{usd(sk(r.largest_loss_mtm))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.total_loss_mtm)) }}>{usd(sk(r.total_loss_mtm))}</td>
+
+                  {/* — Winners path MTM (scaled) — */}
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_max_mtm_winners)) }}>{usd(sk(r.avg_max_mtm_winners))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_min_mtm_winners)) }}>{usd(sk(r.avg_min_mtm_winners))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.max_mtm_winners)) }}>{usd(sk(r.max_mtm_winners))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.min_mtm_winners)) }}>{usd(sk(r.min_mtm_winners))}</td>
+                  <td style={tdR}>{r.n_winners_below_avg_min_mtm ?? '—'}</td>
+
+                  {/* — Losers path MTM (scaled) — */}
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_max_mtm_losers)) }}>{usd(sk(r.avg_max_mtm_losers))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_min_mtm_losers)) }}>{usd(sk(r.avg_min_mtm_losers))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.max_mtm_losers)) }}>{usd(sk(r.max_mtm_losers))}</td>
+                  <td style={{ ...tdR, color: pnlColor(sk(r.min_mtm_losers)) }}>{usd(sk(r.min_mtm_losers))}</td>
+                  <td style={tdR}>{r.n_losers_above_avg_max_mtm ?? '—'}</td>
+
+                  {/* — % returns (sign-coloured) — */}
+                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_margin) }}>{pct(r.avg_pct_return_on_margin)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit) }}>{pct(r.avg_pct_return_on_credit)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_margin_winners) }}>{pct(r.avg_pct_return_on_margin_winners)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit_winners) }}>{pct(r.avg_pct_return_on_credit_winners)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_max_mtm_on_credit) }}>{pct(r.avg_pct_max_mtm_on_credit)}</td>
+                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_min_mtm_on_credit) }}>{pct(r.avg_pct_min_mtm_on_credit)}</td>
+
+                  {/* — Capital (scaled to the sized lots) — */}
+                  <td style={tdR}>{usd(sk(r.avg_credit))}</td>
+                  <td style={tdR}>{usd0(sk(r.avg_margin))}</td>
+                  <td style={tdR}>{lots.toLocaleString()}</td>
+
+                  {/* — Time (IST clock with hold duration in brackets) — */}
+                  <td style={tdR}>{fmtExitClock(r.entry_hour_ist, r.avg_exit_offset_minutes)}</td>
+                  <td style={tdR}>{fmtExitClock(r.entry_hour_ist, r.avg_winner_exit_offset_minutes)}</td>
+                  <td style={tdR}>{fmtExitClock(r.entry_hour_ist, r.avg_loser_exit_offset_minutes)}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           {!loading && rows.length === 0 && resp?.status === 'ready' && (
@@ -638,6 +974,15 @@ export function M7IvBandBestComboTable() {
             </>
           )}
         </div>
+      )}
+      {drilldown && (
+        <M7RuleComparisonModal
+          band={drilldown.band}
+          expiry_bucket={drilldown.expiry_bucket}
+          delta_target={drilldown.delta_target}
+          entry_hour_ist={drilldown.entry_hour_ist}
+          pickedRuleLabel={drilldown.rule_label}
+          onClose={() => setDrilldown(null)} />
       )}
     </div>
   );

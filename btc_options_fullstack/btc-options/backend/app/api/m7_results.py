@@ -572,6 +572,14 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         # distinguish directional / vol-expansion / gamma-squeeze / skew-flip
         # / path-dependent losers.
         mtm_sql = f"""
+        WITH troughs AS (
+            SELECT p.trade_id,
+                   arg_min(p.ts, p.gross_pnl_usd) AS ts_trough
+            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+            JOIN _trade_exits e ON p.trade_id = e.trade_id
+            WHERE p.ts <= e._exit_ts
+            GROUP BY p.trade_id
+        )
         SELECT p.trade_id,
                MAX(p.gross_pnl_usd) AS max_gross_pnl_usd,
                MIN(p.gross_pnl_usd) AS min_gross_pnl_usd,
@@ -594,9 +602,19 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                MIN(p.atm_iv_now) AS min_atm_iv_in_window,
                MAX(p.atm_iv_now) AS max_atm_iv_in_window,
                MIN(p.spot)       AS min_spot_in_window,
-               MAX(p.spot)       AS max_spot_in_window
+               MAX(p.spot)       AS max_spot_in_window,
+               -- Peak before / after trough (v6) — for trade-shape analysis
+               MAX(CASE WHEN p.ts < t.ts_trough THEN p.gross_pnl_usd END)
+                   AS peak_before_trough_gross,
+               MAX(CASE WHEN p.ts > t.ts_trough THEN p.gross_pnl_usd END)
+                   AS peak_after_trough_gross,
+               arg_max(p.ts, CASE WHEN p.ts < t.ts_trough THEN p.gross_pnl_usd END)
+                   AS ts_peak_before,
+               arg_max(p.ts, CASE WHEN p.ts > t.ts_trough THEN p.gross_pnl_usd END)
+                   AS ts_peak_after
         FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
         JOIN _trade_exits e ON p.trade_id = e.trade_id
+        LEFT JOIN troughs t ON p.trade_id = t.trade_id
         WHERE p.ts <= e._exit_ts
         GROUP BY p.trade_id
         """
@@ -605,13 +623,30 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         conn.register("_trade_exits",
                       merged[["trade_id", "exit_ts"]].rename(columns={"exit_ts": "_exit_ts"}))
         mtm_sql = f"""
+        WITH troughs AS (
+            SELECT p.trade_id,
+                   arg_min(p.ts, p.gross_pnl_usd) AS ts_trough
+            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+            JOIN _trade_exits e ON p.trade_id = e.trade_id
+            WHERE p.ts <= e._exit_ts
+            GROUP BY p.trade_id
+        )
         SELECT p.trade_id,
                MAX(p.gross_pnl_usd) AS max_gross_pnl_usd,
                MIN(p.gross_pnl_usd) AS min_gross_pnl_usd,
                arg_max(p.ts, p.gross_pnl_usd) AS ts_at_max_mtm,
-               arg_min(p.ts, p.gross_pnl_usd) AS ts_at_min_mtm
+               arg_min(p.ts, p.gross_pnl_usd) AS ts_at_min_mtm,
+               MAX(CASE WHEN p.ts < t.ts_trough THEN p.gross_pnl_usd END)
+                   AS peak_before_trough_gross,
+               MAX(CASE WHEN p.ts > t.ts_trough THEN p.gross_pnl_usd END)
+                   AS peak_after_trough_gross,
+               arg_max(p.ts, CASE WHEN p.ts < t.ts_trough THEN p.gross_pnl_usd END)
+                   AS ts_peak_before,
+               arg_max(p.ts, CASE WHEN p.ts > t.ts_trough THEN p.gross_pnl_usd END)
+                   AS ts_peak_after
         FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
         JOIN _trade_exits e ON p.trade_id = e.trade_id
+        LEFT JOIN troughs t ON p.trade_id = t.trade_id
         WHERE p.ts <= e._exit_ts
         GROUP BY p.trade_id
         """
@@ -699,6 +734,15 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
     )
     merged["max_mtm_usd"] = merged["max_gross_pnl_usd"] - entry_slip
     merged["min_mtm_usd"] = merged["min_gross_pnl_usd"] - entry_slip
+    # Peak-before-trough and peak-after-trough (v6 path-shape fields).
+    # Both convert gross to MTM convention by subtracting entry slip.
+    if "peak_before_trough_gross" in merged.columns:
+        merged["peak_before_trough_mtm"] = (
+            merged["peak_before_trough_gross"] - entry_slip
+        )
+        merged["peak_after_trough_mtm"] = (
+            merged["peak_after_trough_gross"] - entry_slip
+        )
     # Relative time of peak/trough within the (entry_ts → exit_ts) window.
     # 0 = at entry, 1 = at exit. Lets us plot "when the best/worst moment
     # happened" on a normalized axis so trades of different durations align.
@@ -711,6 +755,34 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         merged["rel_time_min_mtm"] = (
             (merged["ts_at_min_mtm"] - merged["entry_ts_utc"]) / duration
         ).where(valid).clip(lower=0.0, upper=1.0)
+        if "ts_peak_before" in merged.columns:
+            merged["rel_time_peak_before_trough"] = (
+                (merged["ts_peak_before"] - merged["entry_ts_utc"]) / duration
+            ).where(valid).clip(lower=0.0, upper=1.0)
+            merged["rel_time_peak_after_trough"] = (
+                (merged["ts_peak_after"] - merged["entry_ts_utc"]) / duration
+            ).where(valid).clip(lower=0.0, upper=1.0)
+    # % drop from first peak down to trough (positive = gave back, NaN if
+    # no positive peak before trough). Same for recovery from trough to
+    # second peak. These are the headline path-shape metrics.
+    if "peak_before_trough_mtm" in merged.columns:
+        pb = merged["peak_before_trough_mtm"]
+        pa = merged["peak_after_trough_mtm"]
+        tr = merged["min_mtm_usd"]
+        merged["pct_drop_peak_to_trough"] = np.where(
+            pb > 0,
+            (pb - tr) / pb,
+            np.nan,
+        )
+        merged["pct_recovery_trough_to_peak"] = np.where(
+            tr.abs() > 0,
+            (pa - tr) / tr.abs(),
+            np.nan,
+        )
+        # Hypothetical "exit at peak-1" net — used by the alt-net column.
+        # Same entry-slip-only convention as exit_mtm_usd, so comparison
+        # with "Avg exit MTM" is apples-to-apples.
+        merged["alt_net_if_exit_at_peak1"] = merged["peak_before_trough_mtm"]
     # Exit-time MTM = the on-screen P&L at the moment of exit, same convention
     # as max/min MTM (only entry slippage subtracted). This is what shows on
     # the option mark right before you click "close".
@@ -1408,6 +1480,20 @@ _SIMPLE_METRICS = {
     "avg_pct_min_mtm_on_credit":   ("pct_min_mtm_on_credit",       "mean"),
     # Exit-time MTM overall (on-screen P&L at exit, only entry costs subtracted)
     "avg_exit_mtm":                ("exit_mtm_usd",                "mean"),
+    # Path peak-trough-peak (v6) — see _compute_all_exits.
+    # Same entry-slip-only convention as max/min MTM.
+    "avg_peak_before_trough":      ("peak_before_trough_mtm",      "mean"),
+    "avg_peak_after_trough":       ("peak_after_trough_mtm",       "mean"),
+    "avg_rel_time_peak_before":    ("rel_time_peak_before_trough", "mean"),
+    "avg_rel_time_peak_after":     ("rel_time_peak_after_trough",  "mean"),
+    "avg_rel_time_trough":         ("rel_time_min_mtm",            "mean"),
+    "avg_rel_time_peak":           ("rel_time_max_mtm",            "mean"),
+    "avg_pct_drop_peak_to_trough": ("pct_drop_peak_to_trough",     "mean"),
+    "avg_pct_recovery_trough_to_peak": ("pct_recovery_trough_to_peak", "mean"),
+    # Hypothetical: net P&L if every trade had exited at its first peak
+    "avg_alt_net_if_exit_at_peak1": ("alt_net_if_exit_at_peak1",   "mean"),
+    # Risk-adjusted (v6 grid columns)
+    "stdev_net_pnl":               ("net_pnl_estimate_usd",        "std"),
     # Per-leg P&L (Chunk 1 — leg attribution)
     "avg_call_leg_pnl":            ("call_leg_pnl_usd",            "mean"),
     "avg_put_leg_pnl":             ("put_leg_pnl_usd",             "mean"),
@@ -1522,6 +1608,93 @@ def _count_cause(label: str):
     def _f(g): return int((g["loss_cause"] == label).sum()) if "loss_cause" in g.columns else 0
     return _f
 
+def _stdev_losses_only(g):
+    """Std of net P&L over losing trades only — downside vol for Sortino."""
+    losers = g.loc[~g["is_win"], "net_pnl_estimate_usd"]
+    if len(losers) < 2:
+        return float("nan")
+    return float(losers.std(ddof=1))
+
+def _worst_5_avg_net(g):
+    """Mean of the 5 worst-net trades. Tail-risk indicator. If n<5, mean of
+    all losers (or NaN if no losers)."""
+    s = g["net_pnl_estimate_usd"].dropna().sort_values()
+    if s.empty:
+        return float("nan")
+    take = min(5, len(s))
+    return float(s.iloc[:take].mean())
+
+def _var_95_net(g):
+    """5th percentile of net P&L distribution. 1-in-20 trade outcome."""
+    s = g["net_pnl_estimate_usd"].dropna()
+    if len(s) < 2:
+        return float("nan")
+    return float(s.quantile(0.05))
+
+def _cvar_95_net(g):
+    """Mean of trades below the 5th percentile. Expected loss conditional
+    on tail event. CVaR is what risk committees actually look at."""
+    s = g["net_pnl_estimate_usd"].dropna()
+    if len(s) < 2:
+        return float("nan")
+    threshold = s.quantile(0.05)
+    tail = s[s <= threshold]
+    if tail.empty:
+        return float("nan")
+    return float(tail.mean())
+
+def _max_consec_loss_dollars(g):
+    """Chronological sum of net P&L during the cell's longest losing streak.
+    Most-negative running sum across consecutive losses, reset by any win."""
+    s = g.sort_values("friday_date_ist", kind="stable")
+    if s.empty:
+        return 0.0
+    is_loss = (~s["is_win"]).astype(bool).to_numpy()
+    pnls = s["net_pnl_estimate_usd"].to_numpy()
+    best = 0.0
+    cur = 0.0
+    for i, loss in enumerate(is_loss):
+        if loss:
+            cur += pnls[i] if not pd.isna(pnls[i]) else 0.0
+            if cur < best:
+                best = cur
+        else:
+            cur = 0.0
+    return float(best)  # negative number (or 0 if no streak)
+
+def _recent_26w_filter(g):
+    """Subset of g to trades from the last 26 Fridays (chronological)."""
+    if "friday_date_ist" not in g.columns or g.empty:
+        return g.iloc[0:0]
+    unique = sorted(pd.unique(g["friday_date_ist"].astype(str)))
+    if len(unique) <= 26:
+        return g
+    cutoff = unique[-26]
+    return g[g["friday_date_ist"].astype(str) >= cutoff]
+
+def _avg_net_pnl_last_26w(g):
+    sub = _recent_26w_filter(g)
+    if sub.empty:
+        return float("nan")
+    return float(sub["net_pnl_estimate_usd"].mean())
+
+def _win_rate_last_26w(g):
+    sub = _recent_26w_filter(g)
+    if sub.empty:
+        return float("nan")
+    return float(sub["is_win"].mean())
+
+def _count_fixed_hour(g):
+    """# of trades that exited at the fixed_hour rule (deterministic time
+    exit, neither rule_trigger nor hard_cap)."""
+    if g.empty:
+        return 0
+    er = g["exit_reason"] if "exit_reason" in g.columns else None
+    if er is None:
+        return 0
+    # Anything that's not rule_trigger and not hard_cap is a fixed-hour exit.
+    return int(((er != "rule_trigger") & (er != "hard_cap")).sum())
+
 _SPECIAL_METRICS = {
     "n_rule_trigger": _count_rule_trigger,  # # of trades that hit any rule (SL/max-profit/margin)
     "n_premium_sl_hit": _count_premium_sl_hit,  # # that hit premium_sl specifically (excludes take-profits)
@@ -1538,6 +1711,16 @@ _SPECIAL_METRICS = {
     "avg_loser_exit_offset_minutes":   _avg_loser_exit_offset_minutes,
     "n_winners_below_avg_min_mtm": _n_winners_below_avg_min_mtm,  # winners w/ worse-than-avg drawdown
     "n_losers_above_avg_max_mtm":  _n_losers_above_avg_max_mtm,   # losers w/ better-than-avg peak
+    # v6 — fixed-hour exit count (separate from rule_trigger / hard_cap)
+    "n_fixed_hour_ist":            _count_fixed_hour,
+    # v6 — risk-adjusted / tail / drawdown sequence / edge stability
+    "stdev_losses_only":           _stdev_losses_only,
+    "worst_5_avg_net":             _worst_5_avg_net,
+    "var_95_net":                  _var_95_net,
+    "cvar_95_net":                 _cvar_95_net,
+    "max_consec_loss_dollars":     _max_consec_loss_dollars,
+    "avg_net_pnl_last_26w":        _avg_net_pnl_last_26w,
+    "win_rate_last_26w":           _win_rate_last_26w,
     # Loss-cause counts (Chunk 1) — # of losers in the group with each cause
     "n_directional":     _count_cause("directional"),
     "n_vol_expansion":   _count_cause("vol_expansion"),
@@ -1574,12 +1757,16 @@ def _round_score(metric: str, val: float) -> float:
     """Round a metric value to a sensible precision for the wire."""
     if val is None or (isinstance(val, float) and (val != val)):
         return val
-    if metric in ("win_rate", "avg_pct_return_on_margin", "avg_pct_return_on_credit",
-                  "avg_pct_return_on_margin_winners", "avg_pct_return_on_credit_winners") \
+    if metric in ("win_rate", "win_rate_last_26w",
+                  "avg_pct_return_on_margin", "avg_pct_return_on_credit",
+                  "avg_pct_return_on_margin_winners", "avg_pct_return_on_credit_winners",
+                  "avg_pct_drop_peak_to_trough", "avg_pct_recovery_trough_to_peak",
+                  "avg_rel_time_peak_before", "avg_rel_time_peak_after",
+                  "avg_rel_time_trough", "avg_rel_time_peak") \
             or metric.endswith("_share"):  # leg-winner outcome shares
         return round(float(val), 6)
     if metric in ("count", "n_rule_trigger", "n_premium_sl_hit",
-                  "n_hard_cap", "n_losses", "n_wins",
+                  "n_hard_cap", "n_losses", "n_wins", "n_fixed_hour_ist",
                   "max_consec_losses", "max_consec_wins",
                   "max_consec_sl_hits", "max_consec_premium_sl_hits",
                   "n_winners_below_avg_min_mtm", "n_losers_above_avg_max_mtm"):
@@ -1600,6 +1787,13 @@ def _best_cells_for_metric(derived: pd.DataFrame, metric: str) -> pd.DataFrame:
     `m7_full_coverage.get_iv_band_full_coverage` — kept here so scope-aware
     callers (Losses Explorer) get the SAME best cells the table renders.
     """
+    if derived.empty:
+        return pd.DataFrame(columns=["entry_atm_iv_band", "entry_hour_ist",
+                                      "expiry_bucket", "delta_target",
+                                      "score", "n_trades"])
+    # Drop NaN-gross trades (missing-leg-quote at entry — not valid strangles).
+    # Without this, NaN trades inflate n_losses but produce NaN aggregates.
+    derived = derived[derived["gross_pnl_usd"].notna()]
     if derived.empty:
         return pd.DataFrame(columns=["entry_atm_iv_band", "entry_hour_ist",
                                       "expiry_bucket", "delta_target",
@@ -1834,6 +2028,11 @@ def get_missed_fridays(
     if derived.empty:
         return {"rows": [], "n_missed": 0, "n_total_fridays": 0}
 
+    # Drop NaN-gross trades (missing-leg-quote at entry — not valid strangles).
+    derived = derived[derived["gross_pnl_usd"].notna()]
+    if derived.empty:
+        return {"rows": [], "n_missed": 0, "n_total_fridays": 0}
+
     # Step 1: replicate /iv_band_summary best-cell selection
     dims = ["entry_atm_iv_band", "entry_hour_ist", "expiry_bucket", "delta_target"]
     grp = derived.groupby(dims, dropna=False)
@@ -1937,6 +2136,11 @@ def get_iv_band_summary(
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
     derived = _derive_exits(filters, rule)
+    if derived.empty:
+        return {"rows": []}
+
+    # Drop NaN-gross trades (missing-leg-quote at entry — not valid strangles).
+    derived = derived[derived["gross_pnl_usd"].notna()]
     if derived.empty:
         return {"rows": []}
 

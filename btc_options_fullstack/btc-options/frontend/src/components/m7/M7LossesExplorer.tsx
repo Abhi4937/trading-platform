@@ -363,9 +363,9 @@ export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
                           <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg loss <InfoIcon text="Mean net P&L across losers (negative number)." /></th>
                           <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total loss <InfoIcon text="Sum of net P&L across losers." /></th>
                           <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest loss <InfoIcon text="Most negative net P&L of any single loser." /></th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg loss MTM <InfoIcon text="Mean exit-time MTM across losers (entry costs only)." /></th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total loss MTM <InfoIcon text="Sum of exit-time MTM across all losers." /></th>
-                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest loss MTM <InfoIcon text="Min exit-time MTM among losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg exit MTM (L) <InfoIcon text="Mean exit-time MTM across losers (entry slippage only)." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Total exit MTM (L) <InfoIcon text="Sum of exit-time MTM across all losers." /></th>
+                          <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Largest exit MTM (L) <InfoIcon text="Min exit-time MTM among losers." /></th>
                           <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg max MTM (L) <InfoIcon text="Mean peak MTM across losers — how high they went before turning losing." /></th>
                           <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Avg min MTM (L) <InfoIcon text="Mean trough MTM across losers." /></th>
                           <th style={{ padding: 4, textAlign: 'right', borderBottom: '1px solid #1a2d42' }}>Max MTM (L) <InfoIcon text="Highest peak MTM observed across all losers." /></th>

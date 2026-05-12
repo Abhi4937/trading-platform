@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import type { M7ExitRule, M7Filters } from '../../types/m7';
 import { InfoIcon } from './InfoIcon';
+import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import { M7CellDrilldownModal } from './M7CellDrilldownModal';
 import type { M7Cell } from '../../services/m7_api';
 
@@ -295,6 +296,9 @@ export function M7IvBandFullCoverageTable({
               : err ? <span style={{ color: '#f85149' }}>{err}</span>
               : `${rows.length} bands`}
           </span>
+          <ExcelButton
+            disabled={rows.length === 0}
+            onClick={() => exportRowsAsXlsx(`m7_iv_band_full_coverage_${coverageMode}_${metric}.xlsx`, 'FullCoverage', rows)} />
         </div>
       </div>
       <LoadingBar visible={loading} />
@@ -323,24 +327,24 @@ export function M7IvBandFullCoverageTable({
                 <th style={thR}>Max SL streak <InfoIcon text="Longest run of consecutive rule-trigger exits (any rule). Includes profit-take fires." /></th>
                 <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
                 <th style={thR}>Avg net <InfoIcon text="Mean net P&L per trade (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></th>
-                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time MTM = mean(gross_pnl − entry costs). The on-screen P&L at exit (exit costs not deducted)." /></th>
+                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time MTM = mean(gross_pnl − entry slippage). The on-screen P&L at exit (exit costs not deducted)." /></th>
                 <th style={thR}>Avg win (W) <InfoIcon text="Mean net P&L across winners only." /></th>
                 <th style={thR}>Avg loss (L) <InfoIcon text="Mean net P&L across losers only." /></th>
                 <th style={thR}>Largest win (W) <InfoIcon text="Max net P&L of any single winner." /></th>
                 <th style={thR}>Largest loss (L) <InfoIcon text="Min net P&L of any single loser (most negative)." /></th>
                 {/* Winners-only — exit MTM + path MTM */}
-                <th style={thR}>Avg win MTM <InfoIcon text="Mean exit-time MTM across winners (entry costs only)." /></th>
-                <th style={thR}>Total win MTM <InfoIcon text="Sum of exit-time MTM across all winners." /></th>
-                <th style={thR}>Largest win MTM <InfoIcon text="Max exit-time MTM among winners." /></th>
+                <th style={thR}>Avg exit MTM (W) <InfoIcon text="Mean exit-time MTM across winners (entry slippage only)." /></th>
+                <th style={thR}>Total exit MTM (W) <InfoIcon text="Sum of exit-time MTM across all winners." /></th>
+                <th style={thR}>Largest exit MTM (W) <InfoIcon text="Max exit-time MTM among winners." /></th>
                 <th style={thR}>Avg max MTM (W) <InfoIcon text="Mean peak MTM across winners (best unrealized point during hold)." /></th>
                 <th style={thR}>Avg min MTM (W) <InfoIcon text="Mean trough MTM across winners — drawdown winners endured before recovering." /></th>
                 <th style={thR}>Max MTM (W) <InfoIcon text="Highest peak MTM across all winners." /></th>
                 <th style={thR}>Min MTM (W) <InfoIcon text="Worst trough MTM across all winners." /></th>
                 <th style={thR}>W &lt; avg min MTM <InfoIcon text="Winners whose min MTM dipped below the cell's avg-min-MTM (winners) — i.e. winners with a worse-than-typical drawdown before recovering." /></th>
                 {/* Losers-only — exit MTM + path MTM */}
-                <th style={thR}>Avg loss MTM <InfoIcon text="Mean exit-time MTM across losers." /></th>
-                <th style={thR}>Total loss MTM <InfoIcon text="Sum of exit-time MTM across all losers." /></th>
-                <th style={thR}>Largest loss MTM <InfoIcon text="Min exit-time MTM among losers." /></th>
+                <th style={thR}>Avg exit MTM (L) <InfoIcon text="Mean exit-time MTM across losers." /></th>
+                <th style={thR}>Total exit MTM (L) <InfoIcon text="Sum of exit-time MTM across all losers." /></th>
+                <th style={thR}>Largest exit MTM (L) <InfoIcon text="Min exit-time MTM among losers." /></th>
                 <th style={thR}>Avg max MTM (L) <InfoIcon text="Mean peak MTM across losers — how high they went before turning losing." /></th>
                 <th style={thR}>Avg min MTM (L) <InfoIcon text="Mean trough MTM across losers." /></th>
                 <th style={thR}>Max MTM (L) <InfoIcon text="Highest peak MTM across all losers." /></th>

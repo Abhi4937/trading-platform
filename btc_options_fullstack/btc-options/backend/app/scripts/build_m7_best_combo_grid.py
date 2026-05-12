@@ -6,14 +6,36 @@ inside the same uvicorn worker that handles HTTP requests starves the event
 loop — browsers see "TypeError: Failed to fetch" mid-warmup. Running this
 as a separate Python process (its own GIL) keeps the backend responsive.
 
-How to run (from the host):
+RECOMMENDED — separate, dedicated container (survives backend restarts):
+
+    docker compose run -d --rm \\
+        --name m7-grid-builder-v6 \\
+        backend \\
+        python -m app.scripts.build_m7_best_combo_grid \\
+        > /tmp/m7_v6_build.log 2>&1
+
+This spins up a NEW container based on the backend service definition. It
+has its own lifecycle, independent of `docker-backend-1`. You can freely
+`docker compose up --build -d backend` while the rebuild runs — the
+rebuild container is untouched. The output parquet writes to the
+host-mounted volume so it persists regardless of which container produced
+it.
+
+Monitor progress:
+    docker logs -f m7-grid-builder-v6        # live tail
+    tail -20 /tmp/m7_v6_build.log            # check ETA periodically
+
+LEGACY — `docker exec` inside the live backend container:
+
     docker exec docker-backend-1 python -m app.scripts.build_m7_best_combo_grid
 
-Or, with progress streamed live to the host terminal:
-    docker exec -it docker-backend-1 python -m app.scripts.build_m7_best_combo_grid
+Only suitable for short test runs you don't mind being killed by a
+`docker compose up --build -d backend` mid-flight. The v6 rebuild on
+this dataset takes ~14h — DO NOT use this form for a real run.
 
-The build takes ~45 minutes for the 96-rule sweep. The result is persisted
-to GRID_PARQUET_PATH and picked up by the backend on its next request.
+Output: GRID_PARQUET_PATH (set in m7_best_combo.py). v6 has path
+peak-trough-peak fields, Sharpe/Sortino/Kelly/VaR/CVaR, drawdown
+sequence, edge stability, and applies the Phase 0A NaN-gross filter.
 """
 from __future__ import annotations
 

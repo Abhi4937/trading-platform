@@ -283,6 +283,16 @@ def get_iv_band_full_coverage(
             "n_uncovered_fridays": 0,
         }
 
+    # Drop NaN-gross trades (missing-leg-quote at entry — not valid strangles).
+    derived = derived[derived["gross_pnl_usd"].notna()]
+    if derived.empty:
+        return {
+            "rows": [], "metric": metric,
+            "n_total_fridays": 0, "n_rule_fridays": 0,
+            "n_force_fit_fridays": 0, "n_closest_fallback_fridays": 0,
+            "n_uncovered_fridays": 0,
+        }
+
     # Best-cell selection — same rule as /iv_band_summary.
     dims = ["entry_atm_iv_band", "entry_hour_ist", "expiry_bucket", "delta_target"]
     grp = derived.groupby(dims, dropna=False)

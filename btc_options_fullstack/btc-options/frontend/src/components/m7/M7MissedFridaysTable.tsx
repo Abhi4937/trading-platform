@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { InfoIcon } from './InfoIcon';
+import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import { fetchM7MissedFridays } from '../../services/m7_api';
 import type { M7ExitRule, M7Filters, M7MissedFridayRow } from '../../types/m7';
 
@@ -76,8 +77,15 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
             </span>
           )}
         </div>
-        <div style={{ fontSize: 11, color: '#7a9bb5' }}>
-          {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} rows`}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ fontSize: 11, color: '#7a9bb5' }}>
+            {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} rows`}
+          </div>
+          <span onClick={e => e.stopPropagation()}>
+            <ExcelButton
+              disabled={rows.length === 0}
+              onClick={() => exportRowsAsXlsx('m7_missed_fridays.xlsx', 'MissedFridays', rows)} />
+          </span>
         </div>
       </div>
       {!collapsed && (
@@ -99,9 +107,9 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
                     <th style={th}>IV band <InfoIcon text="ATM IV bucket the trade actually belongs to (based on entry IV)." /></th>
                     <th style={thR}>ATM IV % <InfoIcon text="Annualised ATM IV at entry, in percent." /></th>
                     <th style={thR}>Net P&L <InfoIcon text="Realised net P&L (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></th>
-                    <th style={thR}>Exit MTM <InfoIcon text="On-screen P&L at the moment of exit (gross − entry costs only)." /></th>
-                    <th style={thR}>Max MTM <InfoIcon text="Peak unrealized P&L during the hold (entry costs only)." /></th>
-                    <th style={thR}>Min MTM <InfoIcon text="Trough unrealized P&L during the hold (entry costs only)." /></th>
+                    <th style={thR}>Exit MTM <InfoIcon text="On-screen P&L at the moment of exit (gross − entry slippage only)." /></th>
+                    <th style={thR}>Max MTM <InfoIcon text="Peak unrealized P&L during the hold (entry slippage only)." /></th>
+                    <th style={thR}>Min MTM <InfoIcon text="Trough unrealized P&L during the hold (entry slippage only)." /></th>
                     <th style={thR}>Credit <InfoIcon text="Upfront credit collected at entry (call + put marks × qty × 0.001 BTC)." /></th>
                     <th style={thR}>Margin <InfoIcon text="Delta Exchange portfolio margin required at entry (29-scenario engine)." /></th>
                     <th style={th}>Win? <InfoIcon text="✓ if net P&L > 0, ✗ otherwise." /></th>

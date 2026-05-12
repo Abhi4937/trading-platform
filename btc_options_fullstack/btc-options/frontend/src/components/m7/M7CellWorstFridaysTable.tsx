@@ -102,8 +102,8 @@ export function M7CellWorstFridaysTable({
             <th style={{ padding: 4, textAlign: 'right' }}>Spot move <InfoIcon text="|spot_at_min_mtm − spot_at_entry|. The dollar move that drove the trade to its trough." /></th>
             <th style={{ padding: 4, textAlign: 'right' }}>IV peak <InfoIcon text="Max ATM IV within the hold window − entry ATM IV. Positive = IV expanded during the trade (volatility-expansion losers)." /></th>
             <th style={{ padding: 4, textAlign: 'right' }}>t(min MTM) <InfoIcon text="Relative time (0 = entry, 1 = exit) when MTM hit its trough. Closer to 0 = pain came early; closer to 1 = late-trade reversal." /></th>
-            <th style={{ padding: 4, textAlign: 'right' }}>Max MTM <InfoIcon text="Peak unrealized P&L during the hold (entry costs only)." /></th>
-            <th style={{ padding: 4, textAlign: 'right' }}>Min MTM <InfoIcon text="Trough unrealized P&L during the hold (entry costs only)." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>Max MTM <InfoIcon text="Peak unrealized P&L during the hold (entry slippage only)." /></th>
+            <th style={{ padding: 4, textAlign: 'right' }}>Min MTM <InfoIcon text="Trough unrealized P&L during the hold (entry slippage only)." /></th>
             <th style={{ padding: 4 }}></th>
           </tr>
         </thead>

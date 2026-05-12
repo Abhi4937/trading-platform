@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { InfoIcon } from './InfoIcon';
+import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import { fetchM7IvBandSummary } from '../../services/m7_api';
 import type { M7ExitRule, M7Filters, M7IvBandSummaryRow } from '../../types/m7';
 
@@ -39,6 +40,19 @@ function fmtMinutes(min: number | null | undefined): string {
   const h = Math.floor(m / 60);
   const rem = m - h * 60;
   return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
+}
+
+function fmtExitClock(
+  entryHourIst: number | null | undefined,
+  durationMin: number | null | undefined,
+): string {
+  if (entryHourIst == null || durationMin == null || isNaN(durationMin as number)) return '—';
+  const totalMin = (entryHourIst as number) * 60 + (durationMin as number);
+  const mod = ((Math.round(totalMin) % 1440) + 1440) % 1440;
+  const hh = Math.floor(mod / 60);
+  const mm = mod - hh * 60;
+  const clock = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  return `${clock} (${fmtMinutes(durationMin)})`;
 }
 
 const pnlColor = (v: number | null | undefined) =>
@@ -97,8 +111,13 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
         <div style={{ fontSize: 14, color: '#cfd9e3', fontWeight: 700 }}>
           Headline — Best combo per IV band ({metric})
         </div>
-        <div style={{ fontSize: 11, color: '#7a9bb5' }}>
-          {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} bands`}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ fontSize: 11, color: '#7a9bb5' }}>
+            {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} bands`}
+          </div>
+          <ExcelButton
+            disabled={rows.length === 0}
+            onClick={() => exportRowsAsXlsx(`m7_iv_band_summary_${metric}.xlsx`, 'Summary', rows)} />
         </div>
       </div>
       <LoadingBar visible={loading} />
@@ -128,24 +147,24 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                 <th style={thR}>Max SL streak <InfoIcon text="Longest run of consecutive trades that exited via real premium-SL (excludes take-profit fires)." /></th>
                 <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
                 <th style={thR}>Avg net <InfoIcon text="Mean net P&L per trade (all four cost components subtracted)." /></th>
-                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time MTM = mean(gross_pnl − entry costs). The on-screen P&L at the moment of exit (exit costs not deducted)." /></th>
+                <th style={thR}>Avg exit MTM <InfoIcon text="Mean exit-time MTM = mean(gross_pnl − entry slippage). The on-screen P&L at the moment of exit (exit costs not deducted)." /></th>
                 <th style={thR}>Avg win (W) <InfoIcon text="Mean net P&L across winners only." /></th>
                 <th style={thR}>Avg loss (L) <InfoIcon text="Mean net P&L across losers only (negative)." /></th>
                 <th style={thR}>Largest win (W) <InfoIcon text="Max net P&L of any single winner." /></th>
                 <th style={thR}>Largest loss (L) <InfoIcon text="Min net P&L of any single loser (most negative)." /></th>
                 {/* Winners-only — exit MTM + path MTM (peak/trough) */}
-                <th style={thR}>Avg win MTM <InfoIcon text="Mean exit-time MTM across winners (entry costs only)." /></th>
-                <th style={thR}>Total win MTM <InfoIcon text="Sum of exit-time MTM across all winning trades (entry costs only)." /></th>
-                <th style={thR}>Largest win MTM <InfoIcon text="Max exit-time MTM among winners." /></th>
+                <th style={thR}>Avg exit MTM (W) <InfoIcon text="Mean exit-time MTM across winners (entry slippage only)." /></th>
+                <th style={thR}>Total exit MTM (W) <InfoIcon text="Sum of exit-time MTM across all winning trades (entry slippage only)." /></th>
+                <th style={thR}>Largest exit MTM (W) <InfoIcon text="Max exit-time MTM among winners." /></th>
                 <th style={thR}>Avg max MTM (W) <InfoIcon text="Mean peak MTM across winners (best unrealized point during the hold)." /></th>
                 <th style={thR}>Avg min MTM (W) <InfoIcon text="Mean trough MTM across winners — how deep winners dipped before recovering." /></th>
                 <th style={thR}>Max MTM (W) <InfoIcon text="Highest peak MTM observed across all winners." /></th>
                 <th style={thR}>Min MTM (W) <InfoIcon text="Worst trough MTM observed across all winners." /></th>
                 <th style={thR}>W &lt; avg min MTM <InfoIcon text="Count of winners whose min MTM dipped below the cell's avg min-MTM-winners — i.e. winners that endured a worse-than-typical drawdown before recovering." /></th>
                 {/* Losers-only — exit MTM + path MTM (peak/trough) */}
-                <th style={thR}>Avg loss MTM <InfoIcon text="Mean exit-time MTM across losers (entry costs only)." /></th>
-                <th style={thR}>Total loss MTM <InfoIcon text="Sum of exit-time MTM across all losing trades (entry costs only)." /></th>
-                <th style={thR}>Largest loss MTM <InfoIcon text="Min exit-time MTM among losers." /></th>
+                <th style={thR}>Avg exit MTM (L) <InfoIcon text="Mean exit-time MTM across losers (entry slippage only)." /></th>
+                <th style={thR}>Total exit MTM (L) <InfoIcon text="Sum of exit-time MTM across all losing trades (entry slippage only)." /></th>
+                <th style={thR}>Largest exit MTM (L) <InfoIcon text="Min exit-time MTM among losers." /></th>
                 <th style={thR}>Avg max MTM (L) <InfoIcon text="Mean peak MTM across losers — how high losers went before turning losing." /></th>
                 <th style={thR}>Avg min MTM (L) <InfoIcon text="Mean trough MTM across losers (worst point in the hold)." /></th>
                 <th style={thR}>Max MTM (L) <InfoIcon text="Highest peak MTM observed across all losers." /></th>
@@ -159,9 +178,9 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                 <th style={thR}>Ret/credit (W) <InfoIcon text="Ret/credit restricted to winning trades only." /></th>
                 <th style={thR}>Peak % <InfoIcon text="Mean of per-trade max_mtm ÷ credit. Average peak unrealized return as % of credit — shows what was theoretically achievable before exit." /></th>
                 <th style={thR}>Trough % <InfoIcon text="Mean of per-trade min_mtm ÷ credit. Average trough unrealized return as % of credit. Negative — how deep the trade dipped below water at any point." /></th>
-                <th style={thR}>Avg exit time <InfoIcon text="Mean hold time (entry → exit) across all trades, in hours and minutes." /></th>
-                <th style={thR}>Avg winner exit <InfoIcon text="Mean hold time restricted to winning trades." /></th>
-                <th style={thR}>Avg loser exit <InfoIcon text="Mean hold time restricted to losing trades." /></th>
+                <th style={thR}>Avg exit time <InfoIcon text="Mean exit IST clock time across all trades = (entry hour + avg hold duration) mod 24h. Format: HH:MM (Xh Ym) where the bracketed value is the average hold duration." /></th>
+                <th style={thR}>Avg winner exit <InfoIcon text="Mean exit IST clock time restricted to winning trades, with avg winners' hold duration in brackets." /></th>
+                <th style={thR}>Avg loser exit <InfoIcon text="Mean exit IST clock time restricted to losing trades, with avg losers' hold duration in brackets." /></th>
               </tr>
             </thead>
             <tbody>
@@ -229,14 +248,14 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
                   <td style={{ ...tdR, color: '#f85149' }}>
                     {pct(r.avg_pct_min_mtm_on_credit)}
                   </td>
-                  <td style={{ ...tdR, color: '#f0b300' }}>
-                    {fmtMinutes(r.avg_exit_offset_minutes)}
+                  <td style={tdR}>
+                    {fmtExitClock(r.entry_hour_ist, r.avg_exit_offset_minutes)}
                   </td>
-                  <td style={{ ...tdR, color: '#3fb950' }}>
-                    {fmtMinutes(r.avg_winner_exit_offset_minutes)}
+                  <td style={tdR}>
+                    {fmtExitClock(r.entry_hour_ist, r.avg_winner_exit_offset_minutes)}
                   </td>
-                  <td style={{ ...tdR, color: '#f85149' }}>
-                    {fmtMinutes(r.avg_loser_exit_offset_minutes)}
+                  <td style={tdR}>
+                    {fmtExitClock(r.entry_hour_ist, r.avg_loser_exit_offset_minutes)}
                   </td>
                 </tr>
               ))}
