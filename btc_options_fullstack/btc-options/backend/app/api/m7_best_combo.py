@@ -1499,36 +1499,15 @@ def get_single_combo_simulation(
     }
 
 
-@router.get("/iv_band_best_combo/missed_fridays_force_fit")
-def get_missed_fridays_force_fit():
-    """For each Friday NOT covered by the current 10 best-combo picks (under
-    default conditions), report force-fit details: which of the 10 picks the
-    Friday has a trade at, and (where the trade exists) the realized P&L for
-    that pick on that Friday.
-
-    Picks are computed in-endpoint using the default avg_net_pnl ranking +
-    min_hit_pct=50 — i.e. matches what the Best Combo table picks by default.
-
-    Returns: per-Friday list with {friday_date_ist, n_total_trades, bands_touched,
-    pick_availability: [{pick_band, fits, net_pnl_if_fit, win_if_fit}]}.
-    """
-    # Step 1: get the 10 picks under default conditions
-    try_load_grid_only()
-    if _GRID_STATE["status"] != "ready":
-        return {"rows": [], "status": _GRID_STATE["status"]}
-    grid: pd.DataFrame = _GRID_STATE["grid"]
-    if grid is None or grid.empty:
-        return {"rows": [], "status": "empty"}
-    picks = _pick_best_per_band(grid, "avg_net_pnl", min_hit_pct=50.0)
+def _compute_missed_fridays(picks: pd.DataFrame) -> dict:
+    """Shared body: given a picks frame (rule_label + (band, hour, expiry, Δ)
+    per band), find Fridays not naturally covered by any pick and return
+    per-Friday availability of each pick's (hour, expiry, Δ)."""
     if picks.empty:
         return {"rows": [], "status": "no_picks"}
-
-    # Step 2: load enriched trades to find missed Fridays + check availability
     trades = m7r._load_trades()
     if trades.empty:
         return {"rows": [], "status": "no_trades"}
-
-    # Derive expiry_bucket if missing (matches m7_results._load_trades logic).
     if "expiry_bucket" not in trades.columns and "dte_days" in trades.columns:
         trades = trades.copy()
         trades["expiry_bucket"] = pd.cut(
@@ -1539,11 +1518,8 @@ def get_missed_fridays_force_fit():
         ).astype(str)
 
     all_fridays = sorted(set(trades["friday_date_ist"].astype(str).unique()))
-
-    # Step 3: under each pick's (band, hour, expiry, delta), figure out which
-    # Fridays "naturally" land in that combo (entry IV in the picked band).
-    matched_fridays = set()
-    pick_records = []
+    matched_fridays: set[str] = set()
+    pick_records: list[dict] = []
     for _, p in picks.iterrows():
         cell_trades = trades[
             (trades["entry_atm_iv_band"] == p["iv_band"])
@@ -1568,10 +1544,6 @@ def get_missed_fridays_force_fit():
                 "n_matched": len(matched_fridays),
                 "picks": pick_records}
 
-    # Step 4: for each missed Friday, check pick availability + carry trade
-    # raw P&L (gross_pnl from path = closest available net proxy; full rule-
-    # exit derivation per-pick would be expensive — use grid's pick aggregates
-    # as the headline approximation).
     rows = []
     for fday in missed:
         fday_trades = trades[trades["friday_date_ist"].astype(str) == fday]
@@ -1586,8 +1558,6 @@ def get_missed_fridays_force_fit():
                               float(p["delta_target"]), atol=0.001))
             ]
             fits = not m.empty
-            # actual_band = the band the Friday's IV actually landed in for
-            # this (hour, expiry, delta) — may differ from p["band"]
             actual_band = None
             if fits:
                 band_series = m["entry_atm_iv_band"].dropna()
@@ -1614,3 +1584,79 @@ def get_missed_fridays_force_fit():
         "n_matched": len(matched_fridays),
         "picks": pick_records,
     }
+
+
+@router.get("/iv_band_best_combo/missed_fridays")
+def get_missed_fridays_for_best_combo(
+    ranking: str = Query("avg_net_pnl"),
+    secondary: Optional[str] = Query(None),
+    tolerance_pct: float = Query(5.0, ge=0.0, le=100.0),
+    rule_family: str = Query("all"),
+    total_capital_usd: Optional[float] = Query(None, ge=0),
+    pct_deploy: float = Query(100.0, ge=0, le=100),
+    dd_metric: Optional[str] = Query(None),
+    dd_threshold: Optional[float] = Query(None),
+    min_hit_pct: float = Query(50.0, ge=0.0, le=100.0),
+    max_loss_cap_pct: Optional[float] = Query(None, ge=0.0, le=100.0),
+    max_drop_peak_to_trough_pct: Optional[float] = Query(None, ge=0.0, le=100.0),
+    min_n_trades: int = Query(5, ge=0),
+    min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0),
+    pick_mode: str = Query("by_hour"),
+):
+    """Missed Fridays tied to the Best Combo picker. Accepts ALL sizing + filter
+    params from /iv_band_best_combo so the picks computed here exactly match
+    what the Best Combo table shows. Use this when the user has applied
+    Conservative-preset or custom filters and wants to see which Fridays the
+    Best Combo picks cover.
+    """
+    if ranking not in _VALID_RANKINGS:
+        raise HTTPException(status_code=400, detail=f"ranking must be one of {sorted(_VALID_RANKINGS)}")
+    if rule_family not in _VALID_RULE_FAMILIES:
+        raise HTTPException(status_code=400, detail=f"rule_family must be one of {sorted(_VALID_RULE_FAMILIES)}")
+    try_load_grid_only()
+    if _GRID_STATE["status"] != "ready":
+        return {"rows": [], "status": _GRID_STATE["status"]}
+    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if grid is None or grid.empty:
+        return {"rows": [], "status": "empty"}
+    family_grid = _filter_grid_by_family(grid, rule_family)
+    if pick_mode == "aggregate_hours":
+        family_grid = _aggregate_across_hours(family_grid)
+    picks = _pick_best_per_band(
+        family_grid, ranking,
+        secondary=secondary,
+        tolerance_pct=tolerance_pct if secondary else None,
+        total_capital_usd=total_capital_usd,
+        pct_deploy=pct_deploy,
+        dd_metric=dd_metric,
+        dd_threshold=dd_threshold,
+        min_hit_pct=min_hit_pct,
+        max_loss_cap_pct=max_loss_cap_pct,
+        max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
+        min_n_trades=min_n_trades,
+        min_win_rate=min_win_rate,
+    )
+    return _compute_missed_fridays(picks)
+
+
+@router.get("/iv_band_best_combo/missed_fridays_force_fit")
+def get_missed_fridays_force_fit():
+    """For each Friday NOT covered by the current 10 best-combo picks (under
+    default conditions), report force-fit details: which of the 10 picks the
+    Friday has a trade at, and (where the trade exists) the realized P&L for
+    that pick on that Friday.
+
+    Picks are computed in-endpoint using the default avg_net_pnl ranking +
+    min_hit_pct=50 — i.e. matches what the Best Combo table picks by default.
+
+    Returns: per-Friday list with {friday_date_ist, n_total_trades, bands_touched,
+    pick_availability: [{pick_band, fits, net_pnl_if_fit, win_if_fit}]}.
+    """
+    try_load_grid_only()
+    if _GRID_STATE["status"] != "ready":
+        return {"rows": [], "status": _GRID_STATE["status"]}
+    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if grid is None or grid.empty:
+        return {"rows": [], "status": "empty"}
+    picks = _pick_best_per_band(grid, "avg_net_pnl", min_hit_pct=50.0)
+    return _compute_missed_fridays(picks)

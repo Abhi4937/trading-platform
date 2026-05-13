@@ -14,9 +14,10 @@
 // First request after backend restart triggers a ~45 min background warmup;
 // while warming the API returns 202-style {status:"warming", rules_done…}.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { M7RuleComparisonModal } from './M7RuleComparisonModal';
 import { M7CellAnalysisModal } from './M7CellAnalysisModal';
+import { M7BestComboMissedFridaysTable } from './M7BestComboMissedFridaysTable';
 import { InfoIcon } from './InfoIcon';
 import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import {
@@ -451,6 +452,27 @@ export function M7IvBandBestComboTable() {
     return () => { active = false; ac.abort(); };
   }, [primary, family, mode, secondary, tolerancePct,
       sizingMode, fixedLots,
+      totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode]);
+
+  // Same args we send to /iv_band_best_combo so the missed-Fridays panel
+  // below computes its picks against the user's exact filter/sizing state.
+  const missedFridaysArgs = useMemo<FetchBestComboArgs>(() => {
+    const a: FetchBestComboArgs = { ranking: primary, rule_family: family };
+    if (mode === 'tiebreak') { a.secondary = secondary; a.tolerance_pct = tolerancePct; }
+    if (sizingMode === 'capital' && totalCapitalUsd > 0) {
+      a.total_capital_usd = totalCapitalUsd;
+      a.pct_deploy = pctDeploy;
+      if (ddMetric && ddThreshold > 0) { a.dd_metric = ddMetric; a.dd_threshold = ddThreshold; }
+    }
+    a.min_hit_pct = minHitPct;
+    if (maxLossCapPct != null && maxLossCapPct > 0 && sizingMode === 'capital') a.max_loss_cap_pct = maxLossCapPct;
+    if (maxDropPct != null && maxDropPct > 0) a.max_drop_peak_to_trough_pct = maxDropPct;
+    a.min_n_trades = minNTrades;
+    if (minWinRate != null && minWinRate > 0) a.min_win_rate = minWinRate;
+    a.pick_mode = pickMode;
+    return a;
+  }, [primary, family, mode, secondary, tolerancePct, sizingMode,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode]);
 
@@ -1176,6 +1198,7 @@ export function M7IvBandBestComboTable() {
           )}
         </div>
       )}
+      <M7BestComboMissedFridaysTable args={missedFridaysArgs} />
       {drilldown && (
         <M7RuleComparisonModal
           band={drilldown.band}

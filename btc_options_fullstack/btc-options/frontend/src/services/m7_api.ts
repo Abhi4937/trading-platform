@@ -515,6 +515,35 @@ export function fetchM7MissedFridaysForceFit(signal?: AbortSignal): Promise<M7Mi
     `${BASE}/iv_band_best_combo/missed_fridays_force_fit`, signal);
 }
 
+// Best Combo picker's own missed-Fridays endpoint. Accepts ALL the same
+// sizing + filter params as /iv_band_best_combo so the picks computed here
+// match the user's current Best Combo table state (NOT the simpler headline
+// picker).
+export function fetchM7BestComboMissedFridays(
+  args: Partial<FetchBestComboArgs>,
+  signal?: AbortSignal,
+): Promise<M7MissedFridaysForceFitResponse> {
+  const p = new URLSearchParams();
+  p.set('ranking', args.ranking ?? 'avg_net_pnl');
+  if (args.rule_family && args.rule_family !== 'all') p.set('rule_family', args.rule_family);
+  if (args.total_capital_usd != null && args.total_capital_usd > 0) {
+    p.set('total_capital_usd', String(args.total_capital_usd));
+    if (args.pct_deploy != null) p.set('pct_deploy', String(args.pct_deploy));
+    if (args.dd_metric && args.dd_threshold != null) {
+      p.set('dd_metric', args.dd_metric);
+      p.set('dd_threshold', String(args.dd_threshold));
+    }
+  }
+  if (args.min_hit_pct != null) p.set('min_hit_pct', String(args.min_hit_pct));
+  if (args.max_loss_cap_pct != null) p.set('max_loss_cap_pct', String(args.max_loss_cap_pct));
+  if (args.max_drop_peak_to_trough_pct != null) p.set('max_drop_peak_to_trough_pct', String(args.max_drop_peak_to_trough_pct));
+  if (args.min_n_trades != null) p.set('min_n_trades', String(args.min_n_trades));
+  if (args.min_win_rate != null) p.set('min_win_rate', String(args.min_win_rate));
+  if (args.pick_mode && args.pick_mode !== 'by_hour') p.set('pick_mode', args.pick_mode);
+  return jsonFetch<M7MissedFridaysForceFitResponse>(
+    `${BASE}/iv_band_best_combo/missed_fridays?${p.toString()}`, signal);
+}
+
 // ── Loss-anatomy: Chunk 3 — per-cell winners-vs-losers ─────────────────────
 export interface M7CellWvlIndicatorRow {
   indicator: string;
