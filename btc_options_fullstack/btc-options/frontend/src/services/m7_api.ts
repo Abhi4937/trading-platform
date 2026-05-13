@@ -315,7 +315,18 @@ export function fetchM7IvBandBestCombo(
 // ── New diagnostic endpoints (Phase 1) ────────────────────────────────────────
 
 export interface M7RuleComparisonRow extends M7IvBandBestComboRow {
-  hit_pct?: number | null;  // (n_trades - n_hard_cap) / n_trades
+  hit_pct?: number | null;            // (n_trades - n_hard_cap) / n_trades
+  // Per-rule sizing — mirrors what the picker actually optimises on
+  // when capital + DD-cap are active. Each rule has its own lots
+  // because each has its own avg_margin and per-100 dd_metric value.
+  lots?: number | null;
+  scaled_avg_net_pnl?: number | null;
+  scaled_max_loss_usd?: number | null;
+  // Tagged when this rule would have been excluded by one of the picker's
+  // hard filters (min_hit_pct / max_loss_cap / etc.). Reasons are
+  // ";"-separated; empty when not filtered.
+  filtered_out?: boolean | null;
+  filter_reasons?: string | null;
 }
 
 export interface M7RuleComparisonResponse {
@@ -326,6 +337,11 @@ export interface M7RuleComparisonResponse {
   delta_target?: number;
   entry_hour_ist?: number;
   n_rules?: number;
+  sizing_active?: boolean;
+  total_capital_usd?: number | null;
+  pct_deploy?: number;
+  dd_metric?: string | null;
+  dd_threshold?: number | null;
 }
 
 export function fetchM7RuleComparison(args: {
@@ -333,6 +349,15 @@ export function fetchM7RuleComparison(args: {
   expiry_bucket: string;
   delta_target: number;
   entry_hour_ist: number;
+  total_capital_usd?: number | null;
+  pct_deploy?: number;
+  dd_metric?: string | null;
+  dd_threshold?: number | null;
+  min_hit_pct?: number | null;
+  max_loss_cap_pct?: number | null;
+  max_drop_peak_to_trough_pct?: number | null;
+  min_n_trades?: number | null;
+  min_win_rate?: number | null;
 }, signal?: AbortSignal): Promise<M7RuleComparisonResponse> {
   const p = new URLSearchParams({
     band: args.band,
@@ -340,6 +365,19 @@ export function fetchM7RuleComparison(args: {
     delta_target: String(args.delta_target),
     entry_hour_ist: String(args.entry_hour_ist),
   });
+  if (args.total_capital_usd != null && args.total_capital_usd > 0) {
+    p.set('total_capital_usd', String(args.total_capital_usd));
+    if (args.pct_deploy != null) p.set('pct_deploy', String(args.pct_deploy));
+    if (args.dd_metric && args.dd_threshold != null) {
+      p.set('dd_metric', args.dd_metric);
+      p.set('dd_threshold', String(args.dd_threshold));
+    }
+  }
+  if (args.min_hit_pct != null) p.set('min_hit_pct', String(args.min_hit_pct));
+  if (args.max_loss_cap_pct != null) p.set('max_loss_cap_pct', String(args.max_loss_cap_pct));
+  if (args.max_drop_peak_to_trough_pct != null) p.set('max_drop_peak_to_trough_pct', String(args.max_drop_peak_to_trough_pct));
+  if (args.min_n_trades != null) p.set('min_n_trades', String(args.min_n_trades));
+  if (args.min_win_rate != null) p.set('min_win_rate', String(args.min_win_rate));
   return jsonFetch<M7RuleComparisonResponse>(
     `${BASE}/iv_band_best_combo/rule_comparison?${p}`, signal);
 }

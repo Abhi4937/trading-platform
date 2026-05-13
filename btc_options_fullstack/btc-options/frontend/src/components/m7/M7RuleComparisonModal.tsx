@@ -15,41 +15,80 @@ const hitColor = (hit: number | null | undefined) =>
     : hit >= 0.5 ? '#3fb950'
     : hit >= 0.25 ? '#f0b300' : '#f85149';
 
-type SortKey = 'rule_label' | 'hit_pct' | 'avg_net_pnl' | 'win_rate' | 'max_loss_usd' | 'composite_score' | 'n_trades';
+type SortKey = 'rule_label' | 'hit_pct' | 'avg_net_pnl' | 'win_rate' | 'max_loss_usd' | 'composite_score' | 'n_trades' | 'scaled_avg_net_pnl' | 'lots' | 'scaled_primary';
 type SortDir = 'asc' | 'desc';
 
 export function M7RuleComparisonModal({
   band, expiry_bucket, delta_target, entry_hour_ist, pickedRuleLabel,
-  lots = 100, onClose,
+  totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
+  minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate,
+  primaryMetric = 'avg_net_pnl', primaryLabel = 'Avg net',
+  onClose,
 }: {
   band: string;
   expiry_bucket: string;
   delta_target: number;
   entry_hour_ist: number;
   pickedRuleLabel?: string;
-  lots?: number;  // sized-lots from the parent table; defaults to 100 (baseline)
+  totalCapitalUsd?: number | null;
+  pctDeploy?: number;
+  ddMetric?: string | null;
+  ddThreshold?: number | null;
+  minHitPct?: number | null;
+  maxLossCapPct?: number | null;
+  maxDropPct?: number | null;
+  minNTrades?: number | null;
+  minWinRate?: number | null;
+  primaryMetric?: string;  // which column the parent picker ranks on
+  primaryLabel?: string;   // display label, e.g. "Composite score"
   onClose: () => void;
 }) {
-  const k = (lots > 0 ? lots : 100) / 100;
-  const sk = (v: number | null | undefined): number | null =>
-    v == null || isNaN(v as number) ? null : (v as number) * k;
+  const sizingActive = totalCapitalUsd != null && totalCapitalUsd > 0;
   const [rows, setRows] = useState<M7RuleComparisonRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>('hit_pct');
+  // When sizing is active, default-sort by the scaled PRIMARY metric (the column
+  // the picker actually ranks on). For non-sizing, sort by primary itself.
+  const [sortKey, setSortKey] = useState<SortKey>(
+    sizingActive ? 'scaled_primary' : 'hit_pct',
+  );
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+
+  // Per-row scaled primary = row[primaryMetric] × row.lots / 100. Reflects what
+  // the picker actually maxes on, regardless of which primary the user chose.
+  const rowsWithScaled = useMemo(() => rows.map(r => {
+    const base = (r as any)[primaryMetric];
+    const lots = r.lots ?? 100;
+    const scaled_primary = (base == null || isNaN(base as number))
+      ? null
+      : (base as number) * lots / 100;
+    return { ...r, scaled_primary };
+  }), [rows, primaryMetric]);
 
   useEffect(() => {
     let active = true;
     const ac = new AbortController();
     setLoading(true);
     setErr(null);
-    fetchM7RuleComparison({ band, expiry_bucket, delta_target, entry_hour_ist }, ac.signal)
+    fetchM7RuleComparison({
+      band, expiry_bucket, delta_target, entry_hour_ist,
+      total_capital_usd: totalCapitalUsd ?? null,
+      pct_deploy: pctDeploy,
+      dd_metric: ddMetric ?? null,
+      dd_threshold: ddThreshold ?? null,
+      min_hit_pct: minHitPct ?? null,
+      max_loss_cap_pct: maxLossCapPct ?? null,
+      max_drop_peak_to_trough_pct: maxDropPct ?? null,
+      min_n_trades: minNTrades ?? null,
+      min_win_rate: minWinRate ?? null,
+    }, ac.signal)
       .then(r => { if (active) setRows(r.rows ?? []); })
       .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
-  }, [band, expiry_bucket, delta_target, entry_hour_ist]);
+  }, [band, expiry_bucket, delta_target, entry_hour_ist,
+      totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate]);
 
   // ESC closes
   useEffect(() => {
@@ -59,7 +98,7 @@ export function M7RuleComparisonModal({
   }, [onClose]);
 
   const sorted = useMemo(() => {
-    const arr = [...rows];
+    const arr = [...rowsWithScaled];
     const sign = sortDir === 'desc' ? -1 : 1;
     arr.sort((a, b) => {
       const av = (a as any)[sortKey];
@@ -122,7 +161,9 @@ export function M7RuleComparisonModal({
           </button>
         </div>
         <div style={{ color: '#7a9bb5', fontSize: 10, marginBottom: 8 }}>
-          $ values scaled to <strong style={{ color: '#cfd9e3' }}>{lots} lots</strong> (matches the picked cell's sized lots). Other rules may require different margin at the same capital.
+          {sizingActive
+            ? <>Each rule has its own <strong style={{ color: '#cfd9e3' }}>lots</strong> under the same Capital ${totalCapitalUsd?.toFixed(0)} / Deploy {pctDeploy ?? 100}%{ddMetric ? <> / DD cap {ddMetric}@${ddThreshold}</> : null} constraints. Picker maxes <strong style={{ color: '#cfd9e3' }}>Scaled {primaryLabel}</strong>. Rows tagged <span style={{ color: '#f0b300' }}>⊘</span> were excluded by hard filters (Hit %, Min n, Max loss %, Max drop %, Win %) — that's why the ★ may not be the visible top.</>
+            : <>No capital sizing active — values shown at per-100-lot baseline. Picker ranks by {primaryLabel}.</>}
         </div>
         {loading && <div style={{ color: '#7a9bb5', fontSize: 12 }}>Loading…</div>}
         {err && <div style={{ color: '#f85149', fontSize: 12 }}>{err}</div>}
@@ -141,8 +182,10 @@ export function M7RuleComparisonModal({
                 <th style={thR} onClick={() => setSort('hit_pct')}>Hit %{arrow('hit_pct')}</th>
                 <th style={thR} onClick={() => setSort('n_trades')}>n{arrow('n_trades')}</th>
                 <th style={thR} onClick={() => setSort('win_rate')}>Win %{arrow('win_rate')}</th>
-                <th style={thR} onClick={() => setSort('avg_net_pnl')}>Avg net{arrow('avg_net_pnl')}</th>
-                <th style={thR} onClick={() => setSort('max_loss_usd')}>Max loss{arrow('max_loss_usd')}</th>
+                <th style={thR} onClick={() => setSort('avg_net_pnl')}>Avg net (/100){arrow('avg_net_pnl')}</th>
+                {sizingActive && <th style={thR} onClick={() => setSort('lots')}>Lots{arrow('lots')}</th>}
+                {sizingActive && <th style={thR} onClick={() => setSort('scaled_primary')}>Scaled {primaryLabel}{arrow('scaled_primary')}</th>}
+                <th style={thR} onClick={() => setSort('max_loss_usd')}>Max loss (/100){arrow('max_loss_usd')}</th>
                 <th style={thR} onClick={() => setSort('composite_score')}>Composite{arrow('composite_score')}</th>
                 <th style={thR}>n_hard_cap</th>
                 <th style={thR}>n_rule_trigger</th>
@@ -152,22 +195,48 @@ export function M7RuleComparisonModal({
             <tbody>
               {sorted.map(r => {
                 const isPicked = r.rule_label === pickedRuleLabel;
+                const isFiltered = !!r.filtered_out;
                 return (
                   <tr key={r.rule_label} style={{
                     borderTop: '1px solid #1a2d42',
                     background: isPicked ? '#0d2747' : 'transparent',
+                    opacity: isFiltered ? 0.5 : 1,
                   }}>
                     <td style={{ ...td, color: isPicked ? '#1f6feb' : '#cfd9e3',
                                  fontWeight: isPicked ? 700 : 400 }}>
                       {isPicked ? '★ ' : ''}{r.rule_label}
+                      {isFiltered && (
+                        <span
+                          style={{
+                            marginLeft: 6, padding: '1px 5px', fontSize: 9,
+                            color: '#f0b300', border: '1px solid #f0b300',
+                            borderRadius: 3, fontWeight: 600, verticalAlign: 'middle',
+                          }}
+                          title={`Excluded by picker filter: ${r.filter_reasons}`}>
+                          ⊘ {r.filter_reasons}
+                        </span>
+                      )}
                     </td>
                     <td style={{ ...tdR, color: hitColor(r.hit_pct) }}>
                       {r.hit_pct == null ? '—' : `${(r.hit_pct * 100).toFixed(0)}%`}
                     </td>
                     <td style={tdR}>{r.n_trades}</td>
                     <td style={tdR}>{pct(r.win_rate)}</td>
-                    <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(sk(r.avg_net_pnl))}</td>
-                    <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(sk(r.max_loss_usd))}</td>
+                    <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(r.avg_net_pnl)}</td>
+                    {sizingActive && <td style={tdR}>{r.lots ?? '—'}</td>}
+                    {sizingActive && (() => {
+                      const sp = (r as any).scaled_primary;
+                      // Format $ for usd-like primaries, plain number for ratios.
+                      const isDollar = primaryMetric.includes('pnl') || primaryMetric.includes('usd')
+                        || primaryMetric.includes('mtm') || primaryMetric.includes('credit')
+                        || primaryMetric.includes('margin') || primaryMetric.includes('loss');
+                      return (
+                        <td style={{ ...tdR, color: pnlColor(sp), fontWeight: isPicked ? 700 : 400 }}>
+                          {sp == null ? '—' : (isDollar ? usd(sp) : num(sp, 3))}
+                        </td>
+                      );
+                    })()}
+                    <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(r.max_loss_usd)}</td>
                     <td style={tdR}>{num(r.composite_score, 3)}</td>
                     <td style={tdR}>{r.n_hard_cap ?? '—'}</td>
                     <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>

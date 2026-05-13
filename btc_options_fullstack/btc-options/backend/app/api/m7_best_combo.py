@@ -1194,9 +1194,26 @@ def get_rule_comparison(
     expiry_bucket: str = Query(..., description="Expiry bucket label"),
     delta_target: float = Query(..., ge=0.0, le=1.0),
     entry_hour_ist: int = Query(..., ge=0, le=23),
+    total_capital_usd: Optional[float] = Query(None, ge=0,
+        description="When set, apply per-rule sizing under the same constraints as the main picker."),
+    pct_deploy: float = Query(100.0, ge=0, le=100),
+    dd_metric: Optional[str] = Query(None,
+        description="DD-cap metric column (e.g. largest_loss_mtm). Mirrors /iv_band_best_combo."),
+    dd_threshold: Optional[float] = Query(None,
+        description="DD-cap threshold (per-100-lot absolute value)."),
+    min_hit_pct: float = Query(0.0, ge=0.0, le=100.0,
+        description="Tag rules where hit % < this as filtered (mirrors main picker)."),
+    max_loss_cap_pct: Optional[float] = Query(None, ge=0.0, le=100.0),
+    max_drop_peak_to_trough_pct: Optional[float] = Query(None, ge=0.0, le=100.0),
+    min_n_trades: int = Query(0, ge=0),
+    min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0),
 ):
     """Return all rule variants for a fixed (band, expiry, delta, hour) cell.
-    Power-user view — lets the trader see what the picker chose vs alternatives.
+
+    When sizing params are provided, also returns the *per-rule* `lots` (and
+    `scaled_avg_net_pnl`, `scaled_max_loss_usd`) so the user can see exactly
+    what the picker optimises on. Without sizing, baseline per-100-lot
+    columns are returned.
     """
     try_load_grid_only()
     if _GRID_STATE["status"] != "ready":
@@ -1215,10 +1232,70 @@ def get_rule_comparison(
                 "expiry_bucket": expiry_bucket,
                 "delta_target": delta_target,
                 "entry_hour_ist": entry_hour_ist}
-    # Add hit_pct = (n_trades - n_hard_cap) / n_trades for sortable column.
+    # Hit % = fraction of non-hard-cap exits.
     n_tr = sub["n_trades"].astype(float)
     nhc = sub["n_hard_cap"].astype(float)
     sub["hit_pct"] = np.where(n_tr > 0, (n_tr - nhc) / n_tr, np.nan)
+
+    # Per-rule sizing — same code path as _pick_best_per_band so the modal
+    # mirrors what the picker actually sees. Each rule gets its own lots
+    # because each has its own avg_margin and per-100 value of dd_metric.
+    sizing_active = total_capital_usd is not None and total_capital_usd > 0
+    if sizing_active:
+        sub = _attach_lots_column(
+            sub, total_capital_usd, pct_deploy, dd_metric, dd_threshold,
+        )
+        sub["lots"] = sub["_lots"].astype(int)
+        sub = sub.drop(columns=["_lots"], errors="ignore")
+    else:
+        sub["lots"] = 100  # baseline
+
+    # Backend-computed scaled columns so the frontend doesn't have to
+    # recompute. Picker ranks on scaled_avg_net_pnl.
+    sub["scaled_avg_net_pnl"] = sub["avg_net_pnl"].astype(float) * sub["lots"] / 100.0
+    if "max_loss_usd" in sub.columns:
+        sub["scaled_max_loss_usd"] = (
+            sub["max_loss_usd"].astype(float) * sub["lots"] / 100.0
+        )
+
+    # Tag each row with which filter(s) would have excluded it from the picker.
+    # Modal renders these as badges so the user understands why higher-ranking
+    # alternatives may not have been picked under Conservative-preset filters.
+    filter_reasons: list[list[str]] = [[] for _ in range(len(sub))]
+    if min_hit_pct > 0:
+        hit_mask = (sub["hit_pct"].fillna(-1.0) * 100.0) < float(min_hit_pct)
+        for i, bad in enumerate(hit_mask.to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append(f"hit<{int(min_hit_pct)}")
+    if min_n_trades > 0 and "n_trades" in sub.columns:
+        n_mask = sub["n_trades"].fillna(0).astype(int) < int(min_n_trades)
+        for i, bad in enumerate(n_mask.to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append(f"n<{int(min_n_trades)}")
+    if min_win_rate is not None and float(min_win_rate) > 0 and "win_rate" in sub.columns:
+        wr_mask = sub["win_rate"].fillna(-1.0) < (float(min_win_rate) / 100.0)
+        for i, bad in enumerate(wr_mask.to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append(f"win%<{int(min_win_rate)}")
+    if (max_drop_peak_to_trough_pct is not None
+            and float(max_drop_peak_to_trough_pct) > 0
+            and "avg_pct_drop_peak_to_trough" in sub.columns):
+        cap = float(max_drop_peak_to_trough_pct) / 100.0
+        drop_mask = sub["avg_pct_drop_peak_to_trough"].astype(float).fillna(-1.0) > cap
+        for i, bad in enumerate(drop_mask.to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append(f"drop>{int(max_drop_peak_to_trough_pct)}%")
+    if (sizing_active and max_loss_cap_pct is not None
+            and float(max_loss_cap_pct) > 0 and "scaled_max_loss_usd" in sub.columns):
+        deployable = float(total_capital_usd) * max(0.0, float(pct_deploy)) / 100.0
+        cap_dollars = deployable * float(max_loss_cap_pct) / 100.0
+        ml_mask = sub["scaled_max_loss_usd"].astype(float).abs() > cap_dollars
+        for i, bad in enumerate(ml_mask.fillna(False).to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append(f"loss>{int(max_loss_cap_pct)}%")
+    sub["filter_reasons"] = ["; ".join(r) for r in filter_reasons]
+    sub["filtered_out"] = [len(r) > 0 for r in filter_reasons]
+
     sub = sub.sort_values(["hit_pct", "avg_net_pnl"], ascending=[False, False])
     return {
         "rows": _records(sub),
@@ -1228,6 +1305,11 @@ def get_rule_comparison(
         "delta_target": delta_target,
         "entry_hour_ist": entry_hour_ist,
         "n_rules": int(len(sub)),
+        "sizing_active": sizing_active,
+        "total_capital_usd": total_capital_usd,
+        "pct_deploy": pct_deploy,
+        "dd_metric": dd_metric,
+        "dd_threshold": dd_threshold,
     }
 
 

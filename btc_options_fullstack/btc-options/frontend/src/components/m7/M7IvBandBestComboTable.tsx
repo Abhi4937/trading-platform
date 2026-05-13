@@ -1172,7 +1172,17 @@ export function M7IvBandBestComboTable() {
           delta_target={drilldown.delta_target}
           entry_hour_ist={drilldown.entry_hour_ist}
           pickedRuleLabel={drilldown.rule_label}
-          lots={drilldown.lots}
+          totalCapitalUsd={sizingMode === 'capital' ? totalCapitalUsd : null}
+          pctDeploy={pctDeploy}
+          ddMetric={sizingMode === 'capital' ? ddMetric : null}
+          ddThreshold={sizingMode === 'capital' && ddMetric ? ddThreshold : null}
+          minHitPct={minHitPct}
+          maxLossCapPct={sizingMode === 'capital' ? maxLossCapPct : null}
+          maxDropPct={maxDropPct}
+          minNTrades={minNTrades}
+          minWinRate={minWinRate}
+          primaryMetric={primary}
+          primaryLabel={primaryDef.label}
           onClose={() => setDrilldown(null)} />
       )}
       {analysis && (
