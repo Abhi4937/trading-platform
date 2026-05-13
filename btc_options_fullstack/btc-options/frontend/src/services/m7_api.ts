@@ -218,6 +218,9 @@ export interface M7IvBandBestComboRow {
   win_rate_last_26w?: number | null;
   // v6 — fixed-hour exit counter (separate from rule_trigger / hard_cap)
   n_fixed_hour_ist?: number | null;
+  // Picker-tag: true when the picker had to fall back below the min_n_trades
+  // threshold for this band (no cells in that band met the credibility floor).
+  _low_sample_warning?: boolean | null;
 }
 
 // Any of the metric keys backend exposes via _METRIC_DIRECTIONS, plus
@@ -253,6 +256,9 @@ export interface FetchBestComboArgs {
   min_hit_pct?: number | null;            // default 50; 0 disables
   max_loss_cap_pct?: number | null;       // drop cells where scaled |max_loss| > cap%
   max_drop_peak_to_trough_pct?: number | null;  // drop cells where avg drop > cap (v6 only)
+  min_n_trades?: number | null;           // default 5; drops cells with too-small sample
+  min_win_rate?: number | null;           // 0–100; drops cells whose win_rate is below this
+  pick_mode?: 'by_hour' | 'aggregate_hours';  // 'aggregate_hours' collapses entry_hour dimension
 }
 
 export function fetchM7IvBandBestCombo(
@@ -292,6 +298,15 @@ export function fetchM7IvBandBestCombo(
   }
   if (opts.max_drop_peak_to_trough_pct != null) {
     params.set('max_drop_peak_to_trough_pct', String(opts.max_drop_peak_to_trough_pct));
+  }
+  if (opts.min_n_trades != null) {
+    params.set('min_n_trades', String(opts.min_n_trades));
+  }
+  if (opts.min_win_rate != null) {
+    params.set('min_win_rate', String(opts.min_win_rate));
+  }
+  if (opts.pick_mode && opts.pick_mode !== 'by_hour') {
+    params.set('pick_mode', opts.pick_mode);
   }
   return jsonFetch<M7IvBandBestComboResponse>(
     `${BASE}/iv_band_best_combo?${params.toString()}`, signal);

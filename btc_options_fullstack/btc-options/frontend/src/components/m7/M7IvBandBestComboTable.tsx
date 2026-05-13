@@ -346,6 +346,18 @@ export function M7IvBandBestComboTable() {
   // Effective after v6 grid lands (column exists). Pre-v6 the filter is a no-op.
   const [maxDropPct, setMaxDropPct] = useState<number | null>(
     () => loadLS('max_drop_pct', null));
+  // min_n_trades: drop cells with too-small sample. Default 5 = "single-digit
+  // samples can't generalise". Per-band fallback so high-IV bands with only
+  // n=1 cells still show up with a warning chip.
+  const [minNTrades, setMinNTrades] = useState<number>(
+    () => loadLS('min_n_trades', 5));
+  // min_win_rate: filter cells whose win_rate < X%. 0/null disables.
+  const [minWinRate, setMinWinRate] = useState<number | null>(
+    () => loadLS('min_win_rate', null));
+  // pick_mode: 'by_hour' (one cell per band+hour) vs 'aggregate_hours'
+  // (collapse hours so every Friday with this band's IV is tested).
+  const [pickMode, setPickMode] = useState<'by_hour' | 'aggregate_hours'>(
+    () => loadLS('pick_mode', 'by_hour') as 'by_hour' | 'aggregate_hours');
   // Pro Metrics columns toggle — Sharpe/Sortino/VaR/CVaR/Worst-5 + path peak-trough-peak.
   // Off by default to keep the table manageable; persisted to localStorage.
   const [showProMetrics, setShowProMetrics] = useState<boolean>(
@@ -381,6 +393,9 @@ export function M7IvBandBestComboTable() {
   useEffect(() => { saveLS('max_loss_cap_pct',  maxLossCapPct);   }, [maxLossCapPct]);
   useEffect(() => { saveLS('max_drop_pct',      maxDropPct);      }, [maxDropPct]);
   useEffect(() => { saveLS('show_pro_metrics',  showProMetrics);  }, [showProMetrics]);
+  useEffect(() => { saveLS('min_n_trades',      minNTrades);      }, [minNTrades]);
+  useEffect(() => { saveLS('min_win_rate',      minWinRate);      }, [minWinRate]);
+  useEffect(() => { saveLS('pick_mode',         pickMode);        }, [pickMode]);
 
   useEffect(() => {
     let active = true;
@@ -415,6 +430,11 @@ export function M7IvBandBestComboTable() {
       if (maxDropPct != null && maxDropPct > 0) {
         args.max_drop_peak_to_trough_pct = maxDropPct;
       }
+      args.min_n_trades = minNTrades;
+      if (minWinRate != null && minWinRate > 0) {
+        args.min_win_rate = minWinRate;
+      }
+      args.pick_mode = pickMode;
       fetchM7IvBandBestCombo(args, ac.signal)
         .then(r => {
           if (!active) return;
@@ -432,7 +452,7 @@ export function M7IvBandBestComboTable() {
   }, [primary, family, mode, secondary, tolerancePct,
       sizingMode, fixedLots,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
-      minHitPct, maxLossCapPct, maxDropPct]);
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode]);
 
   const isWarming = resp?.status === 'warming';
   const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
@@ -656,6 +676,36 @@ export function M7IvBandBestComboTable() {
             }}
             style={{ ...inputStyle, width: 55 }}
             title="Drop cells where avg pct_drop_peak_to_trough > X%. Effective after v6 grid lands (column exists). Leave blank to disable." />
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Min n</span>
+          <input
+            type="number" min={0} max={50} step={1}
+            value={minNTrades}
+            onChange={e => setMinNTrades(Math.max(0, Number(e.target.value) || 0))}
+            style={{ ...inputStyle, width: 50 }}
+            title="Minimum number of trades for a cell to be statistically credible. Per-band fallback: if NO cells in a band meet this threshold (e.g. high-IV bands with only n=1), the band still surfaces but tagged with a ⚠ low-sample warning. Default 5; set to 0 to disable." />
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Win % ≥</span>
+          <input
+            type="number" min={0} max={100} step={5}
+            placeholder="off"
+            value={minWinRate ?? ''}
+            onChange={e => {
+              const v = e.target.value;
+              setMinWinRate(v === '' ? null : Math.max(0, Math.min(100, Number(v) || 0)));
+            }}
+            style={{ ...inputStyle, width: 55 }}
+            title="Drop cells whose win_rate is below this percentage. Leave blank to disable." />
+          <button
+            onClick={() => setPickMode(m => m === 'by_hour' ? 'aggregate_hours' : 'by_hour')}
+            style={{
+              padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+              background: pickMode === 'aggregate_hours' ? '#1f6feb' : 'transparent',
+              color: pickMode === 'aggregate_hours' ? '#fff' : '#cfd9e3',
+              border: '1px solid #1f6feb', borderRadius: 4,
+              fontWeight: 600,
+            }}
+            title="When ON, the picker collapses the entry_hour_ist dimension so every Friday whose IV landed in a band — across ALL entry hours — is tested for that band's combo. n_trades reflects every hour the band touched. When OFF (default), one cell per (band, hour) and only the picked hour's Fridays are counted.">
+            {pickMode === 'aggregate_hours' ? '∑ All hours' : '⏱ Per hour'}
+          </button>
           {/* Conservative preset */}
           <button
             onClick={() => {
@@ -668,6 +718,7 @@ export function M7IvBandBestComboTable() {
               setMinHitPct(50);
               setMaxLossCapPct(25);
               setMaxDropPct(30);
+              setMinNTrades(10);
               setModeByFamily(prev => ({ ...prev, [family]: 'pure' }));
             }}
             style={{
@@ -676,7 +727,7 @@ export function M7IvBandBestComboTable() {
               border: '1px solid #3fb950', borderRadius: 4,
               fontWeight: 700,
             }}
-            title="Sets: Capital $600, Deploy 100%, Composite score primary, DD cap avg_min_mtm @ $30, Max loss 25%, Max drop 30%, Hit % ≥ 50, Pure mode. Picker chooses bounded-drawdown, rule-effective combos.">
+            title="Sets: Capital $600, Deploy 100%, Composite score primary, DD cap avg_min_mtm @ $30, Max loss 25%, Max drop 30%, Hit % ≥ 50, Min n trades = 10 (drops single-digit-sample 'lucky' cells), Pure mode. Picker chooses bounded-drawdown, rule-effective, statistically-credible combos.">
             ◇ Conservative
           </button>
           <button
@@ -882,8 +933,23 @@ export function M7IvBandBestComboTable() {
                     style={{ borderTop: '1px solid #1a2d42', cursor: 'pointer' }}
                     title="Click to compare all 96 rules at this (band, expiry, Δ, hour) combo.">
                   {/* — Identity — */}
-                  <td style={{ ...td, fontWeight: 600 }}>{r.iv_band}</td>
-                  <td style={td}>{r.entry_hour_ist == null ? '—' : `${String(r.entry_hour_ist).padStart(2, '0')}:00`}</td>
+                  <td style={{ ...td, fontWeight: 600 }}>
+                    {r.iv_band}
+                    {r._low_sample_warning && (
+                      <span
+                        style={{
+                          marginLeft: 6, padding: '1px 5px', fontSize: 10,
+                          color: '#f0b300', border: '1px solid #f0b300',
+                          borderRadius: 3, fontWeight: 600, verticalAlign: 'middle',
+                        }}
+                        title="Low-sample warning: no cells in this band met the Min n threshold. Picker fell back to the full grid for this band — results are not statistically credible. Lower the Min n input or accept that high-IV regimes happen rarely enough that we have very few historical trades.">
+                        ⚠ low-n
+                      </span>
+                    )}
+                  </td>
+                  <td style={td}>{r.entry_hour_ist == null
+                    ? <span style={{ color: '#9c27b0', fontWeight: 600 }} title="Aggregate-hours mode: this row is the weighted aggregate across every entry hour where this band's IV appeared.">All hours</span>
+                    : `${String(r.entry_hour_ist).padStart(2, '0')}:00`}</td>
                   <td style={td}>{r.expiry_bucket}</td>
                   <td style={td}>{r.delta_target.toFixed(2)}</td>
                   <td style={{ ...td, color: '#f0b300' }}>{fmtRuleLabel(r.rule_label)}</td>

@@ -624,6 +624,132 @@ def _idx_best(series: pd.Series, direction: str) -> int:
     return series.idxmin() if direction == "min" else series.idxmax()
 
 
+# ── Aggregate across entry hours ─────────────────────────────────────────────
+# When the user wants "every Friday tested" for a band (not just the Fridays
+# whose IV happened to land in this band at one specific hour), we collapse
+# the entry_hour_ist dimension. Picker then chooses one (expiry, Δ, rule) per
+# band; the displayed metrics are the weighted aggregate across every hour
+# where that band's IV appeared during a Friday entry.
+
+# Per-column aggregation strategy when collapsing entry_hour_ist:
+#   SUM           — counts and totals
+#   MAX           — best across hours (peaks, max streaks, top wins)
+#   MIN           — worst across hours (most-negative loss / VaR / drawdowns)
+#   WEIGHTED_MEAN — averages and %s, weighted by n_trades
+# Anything not enumerated falls to weighted mean by default.
+_AGG_SUM = {
+    "n_trades", "n_wins", "n_losses",
+    "n_rule_trigger", "n_premium_sl_hit", "n_hard_cap", "n_fixed_hour_ist",
+    "n_winners_below_avg_min_mtm", "n_losers_above_avg_max_mtm",
+    "total_win_mtm", "total_loss_mtm",
+}
+_AGG_MAX = {
+    "max_win_usd",
+    "max_mtm_winners", "max_mtm_losers", "max_mtm",
+    "max_consec_wins", "max_consec_losses",
+    "max_consec_sl_hits", "max_consec_premium_sl_hits",
+    "largest_win_mtm",
+}
+_AGG_MIN = {
+    "max_loss_usd",
+    "min_mtm_winners", "min_mtm_losers", "min_mtm",
+    "largest_loss_mtm",
+    "worst_5_avg_net", "var_95_net", "cvar_95_net",
+    "max_consec_loss_dollars",
+}
+_AGG_FIRST = {
+    "iv_band", "expiry_bucket", "delta_target", "rule_label",
+    "entry_hour_ist", "rule",
+}
+
+
+def _aggregate_across_hours(grid: pd.DataFrame) -> pd.DataFrame:
+    """Collapse the entry_hour_ist dimension (vectorised pandas groupby).
+
+    Group by (iv_band, expiry_bucket, delta_target, rule_label) and aggregate.
+    Returned frame has one row per (band, expiry, Δ, rule) — n_trades reflects
+    the total Fridays this combo would have entered across every hour that
+    band touched. `entry_hour_ist` is set to None (sentinel for "all hours";
+    frontend renders as "All hours").
+
+    Composite/Sharpe/Sortino/Calmar are re-derived after aggregation since
+    they're functions of the aggregated inputs.
+    """
+    if grid.empty:
+        return grid.iloc[0:0]
+    g = grid.copy()
+    group_keys = ["iv_band", "expiry_bucket", "delta_target", "rule_label"]
+    for k in group_keys:
+        if k not in g.columns:
+            return g
+    n_tr = pd.to_numeric(g.get("n_trades"), errors="coerce").fillna(0.0)
+    g["_n_tr"] = n_tr
+
+    numeric_cols: list[str] = [
+        c for c in g.columns
+        if c not in group_keys
+        and c not in _AGG_FIRST
+        and c != "_n_tr"
+        and pd.api.types.is_numeric_dtype(g[c])
+    ]
+    sum_cols = [c for c in numeric_cols if c in _AGG_SUM]
+    max_cols = [c for c in numeric_cols if c in _AGG_MAX]
+    min_cols = [c for c in numeric_cols if c in _AGG_MIN]
+    used = set(sum_cols) | set(max_cols) | set(min_cols)
+    wmean_cols = [c for c in numeric_cols if c not in used]
+
+    # Pre-multiply weighted-mean columns by weights so groupby.sum() gives
+    # the weighted total; we divide by the per-group weight sum afterwards.
+    for c in wmean_cols:
+        g[f"__w_{c}"] = pd.to_numeric(g[c], errors="coerce") * g["_n_tr"]
+        g[f"__wn_{c}"] = pd.to_numeric(g[c], errors="coerce").notna().astype(float) * g["_n_tr"]
+
+    agg_dict: dict = {}
+    for c in sum_cols:
+        agg_dict[c] = "sum"
+    for c in max_cols:
+        agg_dict[c] = "max"
+    for c in min_cols:
+        agg_dict[c] = "min"
+    for c in wmean_cols:
+        agg_dict[f"__w_{c}"] = "sum"
+        agg_dict[f"__wn_{c}"] = "sum"
+
+    gb = g.groupby(group_keys, dropna=False, sort=False, observed=True)
+    agg = gb.agg(agg_dict).reset_index()
+
+    # Compute weighted means: weighted_sum / weight_sum_present.
+    for c in wmean_cols:
+        ws = agg[f"__w_{c}"]
+        wn = agg[f"__wn_{c}"]
+        agg[c] = np.where(wn > 0, ws / wn, np.nan)
+        agg.drop(columns=[f"__w_{c}", f"__wn_{c}"], inplace=True)
+
+    # Re-derive win_rate from summed counts (exact, not weighted).
+    if "n_trades" in agg.columns and "n_wins" in agg.columns:
+        nt = pd.to_numeric(agg["n_trades"], errors="coerce")
+        nw = pd.to_numeric(agg["n_wins"], errors="coerce")
+        agg["win_rate"] = np.where(nt > 0, nw / nt, np.nan)
+
+    agg["entry_hour_ist"] = None  # collapsed
+
+    # Carry rule dict if present — first non-null per group.
+    if "rule" in g.columns:
+        rule_first = (
+            g.dropna(subset=["rule"])
+             .groupby(group_keys, dropna=False, sort=False, observed=True)["rule"]
+             .first()
+             .reset_index()
+        )
+        agg = agg.merge(rule_first, on=group_keys, how="left")
+
+    # Re-derive composites that depend on aggregated inputs.
+    agg = _enrich_grid_with_overall_mtm(agg)
+    agg = _attach_composite_score(agg)
+    agg = _attach_risk_adjusted(agg)
+    return agg
+
+
 def _attach_lots_column(
     grid: pd.DataFrame,
     total_capital_usd: Optional[float],
@@ -687,6 +813,8 @@ def _pick_best_per_band(
     min_hit_pct: Optional[float] = 50.0,
     max_loss_cap_pct: Optional[float] = None,
     max_drop_peak_to_trough_pct: Optional[float] = None,
+    min_n_trades: int = 5,
+    min_win_rate: Optional[float] = None,
 ) -> pd.DataFrame:
     """For each IV band, pick one cell.
 
@@ -717,6 +845,27 @@ def _pick_best_per_band(
     if grid.empty or primary_col not in grid.columns:
         return grid.iloc[0:0]
 
+    # Sample-size filter — drops cells with too few trades to be statistically
+    # credible. With STRICT-first / FALLBACK pattern: try min_n_trades first,
+    # fall back per-band if no cells survive (so high-IV bands with only n=1
+    # cells still show up rather than disappearing). The fallback is recorded
+    # as `_low_sample_warning` on the row so the UI can flag it.
+    if min_n_trades is not None and int(min_n_trades) > 0 and "n_trades" in grid.columns:
+        thr = int(min_n_trades)
+        strict_grid = grid[grid["n_trades"].fillna(0).astype(int) >= thr].copy()
+        # Bands that have NO cell meeting strict threshold → fall back to
+        # the full grid for those bands only. Tag survivors so the UI knows.
+        strict_bands = set(strict_grid["iv_band"].dropna().unique()) if not strict_grid.empty else set()
+        if "iv_band" in grid.columns:
+            fallback_grid = grid[~grid["iv_band"].isin(strict_bands)].copy()
+        else:
+            fallback_grid = grid.iloc[0:0].copy()
+        strict_grid["_low_sample_warning"] = False
+        fallback_grid["_low_sample_warning"] = True
+        grid = pd.concat([strict_grid, fallback_grid], ignore_index=False)
+        if grid.empty:
+            return grid.iloc[0:0]
+
     # Hit-% filter — done FIRST, before any sizing so it composes uniformly.
     if min_hit_pct is not None and float(min_hit_pct) > 0 and "n_hard_cap" in grid.columns and "n_trades" in grid.columns:
         n_tr = grid["n_trades"].astype(float)
@@ -726,6 +875,14 @@ def _pick_best_per_band(
         # fixed_hour). Hard-cap exits are the complement.
         eff_hit = np.where(n_tr > 0, (n_tr - nhc) / n_tr * 100.0, 0.0)
         grid = grid[eff_hit >= float(min_hit_pct)].copy()
+        if grid.empty:
+            return grid.iloc[0:0]
+
+    # Win-rate floor — drop cells with win_rate below the user's tolerance.
+    if min_win_rate is not None and float(min_win_rate) > 0 and "win_rate" in grid.columns:
+        wr = pd.to_numeric(grid["win_rate"], errors="coerce")
+        thr = float(min_win_rate) / 100.0
+        grid = grid[wr.fillna(-1.0) >= thr].copy()
         if grid.empty:
             return grid.iloc[0:0]
 
@@ -901,6 +1058,12 @@ def get_iv_band_best_combo(
                                               description="When capital sizing is on, drop cells whose scaled |max_loss| × lots/100 exceeds this fraction of deployable capital."),
     max_drop_peak_to_trough_pct: Optional[float] = Query(None, ge=0.0, le=100.0,
                                                          description="Drop cells whose avg peak→trough drop exceeds this %. Effective after v6 grid lands (column avg_pct_drop_peak_to_trough)."),
+    min_n_trades: int = Query(5, ge=0,
+                              description="Minimum n_trades for statistical credibility. Cells below this are dropped per band. If no cells in a band meet the threshold, the band falls back to the full grid and survivors are tagged with _low_sample_warning. Default 5; set to 0 to disable."),
+    min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0,
+                                          description="Filter out cells whose win_rate is below this percentage (0–100). Default off."),
+    pick_mode: str = Query("by_hour",
+                            description="'by_hour' (default) picks one cell per (band, hour); 'aggregate_hours' collapses the entry_hour dimension so each band's pick reflects every Friday whose IV landed in that band across all entry hours — much larger n_trades per pick."),
     include_grid: bool = Query(False,
                                description="If true, also return the full grid"),
 ):
@@ -927,6 +1090,9 @@ def get_iv_band_best_combo(
     if rule_family not in _VALID_RULE_FAMILIES:
         raise HTTPException(status_code=400,
                             detail=f"rule_family must be one of {sorted(_VALID_RULE_FAMILIES)}")
+    if pick_mode not in ("by_hour", "aggregate_hours"):
+        raise HTTPException(status_code=400,
+                            detail="pick_mode must be 'by_hour' or 'aggregate_hours'")
 
     # Try fast disk-load (idempotent — no-op if already ready).
     try_load_grid_only()
@@ -956,6 +1122,10 @@ def get_iv_band_best_combo(
                 "n_rules": 0, "n_cells": 0}
 
     family_grid = _filter_grid_by_family(grid, rule_family)
+    if pick_mode == "aggregate_hours":
+        # Collapse entry_hour_ist BEFORE filters/picker so n_trades reflects
+        # all-hours coverage and the picker chooses from the aggregated grid.
+        family_grid = _aggregate_across_hours(family_grid)
     best = _pick_best_per_band(
         family_grid, ranking,
         secondary=secondary,
@@ -967,6 +1137,8 @@ def get_iv_band_best_combo(
         min_hit_pct=min_hit_pct,
         max_loss_cap_pct=max_loss_cap_pct,
         max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
+        min_n_trades=min_n_trades,
+        min_win_rate=min_win_rate,
     )
 
     payload = {
@@ -981,6 +1153,9 @@ def get_iv_band_best_combo(
         "min_hit_pct": min_hit_pct,
         "max_loss_cap_pct": max_loss_cap_pct,
         "max_drop_peak_to_trough_pct": max_drop_peak_to_trough_pct,
+        "min_n_trades": min_n_trades,
+        "min_win_rate": min_win_rate,
+        "pick_mode": pick_mode,
         "status": "ready",
         "rows": _records(best),
         "n_rules": len(_rule_variants()),
