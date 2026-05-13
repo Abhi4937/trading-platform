@@ -415,6 +415,44 @@ export function fetchM7SingleComboSimulation(args: {
     `${BASE}/iv_band_best_combo/single_combo_simulation?${p}`, signal);
 }
 
+// Missed-Friday force-fit drilldown (Feature A)
+
+export interface M7MissedFridayForceFitPick {
+  pick_band: string;
+  rule_label: string;
+  fits: boolean;
+  actual_iv_band_on_this_friday: string | null;
+}
+
+export interface M7MissedFridayForceFitRow {
+  friday_date_ist: string;
+  n_total_trades: number;
+  bands_touched: string[];
+  pick_availability: M7MissedFridayForceFitPick[];
+}
+
+export interface M7MissedFridayPickInfo {
+  band: string;
+  entry_hour_ist: number | null;
+  expiry_bucket: string;
+  delta_target: number;
+  rule_label: string;
+}
+
+export interface M7MissedFridaysForceFitResponse {
+  rows: M7MissedFridayForceFitRow[];
+  status: string;
+  n_missed?: number;
+  n_total_fridays?: number;
+  n_matched?: number;
+  picks?: M7MissedFridayPickInfo[];
+}
+
+export function fetchM7MissedFridaysForceFit(signal?: AbortSignal): Promise<M7MissedFridaysForceFitResponse> {
+  return jsonFetch<M7MissedFridaysForceFitResponse>(
+    `${BASE}/iv_band_best_combo/missed_fridays_force_fit`, signal);
+}
+
 // ── Loss-anatomy: Chunk 3 — per-cell winners-vs-losers ─────────────────────
 export interface M7CellWvlIndicatorRow {
   indicator: string;

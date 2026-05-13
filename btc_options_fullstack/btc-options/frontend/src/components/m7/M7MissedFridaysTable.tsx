@@ -1,7 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { InfoIcon } from './InfoIcon';
 import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
-import { fetchM7MissedFridays } from '../../services/m7_api';
+import {
+  fetchM7MissedFridays,
+  fetchM7MissedFridaysForceFit,
+  type M7MissedFridaysForceFitResponse,
+} from '../../services/m7_api';
 import type { M7ExitRule, M7Filters, M7MissedFridayRow } from '../../types/m7';
 
 const usd = (v: number | null | undefined, dp = 2) =>
@@ -38,6 +42,16 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  // Force-fit pick availability matrix (loaded from /missed_fridays_force_fit)
+  const [forceFit, setForceFit] = useState<M7MissedFridaysForceFitResponse | null>(null);
+  // Toggle: show pick availability columns. Off by default so the existing
+  // table layout doesn't change for users who don't need it.
+  const [showAvailability, setShowAvailability] = useState<boolean>(
+    () => { try { return localStorage.getItem('m7:missedfridays:show_availability') === '1'; } catch { return false; } }
+  );
+  useEffect(() => {
+    try { localStorage.setItem('m7:missedfridays:show_availability', showAvailability ? '1' : '0'); } catch {}
+  }, [showAvailability]);
 
   useEffect(() => {
     let active = true;
@@ -54,6 +68,26 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
   }, [JSON.stringify(filters), JSON.stringify(exitRule), metric]);
+
+  // Fetch the force-fit availability matrix when expanded + toggle on.
+  // The endpoint uses the default 10 picks (avg_net_pnl, min_hit_pct=50)
+  // so it's not coupled to the user's current filter state.
+  useEffect(() => {
+    if (collapsed || !showAvailability) return;
+    let active = true;
+    const ac = new AbortController();
+    fetchM7MissedFridaysForceFit(ac.signal)
+      .then(r => { if (active) setForceFit(r); })
+      .catch(e => { if (active && e?.name !== 'AbortError') console.warn('force-fit fetch failed', e); });
+    return () => { active = false; ac.abort(); };
+  }, [collapsed, showAvailability]);
+
+  // Map: friday_date_ist → pick_availability[] (aligned by friday date)
+  const forceFitMap = useMemo(() => {
+    const m: Record<string, M7MissedFridaysForceFitResponse['rows'][number]> = {};
+    if (forceFit?.rows) for (const r of forceFit.rows) m[r.friday_date_ist] = r;
+    return m;
+  }, [forceFit]);
 
   const th: React.CSSProperties = { padding: '6px 8px', color: '#7a9bb5', whiteSpace: 'nowrap' };
   const thR: React.CSSProperties = { ...th, textAlign: 'right' };
@@ -78,6 +112,15 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span onClick={e => e.stopPropagation()}>
+            <label style={{ fontSize: 11, color: '#7a9bb5', cursor: 'pointer', userSelect: 'none' }}
+                   title="Show pick-availability columns: ✓/✗ for each of the 10 best-combo picks. Even if a Friday is 'missed' by the band-aware picker, the (hour, expiry, Δ) trade may exist — its IV just landed in a different band. Force-fit answers: could we have traded each pick on this Friday?">
+              <input type="checkbox" checked={showAvailability}
+                     onChange={e => setShowAvailability(e.target.checked)}
+                     style={{ marginRight: 4, verticalAlign: 'middle' }} />
+              Force-fit availability
+            </label>
+          </span>
           <div style={{ fontSize: 11, color: '#7a9bb5' }}>
             {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} rows`}
           </div>
@@ -114,29 +157,70 @@ export function M7MissedFridaysTable({ filters, exitRule, metric = 'avg_net_pnl'
                     <th style={thR}>Margin <InfoIcon text="Delta Exchange portfolio margin required at entry (29-scenario engine)." /></th>
                     <th style={th}>Win? <InfoIcon text="✓ if net P&L > 0, ✗ otherwise." /></th>
                     <th style={th}>Exit reason <InfoIcon text="rule_trigger (premium_sl / max_profit / margin_target fired), fixed_hour_ist (timed exit), or hard_cap (Sat 17:30 settlement)." /></th>
+                    {showAvailability && (
+                      <>
+                        <th style={thR}>n trades <InfoIcon text="Total trades in the enriched dataset for this Friday (across ALL hour×expiry×Δ combos, not just the picked ones)." /></th>
+                        <th style={th}>Bands touched <InfoIcon text="Which IV bands this Friday's IV was in across its hourly entries (most Fridays span 2-7 bands)." /></th>
+                        <th style={thR}>Fits picks <InfoIcon text="How many of the 10 best-combo picks have a (hour, expiry, Δ) trade available on this Friday. The trade may exist even though the Friday's IV landed in a different band — that's why it's 'missed'." /></th>
+                        {(forceFit?.picks ?? []).map(p => (
+                          <th key={`th-${p.band}`} style={th} title={`Pick for band ${p.band}: ${p.entry_hour_ist}:00 / ${p.expiry_bucket} / Δ=${p.delta_target.toFixed(2)} / ${p.rule_label}. ✓ = a trade at this (hour, expiry, Δ) exists for this Friday; ✗ = not in dataset.`}>
+                            {p.band}
+                          </th>
+                        ))}
+                      </>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r, i) => (
-                    <tr key={i} style={{ borderTop: '1px solid #1a2d42' }}>
-                      <td style={{ ...td, fontWeight: 600 }}>{r.friday_date_ist}</td>
-                      <td style={td}>{String(r.entry_hour_ist).padStart(2, '0')}:00</td>
-                      <td style={td}>{r.expiry_bucket}</td>
-                      <td style={td}>{Number(r.delta_target).toFixed(2)}</td>
-                      <td style={td}>{r.entry_atm_iv_band}</td>
-                      <td style={tdR}>{pct(r.entry_atm_iv_pct)}</td>
-                      <td style={{ ...tdR, color: pnlColor(r.net_pnl_estimate_usd), fontWeight: 600 }}>{usd(r.net_pnl_estimate_usd)}</td>
-                      <td style={{ ...tdR, color: pnlColor(r.exit_mtm_usd) }}>{usd(r.exit_mtm_usd)}</td>
-                      <td style={{ ...tdR, color: pnlColor(r.max_mtm_usd) }}>{usd(r.max_mtm_usd)}</td>
-                      <td style={{ ...tdR, color: pnlColor(r.min_mtm_usd) }}>{usd(r.min_mtm_usd)}</td>
-                      <td style={tdR}>{usd(r.credit_usd)}</td>
-                      <td style={tdR}>{usd0(r.margin_used_usd_at_entry)}</td>
-                      <td style={{ ...td, color: r.is_win ? '#3fb950' : '#f85149' }}>
-                        {r.is_win == null ? '—' : (r.is_win ? 'W' : 'L')}
-                      </td>
-                      <td style={{ ...td, color: '#7a9bb5' }}>{r.exit_reason ?? '—'}</td>
-                    </tr>
-                  ))}
+                  {rows.map((r, i) => {
+                    const ff = forceFitMap[r.friday_date_ist];
+                    return (
+                      <tr key={i} style={{ borderTop: '1px solid #1a2d42' }}>
+                        <td style={{ ...td, fontWeight: 600 }}>{r.friday_date_ist}</td>
+                        <td style={td}>{String(r.entry_hour_ist).padStart(2, '0')}:00</td>
+                        <td style={td}>{r.expiry_bucket}</td>
+                        <td style={td}>{Number(r.delta_target).toFixed(2)}</td>
+                        <td style={td}>{r.entry_atm_iv_band}</td>
+                        <td style={tdR}>{pct(r.entry_atm_iv_pct)}</td>
+                        <td style={{ ...tdR, color: pnlColor(r.net_pnl_estimate_usd), fontWeight: 600 }}>{usd(r.net_pnl_estimate_usd)}</td>
+                        <td style={{ ...tdR, color: pnlColor(r.exit_mtm_usd) }}>{usd(r.exit_mtm_usd)}</td>
+                        <td style={{ ...tdR, color: pnlColor(r.max_mtm_usd) }}>{usd(r.max_mtm_usd)}</td>
+                        <td style={{ ...tdR, color: pnlColor(r.min_mtm_usd) }}>{usd(r.min_mtm_usd)}</td>
+                        <td style={tdR}>{usd(r.credit_usd)}</td>
+                        <td style={tdR}>{usd0(r.margin_used_usd_at_entry)}</td>
+                        <td style={{ ...td, color: r.is_win ? '#3fb950' : '#f85149' }}>
+                          {r.is_win == null ? '—' : (r.is_win ? 'W' : 'L')}
+                        </td>
+                        <td style={{ ...td, color: '#7a9bb5' }}>{r.exit_reason ?? '—'}</td>
+                        {showAvailability && (
+                          <>
+                            <td style={tdR}>{ff?.n_total_trades ?? '—'}</td>
+                            <td style={{ ...td, color: '#7a9bb5', fontSize: 11 }}>
+                              {ff ? ff.bands_touched.join(', ') : '—'}
+                            </td>
+                            <td style={tdR}>{
+                              ff ? (() => {
+                                const fits = ff.pick_availability.filter(p => p.fits).length;
+                                const total = ff.pick_availability.length;
+                                const color = fits === total ? '#3fb950' : fits >= total / 2 ? '#f0b300' : '#f85149';
+                                return <span style={{ color }}>{fits}/{total}</span>;
+                              })() : '—'
+                            }</td>
+                            {(forceFit?.picks ?? []).map((p, idx) => {
+                              const fit = ff?.pick_availability[idx]?.fits;
+                              return (
+                                <td key={`row-${i}-${p.band}`} style={{ ...td, textAlign: 'center' }}>
+                                  {fit == null ? '—' :
+                                   fit ? <span style={{ color: '#3fb950', fontWeight: 700 }}>✓</span>
+                                       : <span style={{ color: '#f85149' }}>✗</span>}
+                                </td>
+                              );
+                            })}
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

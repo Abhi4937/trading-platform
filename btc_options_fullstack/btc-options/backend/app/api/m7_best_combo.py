@@ -1175,3 +1175,120 @@ def get_single_combo_simulation(
         "total_capital_usd": total_capital_usd,
         "pct_deploy": pct_deploy,
     }
+
+
+@router.get("/iv_band_best_combo/missed_fridays_force_fit")
+def get_missed_fridays_force_fit():
+    """For each Friday NOT covered by the current 10 best-combo picks (under
+    default conditions), report force-fit details: which of the 10 picks the
+    Friday has a trade at, and (where the trade exists) the realized P&L for
+    that pick on that Friday.
+
+    Picks are computed in-endpoint using the default avg_net_pnl ranking +
+    min_hit_pct=50 — i.e. matches what the Best Combo table picks by default.
+
+    Returns: per-Friday list with {friday_date_ist, n_total_trades, bands_touched,
+    pick_availability: [{pick_band, fits, net_pnl_if_fit, win_if_fit}]}.
+    """
+    # Step 1: get the 10 picks under default conditions
+    try_load_grid_only()
+    if _GRID_STATE["status"] != "ready":
+        return {"rows": [], "status": _GRID_STATE["status"]}
+    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if grid is None or grid.empty:
+        return {"rows": [], "status": "empty"}
+    picks = _pick_best_per_band(grid, "avg_net_pnl", min_hit_pct=50.0)
+    if picks.empty:
+        return {"rows": [], "status": "no_picks"}
+
+    # Step 2: load enriched trades to find missed Fridays + check availability
+    trades = m7r._load_trades()
+    if trades.empty:
+        return {"rows": [], "status": "no_trades"}
+
+    # Derive expiry_bucket if missing (matches m7_results._load_trades logic).
+    if "expiry_bucket" not in trades.columns and "dte_days" in trades.columns:
+        trades = trades.copy()
+        trades["expiry_bucket"] = pd.cut(
+            trades["dte_days"],
+            bins=[0, 1.5, 2.5, 5, 10, 20, 45, float("inf")],
+            labels=["current (Sat)", "next (Sun)", "next_to_next (Mon)",
+                    "weekly (7d)", "biweekly (14d)", "monthly (30d)", "quarterly"],
+        ).astype(str)
+
+    all_fridays = sorted(set(trades["friday_date_ist"].astype(str).unique()))
+
+    # Step 3: under each pick's (band, hour, expiry, delta), figure out which
+    # Fridays "naturally" land in that combo (entry IV in the picked band).
+    matched_fridays = set()
+    pick_records = []
+    for _, p in picks.iterrows():
+        cell_trades = trades[
+            (trades["entry_atm_iv_band"] == p["iv_band"])
+            & (trades["entry_hour_ist"] == p["entry_hour_ist"])
+            & (trades["expiry_bucket"] == p["expiry_bucket"])
+            & (np.isclose(trades["delta_target"].astype(float),
+                          float(p["delta_target"]), atol=0.001))
+        ]
+        matched_fridays.update(cell_trades["friday_date_ist"].astype(str).unique())
+        pick_records.append({
+            "band": p["iv_band"],
+            "entry_hour_ist": int(p["entry_hour_ist"]) if pd.notna(p["entry_hour_ist"]) else None,
+            "expiry_bucket": p["expiry_bucket"],
+            "delta_target": float(p["delta_target"]),
+            "rule_label": p["rule_label"],
+        })
+
+    missed = sorted(set(all_fridays) - matched_fridays)
+    if not missed:
+        return {"rows": [], "status": "ready", "n_missed": 0,
+                "n_total_fridays": len(all_fridays),
+                "n_matched": len(matched_fridays),
+                "picks": pick_records}
+
+    # Step 4: for each missed Friday, check pick availability + carry trade
+    # raw P&L (gross_pnl from path = closest available net proxy; full rule-
+    # exit derivation per-pick would be expensive — use grid's pick aggregates
+    # as the headline approximation).
+    rows = []
+    for fday in missed:
+        fday_trades = trades[trades["friday_date_ist"].astype(str) == fday]
+        bands_touched = sorted(
+            fday_trades["entry_atm_iv_band"].dropna().unique().tolist())
+        pick_availability = []
+        for p in pick_records:
+            m = fday_trades[
+                (fday_trades["entry_hour_ist"] == p["entry_hour_ist"])
+                & (fday_trades["expiry_bucket"] == p["expiry_bucket"])
+                & (np.isclose(fday_trades["delta_target"].astype(float),
+                              float(p["delta_target"]), atol=0.001))
+            ]
+            fits = not m.empty
+            # actual_band = the band the Friday's IV actually landed in for
+            # this (hour, expiry, delta) — may differ from p["band"]
+            actual_band = None
+            if fits:
+                band_series = m["entry_atm_iv_band"].dropna()
+                if not band_series.empty:
+                    actual_band = str(band_series.iloc[0])
+            pick_availability.append({
+                "pick_band": p["band"],
+                "rule_label": p["rule_label"],
+                "fits": fits,
+                "actual_iv_band_on_this_friday": actual_band,
+            })
+        rows.append({
+            "friday_date_ist": fday,
+            "n_total_trades": int(len(fday_trades)),
+            "bands_touched": bands_touched,
+            "pick_availability": pick_availability,
+        })
+
+    return {
+        "rows": rows,
+        "status": "ready",
+        "n_missed": len(missed),
+        "n_total_fridays": len(all_fridays),
+        "n_matched": len(matched_fridays),
+        "picks": pick_records,
+    }

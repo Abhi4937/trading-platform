@@ -16,6 +16,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { M7RuleComparisonModal } from './M7RuleComparisonModal';
+import { M7CellAnalysisModal } from './M7CellAnalysisModal';
 import { InfoIcon } from './InfoIcon';
 import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import {
@@ -351,6 +352,11 @@ export function M7IvBandBestComboTable() {
   const [err, setErr] = useState<string | null>(null);
   // Rule comparison modal — opens on row click
   const [drilldown, setDrilldown] = useState<{
+    band: string; expiry_bucket: string; delta_target: number;
+    entry_hour_ist: number; rule_label: string;
+  } | null>(null);
+  // Cell analysis modal — opens via the dedicated 🔍 button on each row
+  const [analysis, setAnalysis] = useState<{
     band: string; expiry_bucket: string; delta_target: number;
     entry_hour_ist: number; rule_label: string;
   } | null>(null);
@@ -745,6 +751,7 @@ export function M7IvBandBestComboTable() {
                 <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
                 <th style={thR}>Hard cap <InfoIcon text="Trades that ran past all rules and exited at Saturday 17:30 IST (settlement)." /></th>
                 <th style={thR}>Hit % <InfoIcon text="(n_trades − n_hard_cap) / n_trades — fraction of trades where some deterministic exit fired (rule_trigger, premium_sl, max_profit, margin_target, fixed_hour) BEFORE hard cap. Phase 0B picker filter drops cells below the Hit % threshold by default (50%)." /></th>
+                <th style={th}>Analyze <InfoIcon text="🔍 button: opens a 2-tab analysis modal. Cross-band check shows how this rule performs across ALL 10 IV bands (regime fragility). Single-combo simulation shows the counterfactual P&L if you always traded this combo regardless of IV regime." /></th>
 
                 {/* — Rule mechanics — */}
                 <th style={thR}>Rule hits <InfoIcon text="Trades that exited because ANY rule fired (premium_sl OR max_profit OR margin_target). For take-profit families this INCLUDES profit-take fires, so 'Rule hits' can exceed losses — it's a 'rule triggered an exit' count, not a loss-cut count." /></th>
@@ -875,6 +882,28 @@ export function M7IvBandBestComboTable() {
                     const color = hit >= 0.5 ? '#3fb950' : hit >= 0.25 ? '#f0b300' : '#f85149';
                     return <span style={{ color }}>{(hit * 100).toFixed(0)}%</span>;
                   })()}</td>
+                  <td style={td}>
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();  // don't trigger row click → rule-comparison modal
+                        if (r.entry_hour_ist == null) return;
+                        setAnalysis({
+                          band: r.iv_band,
+                          expiry_bucket: r.expiry_bucket,
+                          delta_target: r.delta_target,
+                          entry_hour_ist: r.entry_hour_ist,
+                          rule_label: r.rule_label,
+                        });
+                      }}
+                      style={{
+                        background: 'transparent', border: '1px solid #1f6feb',
+                        color: '#1f6feb', borderRadius: 4, padding: '2px 6px',
+                        cursor: 'pointer', fontSize: 11,
+                      }}
+                      title="Open cross-band check + single-combo simulation modal for this row.">
+                      🔍
+                    </button>
+                  </td>
 
                   {/* — Rule mechanics — */}
                   <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>
@@ -983,6 +1012,17 @@ export function M7IvBandBestComboTable() {
           entry_hour_ist={drilldown.entry_hour_ist}
           pickedRuleLabel={drilldown.rule_label}
           onClose={() => setDrilldown(null)} />
+      )}
+      {analysis && (
+        <M7CellAnalysisModal
+          band={analysis.band}
+          expiry_bucket={analysis.expiry_bucket}
+          delta_target={analysis.delta_target}
+          entry_hour_ist={analysis.entry_hour_ist}
+          rule_label={analysis.rule_label}
+          totalCapitalUsd={sizingMode === 'capital' ? totalCapitalUsd : null}
+          pctDeploy={pctDeploy}
+          onClose={() => setAnalysis(null)} />
       )}
     </div>
   );
