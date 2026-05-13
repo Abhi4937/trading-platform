@@ -21,7 +21,7 @@ type Tab = 'cross_band' | 'single_combo';
 
 export function M7CellAnalysisModal({
   band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
-  totalCapitalUsd, pctDeploy, onClose,
+  totalCapitalUsd, pctDeploy, lots = 100, onClose,
 }: {
   band: string;
   expiry_bucket: string;
@@ -30,8 +30,12 @@ export function M7CellAnalysisModal({
   rule_label: string;
   totalCapitalUsd?: number | null;
   pctDeploy?: number;
+  lots?: number;  // sized-lots from the parent table row; defaults to 100 (baseline)
   onClose: () => void;
 }) {
+  const k = (lots > 0 ? lots : 100) / 100;
+  const sk = (v: number | null | undefined): number | null =>
+    v == null || isNaN(v as number) ? null : (v as number) * k;
   const [tab, setTab] = useState<Tab>('cross_band');
   const [crossBand, setCrossBand] = useState<M7CrossBandCheckResponse | null>(null);
   const [singleCombo, setSingleCombo] = useState<M7SingleComboSimulationResponse | null>(null);
@@ -97,6 +101,9 @@ export function M7CellAnalysisModal({
             cursor: 'pointer', fontSize: 11,
           }}>Close (ESC)</button>
         </div>
+        <div style={{ color: '#7a9bb5', fontSize: 10, marginBottom: 8 }}>
+          $ values scaled to <strong style={{ color: '#cfd9e3' }}>{lots} lots</strong> (matches the picked cell's sized lots in the table).
+        </div>
 
         <div style={{ display: 'flex', marginBottom: 10 }}>
           <button onClick={() => setTab('cross_band')} style={{ ...tabStyle(tab === 'cross_band'), borderTopLeftRadius: 4, borderBottomLeftRadius: 4 }}>
@@ -141,8 +148,8 @@ export function M7CellAnalysisModal({
                       </td>
                       <td style={tdR}>{r.n_trades}</td>
                       <td style={tdR}>{pct(r.win_rate)}</td>
-                      <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(r.avg_net_pnl)}</td>
-                      <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(r.max_loss_usd)}</td>
+                      <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(sk(r.avg_net_pnl))}</td>
+                      <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(sk(r.max_loss_usd))}</td>
                       <td style={tdR}>{r.composite_score == null ? '—' : r.composite_score.toFixed(3)}</td>
                       <td style={{ ...tdR, color: hit == null ? '#7a9bb5' : hit >= 0.5 ? '#3fb950' : hit >= 0.25 ? '#f0b300' : '#f85149' }}>
                         {hit == null ? '—' : `${(hit * 100).toFixed(0)}%`}
@@ -165,10 +172,10 @@ export function M7CellAnalysisModal({
                 <strong>{s.n_bands_covered}</strong> IV bands.
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                <KPI label="Avg net per trade" value={usd(s.avg_net_pnl)} color={pnlColor(s.avg_net_pnl)} info="Mean net P&L per trade across ALL Fridays where this combo has any data — weighted by n_trades per band." />
-                <KPI label="Total net (per 100 lots)" value={usd(s.total_net_pnl)} color={pnlColor(s.total_net_pnl)} />
+                <KPI label="Avg net per trade" value={usd(sk(s.avg_net_pnl))} color={pnlColor(s.avg_net_pnl)} info={`Mean net P&L per trade across ALL Fridays where this combo has any data — weighted by n_trades per band. Scaled to ${lots} lots.`} />
+                <KPI label={`Total net (at ${lots} lots)`} value={usd(sk(s.total_net_pnl))} color={pnlColor(s.total_net_pnl)} />
                 <KPI label="Win rate" value={pct(s.win_rate)} color="#cfd9e3" />
-                <KPI label="Max loss (any single)" value={usd(s.max_loss_usd)} color={pnlColor(s.max_loss_usd)} />
+                <KPI label="Max loss (any single)" value={usd(sk(s.max_loss_usd))} color={pnlColor(s.max_loss_usd)} />
                 <KPI label="Composite (weighted)" value={s.composite_score == null ? '—' : s.composite_score.toFixed(3)} color="#cfd9e3" info="win_rate × ret_on_credit ÷ (1 + |avg_min_mtm|/avg_credit). Aggregated across bands." />
                 <KPI label="Sharpe (weighted)" value={s.sharpe_per_trade == null ? '—' : s.sharpe_per_trade.toFixed(2)} color="#cfd9e3" info="avg_net / stdev_net. Higher = more consistent." />
               </div>
@@ -202,8 +209,8 @@ export function M7CellAnalysisModal({
                           <td style={td}>{r.iv_band}</td>
                           <td style={tdR}>{r.n_trades}</td>
                           <td style={tdR}>{pct(r.win_rate)}</td>
-                          <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(r.avg_net_pnl)}</td>
-                          <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(r.max_loss_usd)}</td>
+                          <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(sk(r.avg_net_pnl))}</td>
+                          <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(sk(r.max_loss_usd))}</td>
                         </tr>
                       ))}
                     </tbody>

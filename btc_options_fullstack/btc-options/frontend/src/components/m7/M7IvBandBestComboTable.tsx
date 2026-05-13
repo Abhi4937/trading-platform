@@ -369,12 +369,12 @@ export function M7IvBandBestComboTable() {
   // Rule comparison modal — opens on row click
   const [drilldown, setDrilldown] = useState<{
     band: string; expiry_bucket: string; delta_target: number;
-    entry_hour_ist: number; rule_label: string;
+    entry_hour_ist: number; rule_label: string; lots: number;
   } | null>(null);
   // Cell analysis modal — opens via the dedicated 🔍 button on each row
   const [analysis, setAnalysis] = useState<{
     band: string; expiry_bucket: string; delta_target: number;
-    entry_hour_ist: number; rule_label: string;
+    entry_hour_ist: number; rule_label: string; lots: number;
   } | null>(null);
 
   // Persist state changes
@@ -928,6 +928,7 @@ export function M7IvBandBestComboTable() {
                         delta_target: r.delta_target,
                         entry_hour_ist: r.entry_hour_ist,
                         rule_label: r.rule_label,
+                        lots,
                       });
                     }}
                     style={{ borderTop: '1px solid #1a2d42', cursor: 'pointer' }}
@@ -996,6 +997,7 @@ export function M7IvBandBestComboTable() {
                           delta_target: r.delta_target,
                           entry_hour_ist: r.entry_hour_ist,
                           rule_label: r.rule_label,
+                          lots,
                         });
                       }}
                       style={{
@@ -1170,6 +1172,7 @@ export function M7IvBandBestComboTable() {
           delta_target={drilldown.delta_target}
           entry_hour_ist={drilldown.entry_hour_ist}
           pickedRuleLabel={drilldown.rule_label}
+          lots={drilldown.lots}
           onClose={() => setDrilldown(null)} />
       )}
       {analysis && (
@@ -1181,6 +1184,7 @@ export function M7IvBandBestComboTable() {
           rule_label={analysis.rule_label}
           totalCapitalUsd={sizingMode === 'capital' ? totalCapitalUsd : null}
           pctDeploy={pctDeploy}
+          lots={analysis.lots}
           onClose={() => setAnalysis(null)} />
       )}
     </div>

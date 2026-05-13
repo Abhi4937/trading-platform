@@ -19,15 +19,20 @@ type SortKey = 'rule_label' | 'hit_pct' | 'avg_net_pnl' | 'win_rate' | 'max_loss
 type SortDir = 'asc' | 'desc';
 
 export function M7RuleComparisonModal({
-  band, expiry_bucket, delta_target, entry_hour_ist, pickedRuleLabel, onClose,
+  band, expiry_bucket, delta_target, entry_hour_ist, pickedRuleLabel,
+  lots = 100, onClose,
 }: {
   band: string;
   expiry_bucket: string;
   delta_target: number;
   entry_hour_ist: number;
   pickedRuleLabel?: string;
+  lots?: number;  // sized-lots from the parent table; defaults to 100 (baseline)
   onClose: () => void;
 }) {
+  const k = (lots > 0 ? lots : 100) / 100;
+  const sk = (v: number | null | undefined): number | null =>
+    v == null || isNaN(v as number) ? null : (v as number) * k;
   const [rows, setRows] = useState<M7RuleComparisonRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -116,6 +121,9 @@ export function M7RuleComparisonModal({
             Close (ESC)
           </button>
         </div>
+        <div style={{ color: '#7a9bb5', fontSize: 10, marginBottom: 8 }}>
+          $ values scaled to <strong style={{ color: '#cfd9e3' }}>{lots} lots</strong> (matches the picked cell's sized lots). Other rules may require different margin at the same capital.
+        </div>
         {loading && <div style={{ color: '#7a9bb5', fontSize: 12 }}>Loading…</div>}
         {err && <div style={{ color: '#f85149', fontSize: 12 }}>{err}</div>}
         {!loading && !err && sorted.length === 0 && (
@@ -158,8 +166,8 @@ export function M7RuleComparisonModal({
                     </td>
                     <td style={tdR}>{r.n_trades}</td>
                     <td style={tdR}>{pct(r.win_rate)}</td>
-                    <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(r.avg_net_pnl)}</td>
-                    <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(r.max_loss_usd)}</td>
+                    <td style={{ ...tdR, color: pnlColor(r.avg_net_pnl) }}>{usd(sk(r.avg_net_pnl))}</td>
+                    <td style={{ ...tdR, color: pnlColor(r.max_loss_usd) }}>{usd(sk(r.max_loss_usd))}</td>
                     <td style={tdR}>{num(r.composite_score, 3)}</td>
                     <td style={tdR}>{r.n_hard_cap ?? '—'}</td>
                     <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>
