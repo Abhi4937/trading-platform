@@ -1147,6 +1147,51 @@ def get_iv_band_best_combo(
         min_win_rate=min_win_rate,
     )
 
+    # Best fallback exit-hour — for each picked cell where the rule doesn't
+    # always fire, find the highest-avg_net `sl{X}_exit_hr_*` variant at the
+    # SAME (band, expiry, Δ, hour) on the UNFILTERED grid (ignoring family
+    # restriction; we want the best deterministic fallback exit regardless
+    # of the user's primary family). Attach the fallback's hour + avg_net to
+    # each picked row so the parent table can render a column.
+    if not best.empty and "rule_label" in grid.columns:
+        fallback_hours: list[Optional[int]] = []
+        fallback_nets: list[Optional[float]] = []
+        fallback_labels: list[Optional[str]] = []
+        # The grid we search is the UNFILTERED in-memory grid, so exit_hr_*
+        # rules are always available regardless of the parent's rule_family.
+        for _, prow in best.iterrows():
+            sub = grid[
+                (grid["iv_band"] == prow["iv_band"])
+                & (grid["expiry_bucket"] == prow["expiry_bucket"])
+                & (np.isclose(grid["delta_target"].astype(float),
+                              float(prow["delta_target"]), atol=0.001))
+                & (grid["entry_hour_ist"] == prow["entry_hour_ist"])
+                & (grid["rule_label"].str.contains("_exit_hr_", na=False))
+            ]
+            if sub.empty:
+                fallback_hours.append(None); fallback_nets.append(None); fallback_labels.append(None)
+                continue
+            # Pick the fallback by avg_net_pnl per-100 (apples-to-apples vs
+            # picked rule; scaling happens client-side via lots).
+            idx = sub["avg_net_pnl"].astype(float).idxmax()
+            top = sub.loc[idx]
+            fallback_labels.append(top["rule_label"])
+            fallback_nets.append(float(top["avg_net_pnl"]))
+            # Parse hour from label, e.g. sl100_exit_hr_15 → 15, _1729 → 17.5
+            label = str(top["rule_label"])
+            try:
+                tail = label.rsplit("_exit_hr_", 1)[1]
+                if tail == "1729":
+                    fallback_hours.append(17)
+                else:
+                    fallback_hours.append(int(tail))
+            except Exception:
+                fallback_hours.append(None)
+        best = best.copy()
+        best["fallback_exit_hour"] = fallback_hours
+        best["fallback_exit_avg_net"] = fallback_nets
+        best["fallback_exit_rule_label"] = fallback_labels
+
     payload = {
         "ranking": ranking,
         "secondary": secondary,
@@ -1207,6 +1252,8 @@ def get_rule_comparison(
     max_drop_peak_to_trough_pct: Optional[float] = Query(None, ge=0.0, le=100.0),
     min_n_trades: int = Query(0, ge=0),
     min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0),
+    rule_family: str = Query("all",
+        description="Mirrors parent picker: 'all' (no family filter) | 'max_profit' (only sl{X}_max_profit_*) | 'margin_target' (only sl{X}_margin_target_*). Rules outside the family are tagged so the user sees why the picker ignored them."),
 ):
     """Return all rule variants for a fixed (band, expiry, delta, hour) cell.
 
@@ -1262,6 +1309,18 @@ def get_rule_comparison(
     # Modal renders these as badges so the user understands why higher-ranking
     # alternatives may not have been picked under Conservative-preset filters.
     filter_reasons: list[list[str]] = [[] for _ in range(len(sub))]
+    # Family filter — rules outside the active family aren't in the picker's
+    # consideration set. Tag them with a dedicated reason so users see this.
+    if rule_family == "max_profit":
+        mask = ~sub["rule_label"].str.contains("_max_profit_", na=False)
+        for i, bad in enumerate(mask.to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append("family:max_profit")
+    elif rule_family == "margin_target":
+        mask = ~sub["rule_label"].str.contains("_margin_target_", na=False)
+        for i, bad in enumerate(mask.to_numpy()):
+            if bool(bad):
+                filter_reasons[i].append("family:margin_target")
     if min_hit_pct > 0:
         hit_mask = (sub["hit_pct"].fillna(-1.0) * 100.0) < float(min_hit_pct)
         for i, bad in enumerate(hit_mask.to_numpy()):

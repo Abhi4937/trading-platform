@@ -221,6 +221,13 @@ export interface M7IvBandBestComboRow {
   // Picker-tag: true when the picker had to fall back below the min_n_trades
   // threshold for this band (no cells in that band met the credibility floor).
   _low_sample_warning?: boolean | null;
+  // Backend-computed: at the SAME (band, expiry, Δ, hour) as the picked
+  // cell, the highest-avg_net `sl{X}_exit_hr_*` rule. Lets the table show a
+  // "best deterministic fallback exit time" column — useful when the picked
+  // rule sometimes hard-caps.
+  fallback_exit_hour?: number | null;
+  fallback_exit_avg_net?: number | null;
+  fallback_exit_rule_label?: string | null;
 }
 
 // Any of the metric keys backend exposes via _METRIC_DIRECTIONS, plus
@@ -358,6 +365,7 @@ export function fetchM7RuleComparison(args: {
   max_drop_peak_to_trough_pct?: number | null;
   min_n_trades?: number | null;
   min_win_rate?: number | null;
+  rule_family?: M7RuleFamily;
 }, signal?: AbortSignal): Promise<M7RuleComparisonResponse> {
   const p = new URLSearchParams({
     band: args.band,
@@ -378,6 +386,7 @@ export function fetchM7RuleComparison(args: {
   if (args.max_drop_peak_to_trough_pct != null) p.set('max_drop_peak_to_trough_pct', String(args.max_drop_peak_to_trough_pct));
   if (args.min_n_trades != null) p.set('min_n_trades', String(args.min_n_trades));
   if (args.min_win_rate != null) p.set('min_win_rate', String(args.min_win_rate));
+  if (args.rule_family && args.rule_family !== 'all') p.set('rule_family', args.rule_family);
   return jsonFetch<M7RuleComparisonResponse>(
     `${BASE}/iv_band_best_combo/rule_comparison?${p}`, signal);
 }

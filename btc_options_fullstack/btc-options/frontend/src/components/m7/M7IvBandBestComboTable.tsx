@@ -819,6 +819,7 @@ export function M7IvBandBestComboTable() {
                 <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
                 <th style={thR}>Hard cap <InfoIcon text="Trades that ran past all rules and exited at Saturday 17:30 IST (settlement)." /></th>
                 <th style={thR}>Hit % <InfoIcon text="(n_trades − n_hard_cap) / n_trades — fraction of trades where some deterministic exit fired (rule_trigger, premium_sl, max_profit, margin_target, fixed_hour) BEFORE hard cap. Phase 0B picker filter drops cells below the Hit % threshold by default (50%)." /></th>
+                <th style={thR}>Best fallback exit <InfoIcon text="When the picked rule doesn't fire, the trade rides to Sat 17:30 IST hard cap. This column shows the best-net-P&L `exit_hr_X` rule at the SAME (band, expiry, Δ, hour) — i.e. if instead of waiting for hard cap, the trade exited at this fixed time, what hour would yield the highest avg net P&L? Lets you see whether a hybrid 'primary rule + fallback exit time' would improve the outcome." /></th>
                 <th style={th}>Analyze <InfoIcon text="🔍 button: opens a 2-tab analysis modal. Cross-band check shows how this rule performs across ALL 10 IV bands (regime fragility). Single-combo simulation shows the counterfactual P&L if you always traded this combo regardless of IV regime." /></th>
 
                 {/* — Rule mechanics — */}
@@ -985,6 +986,16 @@ export function M7IvBandBestComboTable() {
                     const hit = (n - hc) / n;
                     const color = hit >= 0.5 ? '#3fb950' : hit >= 0.25 ? '#f0b300' : '#f85149';
                     return <span style={{ color }}>{(hit * 100).toFixed(0)}%</span>;
+                  })()}</td>
+                  <td style={tdR}>{(() => {
+                    const h = r.fallback_exit_hour;
+                    const n = r.fallback_exit_avg_net;
+                    if (h == null || n == null) return '—';
+                    // Scaled by current lots so it's apples-to-apples with the picked Avg net P&L cell.
+                    const scaled = (n as number) * k;
+                    return <span title={r.fallback_exit_rule_label ?? ''}>
+                      {`${String(h).padStart(2, '0')}:00 (${usd(scaled)})`}
+                    </span>;
                   })()}</td>
                   <td style={td}>
                     <button
@@ -1181,6 +1192,7 @@ export function M7IvBandBestComboTable() {
           maxDropPct={maxDropPct}
           minNTrades={minNTrades}
           minWinRate={minWinRate}
+          ruleFamily={family}
           primaryMetric={primary}
           primaryLabel={primaryDef.label}
           onClose={() => setDrilldown(null)} />
