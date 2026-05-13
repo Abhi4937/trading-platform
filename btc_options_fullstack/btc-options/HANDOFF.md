@@ -2,8 +2,117 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-13 (Session 23 — M7 Phase 1 finalisation: Friday Coverage + Pro Metrics)
+**Date:** 2026-05-13 (Session 24 — M-Month Phase A + B + B+ shipped, strike-matching, 96-rule menu, Greeks)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 24 highlights — M-Month Phase A + B + B+ landed (committed `864cd32`)
+Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`
+Builds on Session 22's stage-1 self-contained dashboard.
+
+**What landed:**
+
+1. **Phase A — Cycle restructure 3 → 4 cycles.** The `lastfri_rolling` cycle
+   was split into:
+   - `lastfri_monthly`   = last-Fri entry, sells next-month last-Fri expiry
+     (April expiry from March entry — same as old lastfri_rolling)
+   - `lastfri_bimonthly` = last-Fri entry, sells **month-after-next** last-Fri
+     expiry (May expiry from March entry — NEW). Per user clarification
+     2026-05-13: "biweekly means... i want may expiry when i say biweekly
+     and april for monthly". Used `next_to_next_last_friday()` helper.
+
+2. **Phase A — Strike-matching entry policy.** New `pick_strikes_with_match()`
+   in `m_month_batch_backtester.py`. For each (cycle, anchor, delta target):
+   retries chain snapshots every 5 min for up to 60 min until both legs land
+   within tolerance (per-leg ≤ 0.025 of target, leg-gap ≤ 0.020). Straddle
+   (Δ=0.50) short-circuits the loop. CLI flag `--no-match` reverts to legacy
+   single-attempt behaviour. CLI flag `--resume` skips already-completed
+   (cycle, anchor) tuples in trades.parquet. New schema columns:
+   `entry_ts_requested_utc`, `entry_ts_actual_utc`, `wait_minutes`,
+   `match_quality`, `skipped_reason`. 7 pytest cases (T1–T7) in
+   `backend/tests/test_m_month_strike_matching.py`, all passing.
+
+3. **Phase B — 96-rule exit menu derivation.** `_compute_exit_pnl()` in
+   `m_month_best_combo.py` takes optional `premium_sl_pct`, `max_profit_pct`,
+   `margin_target_pct`, `hold_duration`. Composite rule: whichever fires
+   first per trade. DuckDB CTE picks the EARLIEST triggering bar with
+   `arg_min(triggered_by, ts)` for correct exit_reason attribution (the
+   reviewer caught that `ANY_VALUE` would have given wrong attribution).
+   LRU-cached, normalised cache keys (int/float collapse). UI exposes
+   11 hold-duration slots + 5 premium-SL options + 10 max-profit options +
+   10 margin-target options. Dashboard re-renders cell rankings on each
+   rule change in real time.
+
+4. **Phase B+ — Greeks per-trade diagnostic endpoint.** New
+   `/api/v1/m_month/trade_diagnostic?trade_id=…&bar_step=N`. Returns
+   `{identity, path}` where path has per-bar arrays: call/put delta /
+   gamma / theta / vega, net greeks, theta-per-vega, IV, spot, MTM.
+   `bar_step` lets caller subsample (1=every minute, 5=every 5 min, etc.)
+   to control payload size.
+
+5. **Reviewer fixes applied (high-severity from parallel code-review agent):**
+   - `arg_min(triggered_by, ts)` instead of `ANY_VALUE` for exit_reason
+   - Cache key normalisation (round to 4dp, treat ≤0/None as inactive)
+   - Distinct `expiry_variant` per cycle: `monthly` / `next_monthly` /
+     `next_monthly` / `after_next_monthly`
+
+**Full-window backtest landed** (`m_month_trades.parquet`, 420 trades,
+2.3 GB on disk including per-anchor path partitions):
+
+| Cycle | Trades | Anchors | Avg credit | Avg DTE |
+|---|---|---|---|---|
+| monthly | 174 | 27 | $445 | 23.3d |
+| bimonthly | 102 | 27 | $883 (~2× monthly) | 53.9d |
+| lastfri_monthly | 134 | 26 | $539 | 30.6d |
+| lastfri_bimonthly | 10 | 3 | $809 | 58.4d |
+
+Date range: 2024-02-05 → 2026-04-06.
+Note: `lastfri_bimonthly` only landed 10 trades because the
+strike-matching tolerance is strict against far-OTM legs on 58-DTE
+chains. Lowering `MATCH_PER_LEG_TOL` or `MATCH_LEG_GAP` is a Phase 2
+tuning knob if user wants more lastfri_bimonthly coverage.
+
+**Verified end-to-end live with Playwright:**
+- 4-cycle toggle (Monthly / Bimonthly / Last-Fri Monthly / Last-Fri Bimonthly / All cycles)
+- Exit-rule dropdowns; Max profit 25% example: per-band winner switches
+  from Δ0.45 / $826 avg net (natural exit) to Δ0.50 / $238 / 100% win
+  rate (locks profit early). Textbook trade-off, correct behaviour.
+- Greeks endpoint round-trips a 420-bar trajectory at bar_step=60min.
+
+**Files touched / created (committed in `864cd32`):**
+- `backend/app/analytics/m_month_batch_backtester.py` — 4 cycles + strike-matching + resume mode + new schema
+- `backend/app/api/m_month_results.py` — VALID_CYCLES updated, /trade_diagnostic added
+- `backend/app/api/m_month_best_combo.py` — 96-rule menu derivation with composite triggers
+- `backend/tests/test_m_month_strike_matching.py` — 7 pytest cases
+- `frontend/src/services/m_month_api.ts` — 4 cycles + rule params + Greeks types
+- `frontend/src/pages/MMonthSweepDashboard.tsx` — 4-cycle buttons + rule dropdowns
+- `backend/app/main.py` (unchanged this session) / `frontend/src/App.tsx` (unchanged this session)
+
+**Phase C — explicitly deferred to next session(s):**
+- Refactor M7 components for `sessionLabel`/`dataSource` reusability OR
+  copy them as m_month siblings
+- Headline strip / Full Coverage table / Missed Sessions table /
+  full 52-col Best Combo / Filter bar (11 dropdowns) / Capital sizing /
+  Conservative preset / Excel export / Trade Diagnostic modal (7 tabs) /
+  Leg Attribution / Losses Explorer / Cell Winners vs Losers /
+  Cell Worst Anchors
+- Realistically 4–5 sessions per the agreed Phase C roadmap
+
+**Phase E — adjustment engine (roll-untested / close-tested / spot-distance):**
+- Still deferred. Per-bar replay engine + adjustment configs sketched in
+  the plan.
+
+**Stage-2 ergonomic gaps (not blocking):**
+- Lower strike-matching tolerance to widen lastfri_bimonthly coverage
+- Pre-computed grid parquet so 96-rule sweep can rank across rules per
+  band (currently UI applies ONE rule at a time)
+- composite_score + capital sizing port from m7_best_combo
+- The 11 "fixed_hold_duration" sub-family is supported as a single
+  selectable rule; the full M7-style 96-rule menu where each rule is a
+  separate grid row needs a grid builder
+
+---
+
+## Session 23 — M7 Phase 1 finalisation (archived)
 
 ### Session 23 highlights — Phase 1 Capital-Preservation polish closed out
 Plan: `/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md`

@@ -2,7 +2,60 @@
 
 ## Active Projects
 
-- **M-Month module (Monthly + Bimonthly + Last-Fri rolling strangle) — Stage 1 SHIPPED (Session 22, 2026-05-12):**
+- **M-Month module — Phase A + B + B+ SHIPPED (Session 24, 2026-05-13, commit `864cd32`):**
+  Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`.
+
+  **Trade cycles (4 — split from previous 3):**
+  - `monthly`: first-Mon 23:00 IST → same-month last-Fri 11:00 IST, current-month expiry
+  - `bimonthly`: first-Mon entry/same-month exit, **next-month** expiry
+  - `lastfri_monthly`: last-Fri 10:00 IST → next last-Fri 11:00 IST, next-month expiry
+  - `lastfri_bimonthly`: last-Fri entry, **month-after-next** expiry (NEW per user clarification 2026-05-13)
+
+  **Strike-matching entry policy**: retries every 5 min for up to 60 min
+  until both legs land within tolerance of target Δ. CLI flags
+  `--no-match` / `--resume`. New schema: `entry_ts_requested_utc`,
+  `entry_ts_actual_utc`, `wait_minutes`, `match_quality`, `skipped_reason`.
+
+  **96-rule exit menu derivation**: `/iv_band_best_combo` accepts
+  `premium_sl_pct`, `max_profit_pct`, `margin_target_pct`, `hold_duration`.
+  Composite "whichever fires first" via DuckDB CTE with
+  `arg_min(triggered_by, ts)`. 11 hold-duration slots
+  (natural/3d/5d/1w/2w/3w/4w/5w/6w/7w/8w).
+
+  **Greeks per-trade endpoint**: `/trade_diagnostic?trade_id=…&bar_step=N`
+  returns per-bar greeks trajectory (call/put δγθν + net + ratios).
+
+  **Data on disk** (`~/btc-data/derived/m_month/`, ~2.3 GB):
+  - 420 trades, 27 entry-month partitions (2024-02 → 2026-04)
+  - monthly 174 trades, bimonthly 102, lastfri_monthly 134, lastfri_bimonthly 10
+
+  **Verified live (Playwright)**: 4-cycle toggle + rule-config dropdowns
+  re-rank cells correctly. Max profit 25% example: per-band winner
+  flips from Δ0.45 ($826 natural) → Δ0.50 ($238 / 100% WR).
+
+  **Tests**: 7 pytest cases in `backend/tests/test_m_month_strike_matching.py`,
+  all passing.
+
+  **Reviewer-flagged fixes applied** (code-reviewer agent):
+  `arg_min` (was `ANY_VALUE` — exit_reason was unattributable),
+  cache key normalisation, distinct `expiry_variant` per cycle.
+
+  **Phase C (full M7 dashboard surface port) — DEFERRED to next 4–5 sessions:**
+  Headline / Full Coverage / Missed Sessions / 52-col Best Combo / Filter
+  bar / Capital sizing / Conservative preset / Excel / Trade Diagnostic
+  modal / Leg Attribution / Losses Explorer / Cell Winners-vs-Losers /
+  Cell Worst Anchors.
+
+  **Phase E (adjustment engine) — DEFERRED.** Roll-untested / close-tested
+  / spot-distance triggers. Per-bar replay engine needed.
+
+  **Stage-2 tuning** (not blocking):
+  - Lower strike-matching tolerance to widen lastfri_bimonthly coverage
+    (currently only 10 trades / 3 anchors)
+  - Pre-compute grid parquet for cross-rule ranking
+  - Composite score + capital sizing port from m7_best_combo
+
+- **M-Month stage-1 (archived in Session 22, superseded by Session 24):**
   Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`.
   All 3 trade cycles enumerated; backend backtester + 2 routers + frontend
   dashboard live. Background backtest running for Feb-Jun 2024 (all 3

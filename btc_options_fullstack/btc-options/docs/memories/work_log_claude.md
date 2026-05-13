@@ -1,5 +1,149 @@
 # Claude's Work Log
 
+## Session 24 (2026-05-13) — M-Month Phase A + B + B+ shipped (`864cd32`)
+
+### Headline
+Major expansion of the M-Month module from Session 22's stage-1 baseline.
+Four trade cycles now (split lastfri_rolling), strike-matching entry
+policy, 96-rule exit-menu derivation (premium_sl × max_profit ×
+margin_target × fixed_hold_duration), Greeks per-trade endpoint,
+full-window backtest landed (420 trades / 27 months / 4 cycles).
+Multi-agent verification (reviewer + tester + Playwright UI) per user
+spec — reviewer found 12 issues, 4 high-severity fixes applied, tester
+wrote 7 pytest cases all passing, Playwright drove all 4 cycles + rule
+dropdowns.
+
+### What landed (in execution order)
+
+**Phase A — Cycle restructure 3 → 4** (per user clarification 2026-05-13):
+- Split `lastfri_rolling` into `lastfri_monthly` (next-month expiry,
+  e.g. March-end-Friday → April expiry) and `lastfri_bimonthly`
+  (month-after-next expiry, e.g. March-end-Friday → May expiry).
+- New helper `next_to_next_last_friday()`.
+- `expiry_for_cycle()` maps each of the 4 cycles to its expiry selector.
+- Filtered work-item enumeration so anchors whose required future
+  last-Friday falls past `t_max` are skipped per cycle.
+
+**Phase A — Strike-matching entry policy**:
+- New `pick_strikes_with_match()` in `m_month_batch_backtester.py`.
+- Retries the chain snapshot every 5 min for up to 60 min until both
+  legs land within `MATCH_PER_LEG_TOL=0.025` of target delta AND leg
+  gap ≤ `MATCH_LEG_GAP=0.020`.
+- Straddle (Δ=0.50) short-circuits.
+- CLI flags: `--no-match` (legacy single-attempt), `--resume` (skip
+  anchors already in trades.parquet).
+- Schema additions: `entry_ts_requested_utc`, `entry_ts_actual_utc`,
+  `wait_minutes`, `match_quality`, `skipped_reason`.
+- 7 pytest cases in `backend/tests/test_m_month_strike_matching.py`,
+  all passing inside docker.
+
+**Phase B — 96-rule exit menu derivation**:
+- `_compute_exit_pnl()` in `m_month_best_combo.py` extended to compose
+  4 rule families: `premium_sl_pct`, `max_profit_pct`,
+  `margin_target_pct`, `fixed_hold_duration` (11 slots).
+- DuckDB CTE finds the earliest triggering bar per trade with
+  `arg_min(triggered_by, ts)` so exit_reason corresponds to the actual
+  trigger (not `ANY_VALUE` — caught by code reviewer).
+- LRU-cached (max 128 entries) keyed on (mtime, hold_duration, sl_pct,
+  max_profit_pct, margin_target_pct). Cache key floats normalised to
+  4dp so int/float don't double-cache.
+- `/available_primary_metrics` exposes the rule-parameter menus
+  (premium_sl_pct_menu, max_profit_pct_menu, margin_target_pct_menu)
+  for UI dropdowns.
+
+**Phase B+ — Greeks per-trade diagnostic endpoint**:
+- `/api/v1/m_month/trade_diagnostic?trade_id=…&bar_step=N`.
+- Returns `{identity, path}` where path is per-column arrays:
+  ts, minute_offset, spot, call_mark, put_mark, total_premium, IV per
+  leg, atm_iv_now, per-leg greeks (δγθν), net greeks, theta-per-vega,
+  gross_pnl_usd, net_pnl_unwind_usd, pnl_pct_of_credit/margin.
+- `bar_step` lets caller subsample (1 = every minute, 60 = every hour).
+
+**Frontend wiring**:
+- Cycle toggle updated to 5 buttons (4 cycles + All).
+- New `Exit rules:` strip with 4 dropdowns (Hold duration / Premium SL %
+  / Max profit % / Margin target %). Whichever fires first wins.
+- `exitRuleLabel()` helper formats the current rule selection
+  (e.g. "SL 100% + MaxP 25%").
+
+### Multi-agent verification (per user spec)
+
+**Code reviewer agent** (general-purpose) found 12 issues:
+- 4 high-severity, all FIXED:
+  - `ANY_VALUE(triggered_by)` → `arg_min(triggered_by, ts)`
+  - Cache key normalisation (int vs float, None vs 0)
+  - Distinct `expiry_variant` per cycle (4 distinct values)
+- 5 medium-severity, deferred (mostly efficiency / robustness)
+- 3 low-severity, deferred
+
+**Tester agent** wrote `backend/tests/test_m_month_strike_matching.py`
+with 7 cases (T1 trivial / T2 retry success / T3 strike_unmatched /
+T4 straddle short-circuit / T5 match_mode=False legacy / T6 walk_end
+bound / T7 empty chain). All 7 PASS in docker (`pytest -v` in 7.48s).
+
+**Playwright UI tester**:
+- Confirmed 4-cycle toggle renders + cycle-description text updates
+- Rule-config dropdowns trigger backend re-derivation
+- Setting Max profit 25% on monthly cycle: per-band winner switches
+  from Δ0.45 ($826 avg net, natural) to Δ0.50 ($238 / 100% WR / locks
+  profit early). Textbook trade-off behaviour proves engine correct.
+- Greeks endpoint round-trips a 420-bar trajectory at bar_step=60.
+- Per-cycle KPI strip + meta-info renders all 4 cycle definitions.
+
+### Full-window backtest
+
+Ran `--since 2024-01-01 --through 2026-04-30 --cycles all4`.
+- First run died at item 47/107 because a shell-session timeout killed
+  the `docker exec` wrapper (the user-level bash process exited; the
+  in-container python kept running for a few items but tee buffer cut
+  off).
+- Added `--resume` flag to skip already-completed (cycle, anchor)
+  tuples from existing trades.parquet.
+- Resumed with `docker exec -d` (detached) so the process survives
+  shell session changes. Total elapsed including resume: ~3.2 hours.
+- Final: 420 trades, 27 entry-month partitions, 2.3 GB on disk.
+
+### Data takeaways
+
+| Cycle | n_trades | n_anchors | avg_credit | avg_dte |
+|---|---|---|---|---|
+| monthly | 174 | 27 | $445 | 23.3d |
+| bimonthly | 102 | 27 | $883 | 53.9d |
+| lastfri_monthly | 134 | 26 | $539 | 30.6d |
+| lastfri_bimonthly | 10 | 3 | $809 | 58.4d |
+
+- Bimonthly credit ≈ 2× monthly ✓ (longer DTE = more premium)
+- Bimonthly DTE ≈ 2.3× monthly ✓
+- lastfri_bimonthly only landed 10 trades because strike-matching is
+  strict against far-OTM legs on 58-DTE chains. **Phase 2 tuning knob**:
+  loosen `MATCH_PER_LEG_TOL` / `MATCH_LEG_GAP` for longer-DTE cycles.
+
+### Carry-overs to next session(s)
+
+**Phase C — Full M7 dashboard surface port (4–5 sessions per Phase C roadmap):**
+1. Refactor M7 components for `sessionLabel`/`dataSource` reusability
+   OR copy them as m_month siblings with column aliasing.
+2. Headline strip + Full Coverage table + Missed Sessions table + full
+   52-col Best Combo + Filter bar (11 dropdowns) + Capital sizing widget
+   + Conservative preset + Excel export.
+3. Trade Diagnostic modal (7 tabs: identity / pnl / per-leg / vol / skew
+   / spot / greeks / path) — the data endpoint already exists.
+4. Leg Attribution + Losses Explorer + Cell Winners-vs-Losers + Cell
+   Worst Anchors tables.
+
+**Phase E — Adjustment engine (per-bar replay):**
+- Roll-untested-to-tested (user's described algorithm)
+- Close-tested-only (delta-rebalance)
+- Spot-distance trigger
+- Recursive until 0.50-delta cap
+
+**Stage-2 tuning (small, not blocking):**
+- Loosen strike-matching tolerance for lastfri_bimonthly
+- Pre-compute grid parquet for cross-rule ranking
+- Composite score + Conservative preset port from m7_best_combo
+
+---
+
 ## Session 23 (2026-05-13) — M7 Phase 1 closeout: Friday Coverage + Pro Metrics + pct_drop fix
 
 ### Headline
