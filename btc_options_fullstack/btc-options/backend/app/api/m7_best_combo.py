@@ -433,6 +433,12 @@ def _enrich_grid_with_overall_mtm(df: pd.DataFrame) -> pd.DataFrame:
     m_max_l = pd.to_numeric(out.get("max_mtm_losers"),  errors="coerce")
     out["min_mtm"] = pd.concat([m_min_w, m_min_l], axis=1).min(axis=1, skipna=True)
     out["max_mtm"] = pd.concat([m_max_w, m_max_l], axis=1).max(axis=1, skipna=True)
+    # sum_net_pnl = avg_net_pnl × n_trades (mathematically exact since both
+    # are computed from the same set of per-trade net P&L values). Lets the
+    # picker rank by "Total net P&L" without needing a grid rebuild.
+    avg_net = pd.to_numeric(out.get("avg_net_pnl"), errors="coerce")
+    n_total = pd.to_numeric(out.get("n_trades"), errors="coerce")
+    out["sum_net_pnl"] = avg_net * n_total
     return out
 
 
