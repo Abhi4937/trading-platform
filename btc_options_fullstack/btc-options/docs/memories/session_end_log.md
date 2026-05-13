@@ -804,3 +804,154 @@ b2597ac feat: market context snapshot + multi-TF confluence + quality fallback +
 ?? scripts/margin_engine_v2_constants.json
 ?? "../../new platform arch/"
 ```
+
+---
+## Snapshot — 2026-05-12 12:20 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+b98feb0 docs(M7): Session 20 — capital deployment analysis + M7 UI polish
+b5ef61c docs(M7): Session 19 — touched-band coverage toggle handoff
+cc6f313 feat(M7): loss anatomy iteration — best-combo grid builder, full-coverage tweaks, missed-friday recovery
+9059841 feat(M7): loss anatomy toolkit — classifier, scope toggles, per-trade diagnostic
+dd26998 docs(M7): handoff + work log for Chunk 1 (per-leg attribution)
+d6a9ec5 feat(M7): Chunk 1 — Per-leg attribution + skew analytics
+0aa0c96 feat(M7): exit-derivation cache, expiry buckets, missed-Fridays + best-combo path markers
+9211594 feat(M7): complete M7 Fri→Sat sweep — backfill done, enrichment, exit-hour UI
+454dc84 feat(M7): Friday→Saturday strangle/straddle sweep with rich 1m path + rule-based exit derivation
+92d4362 docs: M4 + M5 v2 + live recorder pipeline now fully operational
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/backend/app/api/m7_best_combo.py   | 165 ++++++++-
+ .../src/components/m7/M7CellWorstFridaysTable.tsx  |   4 +-
+ .../src/components/m7/M7IvBandBestComboTable.tsx   | 402 ++++++++++++++++-----
+ .../components/m7/M7IvBandFullCoverageTable.tsx    |  18 +-
+ .../src/components/m7/M7IvBandSummaryTable.tsx     |  55 ++-
+ .../src/components/m7/M7LossesExplorer.tsx         |   6 +-
+ .../src/components/m7/M7MissedFridaysTable.tsx     |  18 +-
+ .../src/components/m7/M7TradeDiagnosticModal.tsx   |   6 +-
+ .../btc-options/frontend/src/services/m7_api.ts    |  17 +
+ 9 files changed, 547 insertions(+), 144 deletions(-)
+```
+
+### Git Status
+```
+ M backend/app/api/m7_best_combo.py
+ M frontend/src/components/m7/M7CellWorstFridaysTable.tsx
+ M frontend/src/components/m7/M7IvBandBestComboTable.tsx
+ M frontend/src/components/m7/M7IvBandFullCoverageTable.tsx
+ M frontend/src/components/m7/M7IvBandSummaryTable.tsx
+ M frontend/src/components/m7/M7LossesExplorer.tsx
+ M frontend/src/components/m7/M7MissedFridaysTable.tsx
+ M frontend/src/components/m7/M7TradeDiagnosticModal.tsx
+ M frontend/src/services/m7_api.ts
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? frontend/src/components/m7/exportXlsx.tsx
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-sweep-after-restart.png
+?? m7_after_restart.md
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-13 09:50 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+baf6cf9 docs(M-Month): Session 24 handoff — Phase A+B+B+ + multi-agent verification
+864cd32 feat(M-Month): module for monthly + bimonthly + last-Fri-rolling strangles
+b96127e feat(M7): Phase 1 closeout — Pro Metrics columns + pct_drop fix + handoff
+1d83f2b feat(M7): Phase 1 — Friday Coverage drilldown UI (Features A/B/C)
+4405d0b feat(M7): Phase 0+1 backend + Conservative preset + rule-comparison modal
+b98feb0 docs(M7): Session 20 — capital deployment analysis + M7 UI polish
+b5ef61c docs(M7): Session 19 — touched-band coverage toggle handoff
+cc6f313 feat(M7): loss anatomy iteration — best-combo grid builder, full-coverage tweaks, missed-friday recovery
+9059841 feat(M7): loss anatomy toolkit — classifier, scope toggles, per-trade diagnostic
+dd26998 docs(M7): handoff + work log for Chunk 1 (per-leg attribution)
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../app/analytics/m_month_batch_backtester.py      |  6 +-
+ .../btc-options/backend/app/api/m7_best_combo.py   | 26 +++++++
+ .../backend/app/api/m_month_best_combo.py          | 42 +++++++++++
+ .../btc-options/backend/app/api/m_month_results.py | 24 +++++--
+ .../btc-options/docs/memories/session_end_log.md   | 71 +++++++++++++++++++
+ .../src/components/m7/M7IvBandBestComboTable.tsx   | 34 ++++++++-
+ .../frontend/src/pages/MMonthSweepDashboard.tsx    | 81 ++++++++++++++++++++++
+ .../btc-options/frontend/src/services/m7_api.ts    |  7 ++
+ .../frontend/src/services/m_month_api.ts           | 22 ++++++
+ 9 files changed, 304 insertions(+), 9 deletions(-)
+```
+
+### Git Status
+```
+ M backend/app/analytics/m_month_batch_backtester.py
+ M backend/app/api/m7_best_combo.py
+ M backend/app/api/m_month_best_combo.py
+ M backend/app/api/m_month_results.py
+ M docs/memories/session_end_log.md
+ M frontend/src/components/m7/M7IvBandBestComboTable.tsx
+ M frontend/src/pages/MMonthSweepDashboard.tsx
+ M frontend/src/services/m7_api.ts
+ M frontend/src/services/m_month_api.ts
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-sweep-after-restart.png
+?? m7_after_restart.md
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? "../../new platform arch/"
+```
