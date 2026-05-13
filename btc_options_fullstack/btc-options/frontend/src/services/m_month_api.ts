@@ -10,6 +10,11 @@ export type MMonthMeta = {
   entry_months: string[];
   entry_hours: number[];
   expiry_dates: string[];
+  expiry_variants?: string[];
+  anchor_dates?: string[];
+  dte_buckets?: string[];
+  ivp_buckets?: string[];
+  entry_dows?: string[];
   n_trades: number;
   first_anchor_date: string | null;
   last_anchor_date: string | null;
@@ -110,6 +115,15 @@ export const m_month_api = {
     premium_sl_pct?: number;
     max_profit_pct?: number;
     margin_target_pct?: number;
+    // Filter-bar params (comma-separated CSV per backend signature)
+    iv_band?: string;
+    delta_target?: string;
+    entry_hour?: string;
+    expiry_variant?: string;
+    anchor_date?: string;
+    dte_bucket?: string;
+    ivp_bucket?: string;
+    entry_dow?: string;
     primary?: string;
     secondary?: string;
     include_grid?: boolean;
@@ -120,6 +134,14 @@ export const m_month_api = {
       premium_sl_pct: params.premium_sl_pct,
       max_profit_pct: params.max_profit_pct,
       margin_target_pct: params.margin_target_pct,
+      iv_band: params.iv_band,
+      delta_target: params.delta_target,
+      entry_hour: params.entry_hour,
+      expiry_variant: params.expiry_variant,
+      anchor_date: params.anchor_date,
+      dte_bucket: params.dte_bucket,
+      ivp_bucket: params.ivp_bucket,
+      entry_dow: params.entry_dow,
       primary: params.primary,
       secondary: params.secondary,
       include_grid: params.include_grid ? 'true' : undefined,

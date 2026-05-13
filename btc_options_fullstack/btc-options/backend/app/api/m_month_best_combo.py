@@ -377,6 +377,15 @@ def get_iv_band_best_combo(
         description="Max profit % of credit: exit when gross_pnl ≥ credit × X%. e.g. 10..80."),
     margin_target_pct: Optional[float] = Query(None, ge=0,
         description="Margin target %: exit when gross_pnl ≥ margin × X%. e.g. 5..50."),
+    # Trade-set filters (M7-style filter bar). Comma-separated values.
+    iv_band: Optional[str] = Query(None, description="Comma-sep IV bands"),
+    delta_target: Optional[str] = Query(None, description="Comma-sep delta targets"),
+    entry_hour: Optional[str] = Query(None, description="Comma-sep entry hours (IST)"),
+    expiry_variant: Optional[str] = Query(None, description="Comma-sep expiry variants"),
+    anchor_date: Optional[str] = Query(None, description="Comma-sep anchor dates (ISO)"),
+    dte_bucket: Optional[str] = Query(None, description="Comma-sep DTE buckets"),
+    ivp_bucket: Optional[str] = Query(None, description="Comma-sep IVP buckets"),
+    entry_dow: Optional[str] = Query(None, description="Comma-sep entry days (mon/tue/wed/thu/fri)"),
     primary: str = Query("avg_net_pnl"),
     secondary: Optional[str] = Query(None),
     include_grid: bool = Query(False),
@@ -406,6 +415,32 @@ def get_iv_band_best_combo(
     if trade_cycle and trade_cycle != "all":
         df = df[df["trade_cycle"] == trade_cycle]
 
+    # Comma-separated filter helpers
+    def _csv_filter(df_in: pd.DataFrame, col: str, raw: Optional[str], cast=str) -> pd.DataFrame:
+        if not raw or col not in df_in.columns:
+            return df_in
+        vals: list = []
+        for v in raw.split(","):
+            v = v.strip()
+            if not v:
+                continue
+            try:
+                vals.append(cast(v))
+            except Exception:
+                vals.append(v)
+        if not vals:
+            return df_in
+        return df_in[df_in[col].isin(vals)]
+
+    df = _csv_filter(df, "entry_atm_iv_band", iv_band, str)
+    df = _csv_filter(df, "delta_target", delta_target, float)
+    df = _csv_filter(df, "entry_hour_ist", entry_hour, int)
+    df = _csv_filter(df, "expiry_variant", expiry_variant, str)
+    df = _csv_filter(df, "anchor_date_ist", anchor_date, str)
+    df = _csv_filter(df, "dte_bucket", dte_bucket, str)
+    df = _csv_filter(df, "ivp_bucket", ivp_bucket, str)
+    df = _csv_filter(df, "entry_dow", entry_dow, str)
+
     grid = _aggregate_grid(df)
     best = _pick_best_per_band(grid, primary, secondary)
 
@@ -433,6 +468,13 @@ def get_iv_band_best_combo(
         "premium_sl_pct": premium_sl_pct,
         "max_profit_pct": max_profit_pct,
         "margin_target_pct": margin_target_pct,
+        "filters": {
+            "iv_band": iv_band, "delta_target": delta_target,
+            "entry_hour": entry_hour, "expiry_variant": expiry_variant,
+            "anchor_date": anchor_date, "dte_bucket": dte_bucket,
+            "ivp_bucket": ivp_bucket, "entry_dow": entry_dow,
+        },
+        "n_trades_after_filters": int(len(df)),
         "n_cells_in_grid": int(len(grid)),
         "best_per_band": _to_rows(best),
         **({"grid": _to_rows(grid)} if include_grid else {}),

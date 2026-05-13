@@ -126,6 +126,66 @@ on `portfolio_margin`. Both engines must keep this invariant in sync. When refit
 constants, bias the loss to keep residuals on the over-charge side. Verify any change
 against fresh UI numbers at multiple lot sizes before committing.
 
+## RULE #5 — Long-running scripts MUST use a dedicated container (added 2026-05-13)
+
+Backend container `docker-backend-1` is shared with the API. It can be
+restarted at any time — by another Claude session, by my own
+`docker compose up --build` for code reloads, by user intervention, or by
+external triggers. **Any long-running script started via `docker exec` (with
+or without `-d`) dies with the container restart, losing all progress.**
+
+This already cost us 2 partial backtests in Session 24/25.
+
+### The pattern — use `docker compose run` for one-shot scripts
+
+For any backtest, grid build, calibration loop, or other script that runs
+>5 minutes:
+
+```bash
+# WRONG — dies on container restart:
+docker exec -d docker-backend-1 sh -c "python -m app.analytics.foo > /tmp/foo.log 2>&1"
+
+# RIGHT — separate container with its own lifecycle, survives backend restarts:
+docker compose run -d --rm \
+  --name foo_$(date +%s) \
+  backend python -m app.analytics.foo
+```
+
+`docker compose run`:
+- Spins up a NEW container based on the `backend` service definition
+- Uses the same image, env, volumes, network as the API container
+- `--rm` removes the container on exit
+- `-d` detaches so the shell returns immediately
+- Has its OWN lifecycle — independent of `docker-backend-1`
+- Logs go to `docker logs <name>` (or pipe with `&` for file logging)
+
+### Verify before claiming "long script is running"
+
+After launching with `docker compose run -d`, confirm the dedicated
+container exists with a different ID than `docker-backend-1`:
+
+```bash
+docker ps --filter "name=foo_" --format "{{.Names}} {{.Status}}"
+docker logs --tail 20 foo_<timestamp>
+```
+
+If the script is critical and might run for hours, also write logs to
+the shared bind-mount so they survive everything:
+
+```bash
+docker compose run -d --rm --name foo_$(date +%s) \
+  -v /home/abhis/btc-data/logs:/logs \
+  backend sh -c "python -m app.analytics.foo > /logs/foo_$(date +%s).log 2>&1"
+```
+
+### Existing precedent
+
+The M7 v6 grid build (Session 23) used this pattern:
+`docker compose run -d --rm --name m7-grid-builder-v6 ...` — ran for 4h
+20m through multiple `docker-backend-1` restarts without issue.
+
+The M-Month backtester should follow the same pattern.
+
 ## Margin calibration loop (background process, may be running)
 `scripts/calibrate_loop_v2.sh` runs every 15 min for 24h to record `our_pm` vs
 `delta_arm` across 7 expiry buckets × 6 deltas × 13 lot sizes (546 scenarios per run).

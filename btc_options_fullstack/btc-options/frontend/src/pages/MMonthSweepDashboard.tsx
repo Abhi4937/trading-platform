@@ -104,6 +104,15 @@ export function MMonthSweepDashboard() {
   const [slMenu, setSlMenu] = useState<number[]>([]);
   const [maxProfitMenu, setMaxProfitMenu] = useState<number[]>([]);
   const [marginMenu, setMarginMenu] = useState<number[]>([]);
+  // Filter-bar state — empty string means "All"
+  const [fIvBand, setFIvBand] = useState('');
+  const [fDelta, setFDelta] = useState('');
+  const [fEntryHour, setFEntryHour] = useState('');
+  const [fExpiryVariant, setFExpiryVariant] = useState('');
+  const [fAnchorDate, setFAnchorDate] = useState('');
+  const [fDteBucket, setFDteBucket] = useState('');
+  const [fIvpBucket, setFIvpBucket] = useState('');
+  const [fEntryDow, setFEntryDow] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
@@ -141,6 +150,14 @@ export function MMonthSweepDashboard() {
             premium_sl_pct: premiumSlPct === '' ? undefined : premiumSlPct,
             max_profit_pct: maxProfitPct === '' ? undefined : maxProfitPct,
             margin_target_pct: marginTargetPct === '' ? undefined : marginTargetPct,
+            iv_band: fIvBand || undefined,
+            delta_target: fDelta || undefined,
+            entry_hour: fEntryHour || undefined,
+            expiry_variant: fExpiryVariant || undefined,
+            anchor_date: fAnchorDate || undefined,
+            dte_bucket: fDteBucket || undefined,
+            ivp_bucket: fIvpBucket || undefined,
+            entry_dow: fEntryDow || undefined,
             primary,
             secondary: secondary || undefined,
             include_grid: showGrid,
@@ -158,7 +175,14 @@ export function MMonthSweepDashboard() {
     })();
     return () => { cancelled = true; };
   }, [cycle, holdDuration, premiumSlPct, maxProfitPct, marginTargetPct,
+      fIvBand, fDelta, fEntryHour, fExpiryVariant, fAnchorDate,
+      fDteBucket, fIvpBucket, fEntryDow,
       primary, secondary, showGrid]);
+
+  const clearFilters = () => {
+    setFIvBand(''); setFDelta(''); setFEntryHour(''); setFExpiryVariant('');
+    setFAnchorDate(''); setFDteBucket(''); setFIvpBucket(''); setFEntryDow('');
+  };
 
   return (
     <div style={{ padding: 20, color: '#c8d6e5', fontSize: 13 }}>
@@ -220,6 +244,38 @@ export function MMonthSweepDashboard() {
           {' '}Months: {meta.entry_months.length}
         </div>
       )}
+
+      {/* Filter bar — narrow the trade set BEFORE rule derivation */}
+      <div style={{
+        background: '#0d1421', border: '1px solid #1a2d42', borderRadius: 6,
+        padding: '10px 14px', marginBottom: 8, display: 'flex',
+        gap: 12, alignItems: 'center', flexWrap: 'wrap',
+      }}>
+        <strong style={{ color: '#fff', fontSize: 12 }}>Filters:</strong>
+        <FilterSelect label="IV band" value={fIvBand} setValue={setFIvBand}
+          options={meta?.iv_bands || []} />
+        <FilterSelect label="Δ target" value={fDelta} setValue={setFDelta}
+          options={(meta?.deltas || []).map(d => d.toFixed(2))} />
+        <FilterSelect label="Entry hour" value={fEntryHour} setValue={setFEntryHour}
+          options={(meta?.entry_hours || []).map(h => `${h}`)}
+          render={v => `${String(v).padStart(2,'0')}:00 IST`} />
+        <FilterSelect label="Expiry variant" value={fExpiryVariant} setValue={setFExpiryVariant}
+          options={meta?.expiry_variants || []} />
+        <FilterSelect label="Dow" value={fEntryDow} setValue={setFEntryDow}
+          options={meta?.entry_dows || []} />
+        <FilterSelect label="DTE bucket" value={fDteBucket} setValue={setFDteBucket}
+          options={meta?.dte_buckets || []} />
+        <FilterSelect label="IVP bucket" value={fIvpBucket} setValue={setFIvpBucket}
+          options={meta?.ivp_buckets || []} />
+        <FilterSelect label="Anchor" value={fAnchorDate} setValue={setFAnchorDate}
+          options={meta?.anchor_dates || []} />
+        <span style={{ flex: 1 }} />
+        <button onClick={clearFilters} style={{
+          fontSize: 11, padding: '4px 10px', background: '#1a2d42',
+          color: '#c8d6e5', border: '1px solid #2a4d62', borderRadius: 4,
+          cursor: 'pointer',
+        }}>Clear all</button>
+      </div>
 
       {/* Exit-rule controls (Phase B — 96-rule menu) */}
       <div style={{
@@ -397,6 +453,31 @@ function BestComboTable({ rows, primary, loading }: {
         </table>
       )}
     </div>
+  );
+}
+
+function FilterSelect({
+  label, value, setValue, options, render,
+}: {
+  label: string;
+  value: string;
+  setValue: (v: string) => void;
+  options: (string | number)[];
+  render?: (v: string | number) => string;
+}) {
+  return (
+    <label style={{ fontSize: 11, color: '#7a9bb5' }}>
+      {label}:
+      <select value={value} onChange={e => setValue(e.target.value)}
+              style={dropdownStyle}>
+        <option value="">All</option>
+        {options.map(o => (
+          <option key={String(o)} value={String(o)}>
+            {render ? render(o) : String(o)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

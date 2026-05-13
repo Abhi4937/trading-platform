@@ -76,14 +76,28 @@ def get_meta() -> dict:
             "n_trades": 0,
         }
 
+    def _uniq(col: str) -> list:
+        if col not in df.columns:
+            return []
+        s = df[col].dropna().unique().tolist()
+        try:
+            return sorted(s)
+        except TypeError:
+            return sorted([str(v) for v in s])
+
     return {
         "ready": True,
         "cycles": list(VALID_CYCLES),
-        "deltas": sorted(df["delta_target"].dropna().unique().tolist()),
-        "iv_bands": sorted(df["entry_atm_iv_band"].dropna().unique().tolist()),
-        "entry_months": sorted(df["entry_month"].dropna().unique().tolist()),
-        "entry_hours": sorted(df["entry_hour_ist"].dropna().unique().tolist()),
-        "expiry_dates": sorted(df["expiry_date"].dropna().unique().tolist()),
+        "deltas": _uniq("delta_target"),
+        "iv_bands": _uniq("entry_atm_iv_band"),
+        "entry_months": _uniq("entry_month"),
+        "entry_hours": _uniq("entry_hour_ist"),
+        "expiry_dates": _uniq("expiry_date"),
+        "expiry_variants": _uniq("expiry_variant"),
+        "anchor_dates": _uniq("anchor_date_ist"),
+        "dte_buckets": _uniq("dte_bucket"),
+        "ivp_buckets": _uniq("ivp_bucket"),
+        "entry_dows": _uniq("entry_dow"),
         "n_trades": int(len(df)),
         "first_anchor_date": str(df["anchor_date_ist"].min()) if len(df) else None,
         "last_anchor_date": str(df["anchor_date_ist"].max()) if len(df) else None,

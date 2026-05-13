@@ -93,7 +93,11 @@ ENTRY_HOURS_IST_PER_CYCLE = {
     "monthly":           (23,),
     "bimonthly":         (23,),
     "lastfri_monthly":   (10,),
-    "lastfri_bimonthly": (10,),
+    # lastfri_bimonthly: enter at 18:00 IST = 12:30 UTC, AFTER Delta lists
+    # the month-after-next expiry (which lists at 12:00 UTC on the prior
+    # monthly's settlement day = the last-Friday itself). Entry at 10:00 IST
+    # is BEFORE the listing → no viable strikes. See HANDOFF Session 25.
+    "lastfri_bimonthly": (18,),
 }
 ENTRY_DAYS_PER_CYCLE = {
     "monthly":           ("mon",),
