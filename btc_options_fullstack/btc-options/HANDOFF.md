@@ -2,10 +2,140 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-12 (Session 21 — Phase 0/1 backend ship for Capital-Preservation plan)
+**Date:** 2026-05-13 (Session 23 — M7 Phase 1 finalisation: Friday Coverage + Pro Metrics)
 **Branch:** `mainbranch-gemini_claude`
 
-### Session 21 highlights — Phase 0 + Phase 1 backend (frontend still pending)
+### Session 23 highlights — Phase 1 Capital-Preservation polish closed out
+Plan: `/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md`
+Commits this session: `1d83f2b` (Features A/B/C), `4405d0b` (Phase 0/1
+backend, prior session). v6 grid finished overnight 01:12 IST. Backend
+serving v6 (28 MB, 206,016 cells). Pending Phase 1 polish all closed:
+
+**Friday Coverage drilldown (Features A/B/C) — `1d83f2b`:**
+- A — `M7MissedFridaysTable` now has a "Force-fit availability"
+  checkbox. When on, adds `n trades`, `Bands touched`, `Fits picks N/10`
+  and 10 per-band ✓/✗ columns. Powered by new backend endpoint
+  `GET /iv_band_best_combo/missed_fridays_force_fit`.
+  Verified: 2024-01-19 fits 10/10 — combo trades existed for every pick
+  band, the band classifier just routed them to different IV regimes.
+- B — New `M7CellAnalysisModal` (separate from rule-comparison modal).
+  Opens via 🔍 button in each BestCombo row. First tab = Cross-band
+  check: same combo across all 10 IV bands with picked band starred.
+- C — Second tab of same modal = Single-combo simulation. Counterfactual
+  "what if I always traded this combo?" with KPI grid (avg/total net,
+  win rate, max loss, composite, Sharpe) + capital-scaled block
+  (lots, scaled avg/Friday, scaled total, scaled max loss) + per-band
+  breakdown.
+- Backend fix in same commit: `m.iloc[0]["entry_atm_iv_band"]` raised
+  IndexError; switched to `m["entry_atm_iv_band"].dropna().iloc[0]`.
+
+**Pro Metrics column group + pct_drop fix (this session, uncommitted
+as of HANDOFF write — will commit alongside this update):**
+- `_compute_all_exits` formula fix: `pct_drop_peak_to_trough` was NaN
+  when peak ≤ 0 (trade never crossed entry slip). New formula:
+  `(peak − trough) / max(peak, |trough|, $0.01)` — always ≥ 0,
+  bounded, and meaningful even when peak is negative. Frontend mirrors
+  this with a fallback that recomputes from `avg_peak_before_trough` +
+  `avg_min_mtm` when the v6 grid's stored mean is null (since the grid
+  was built with the old NaN-producing formula).
+- New "Pro metrics" toggle button next to Conservative preset.
+  When on, BestComboTable adds 14 columns at the end:
+  Sharpe, Sortino, Calmar, VaR 95, CVaR 95, Worst-5, Peak-1 ($),
+  Trough ($), Peak-2 ($), Δ P1→T %, t(Peak-1), t(Trough), t(Peak-2),
+  Δ T→P2 %. All $ values scale by lots/100 when sizing is on.
+  t(*) cells use the existing `fmtExitClock` helper to convert
+  rel_time fields to IST clock + bracketed hold-duration text.
+  Persisted under `m7:bestcombo:show_pro_metrics`.
+
+**End-to-end verification (Playwright, today 2026-05-13):**
+- v6 rebuild finished 01:12 IST (4h 20m runtime, 206,016 cells, 28 MB).
+- Conservative preset on 20-30 band → `23:00 / Δ=0.15 / SL100+Exit_15:00
+  / n=16 / 87.5% win / composite=0.223`.
+- Pro Metrics for 20-30: Sharpe 0.61, Sortino 4.83, Calmar 0.46,
+  VaR 95 = -$35.98, Peak-1 = -$2.28, Trough = -$16.60, Peak-2 = $45.96,
+  Δ P1→T = 86%, Δ T→P2 = 569%.
+- Cross-band check shows the same rule across 7 of 10 bands (picked
+  band starred).
+- Single-combo simulation: n=119 / win=81.5% / scaled $77.44/Friday at
+  $600 capital.
+- Force-fit availability matrix on Missed Fridays renders 13 new
+  columns; 2024-01-19 = fits 10/10.
+
+**Remaining Phase 1 items: all closed.** No follow-ups blocking. The
+plan's Phase 2/3 sections (weight tuning UI, Pareto frontier, Backtest /
+Historical dashboards getting composite + sizing) are deliberately
+deferred per the plan's "Non-goals" + "Outstanding follow-ups".
+
+---
+
+## Session 22 — M-Month dashboard (sibling to M7)
+**Date:** 2026-05-12
+
+### Session 22 highlights — M-Month dashboard (sibling to M7) live
+Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`
+Approved 2026-05-12; stage 1 shipped same session.
+
+**What's live now:**
+- Backend backtester `app/analytics/m_month_batch_backtester.py` —
+  enumerates 3 trade cycles (Monthly = first-Mon → same-month last-Fri
+  on current-month expiry; Bimonthly = same entry/exit on next-month
+  expiry; Last-Fri rolling = last-Fri → next last-Fri on next-month
+  expiry, entry 10:00 IST). Reuses M7's pick_strikes / cost / margin /
+  greeks / path-walk helpers via `from app.analytics.m7_batch_backtester
+  import …`. Writes to `~/btc-data/derived/m_month/{m_month_trades.parquet,
+  m_month_paths/entry_month=YYYY-MM/part.parquet}`.
+- Backend API `/api/v1/m_month/*`:
+  - `/meta`, `/summary`, `/trades`, `/iv_band_summary`, `/missed_sessions`
+    in `app/api/m_month_results.py`
+  - `/iv_band_best_combo`, `/available_primary_metrics` in
+    `app/api/m_month_best_combo.py` (on-the-fly aggregation from path
+    parquet via DuckDB; hold-to-hard-cap exit; no rule menu yet)
+- Frontend mode `M_MONTH_SWEEP` added to `App.tsx`. Self-contained
+  `pages/MMonthSweepDashboard.tsx` with cycle toggle (Monthly /
+  Bimonthly / Last-Fri rolling / All), KPI strip, Best Combo per-IV-band
+  table, primary/tiebreak metric dropdowns, "Show full grid" checkbox.
+  Service: `services/m_month_api.ts`.
+- Verified end-to-end with Playwright: switch tabs, see "Monthly" view
+  with 9 trades from Feb 2024 anchor (one delta-row per cell), Bimonthly
+  empty-state renders correctly, M7 dashboard still works (non-breaking).
+
+**Background backtest running** (PID inside docker-backend-1):
+`docker exec docker-backend-1 python -m app.analytics.m_month_batch_backtester --since 2024-02-01 --through 2024-06-30 --cycles monthly,bimonthly,lastfri_rolling`
+Log: `/tmp/m_month_backtest.log`. ~2 min per anchor × 16 work items.
+After it lands the dashboard will show all 3 cycles populated.
+
+**Stage 1 scope explicitly deferred to stage 2/3:**
+- The 96-rule exit menu (3 SL × 32 rule configs including 11 new
+  fixed_hold_duration slots: 3d/5d/1w/2w/3w/4w/5w/6w/7w/8w/last-Fri).
+  Stage 1 uses hold-to-hard-cap only.
+- The `sessionLabel` prop refactor on M7 components. Stage 1 ships a
+  self-contained MMonthSweepDashboard instead of reusing M7 tables.
+  Component reuse is stage 2 work.
+- Entry-time sweep (Mon/Tue/Wed × hours): stage 1 ships single-anchor
+  per cycle. Constants `ENTRY_HOURS_IST_PER_CYCLE` /
+  `ENTRY_DAYS_PER_CYCLE` in the backtester ready to expand.
+- Adjustment engine (delta-rebalance / roll-untested / spot-distance):
+  stage 3.
+- Composite score, capital sizing, drilldown tables: stage 2.
+
+**Conventions inherited from M7 (do NOT relitigate):**
+- QTY_LOTS = 100 baseline. Margin linear in qty.
+- net_pnl = full-cost (entry slip + brokerage + exit slip + brokerage).
+- 10 IV bands (`[0,20)…[100,∞)`).
+- Sequential capital — only one position live at a time.
+
+**Files added this session:**
+- `backend/app/analytics/m_month_batch_backtester.py` (NEW, ~600 lines)
+- `backend/app/api/m_month_results.py` (NEW, ~180 lines)
+- `backend/app/api/m_month_best_combo.py` (NEW, ~240 lines)
+- `frontend/src/services/m_month_api.ts` (NEW, ~110 lines)
+- `frontend/src/pages/MMonthSweepDashboard.tsx` (NEW, ~300 lines)
+- `backend/app/main.py` (+1 import + 2 router lines)
+- `frontend/src/App.tsx` (+M_MONTH_SWEEP mode wiring)
+
+---
+
+## Session 21 — Phase 0 + Phase 1 backend (Capital-Preservation plan, archived)
 Plan: `/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md`
 Approved by user 2026-05-12; implementation in progress.
 

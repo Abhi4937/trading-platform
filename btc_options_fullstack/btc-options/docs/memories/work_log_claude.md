@@ -1,5 +1,267 @@
 # Claude's Work Log
 
+## Session 23 (2026-05-13) — M7 Phase 1 closeout: Friday Coverage + Pro Metrics + pct_drop fix
+
+### Headline
+Closed out all remaining Phase 1 polish items from the Capital-Preservation
+plan. v6 grid completed overnight (4h 20m). Friday Coverage drilldown UI
+shipped earlier today as commit `1d83f2b`. This session added:
+1. pct_drop_peak_to_trough formula fix (bounded when peak ≤ 0)
+2. Pro Metrics column group toggle (14 new columns end-to-end verified)
+3. Frontend fallback for pct_drop using bounded formula since v6 stored
+   pre-fix values
+
+### What shipped (in order)
+
+**Phase 1 Features A/B/C** (commit `1d83f2b`):
+- Feature A — `M7MissedFridaysTable` extended with "Force-fit availability"
+  checkbox. Adds `n trades`, `Bands touched`, `Fits picks N/10` summary +
+  10 per-band ✓/✗ columns. Backed by new
+  `GET /iv_band_best_combo/missed_fridays_force_fit` endpoint.
+- Feature B — New `M7CellAnalysisModal.tsx` with Cross-band check tab.
+  Opens via 🔍 button per Best Combo row. Shows the picked combo's stats
+  across all 10 IV bands with picked band starred.
+- Feature C — Second tab of same modal: Single-combo simulation.
+  Counterfactual "always trade this combo" with KPI grid, capital-scaled
+  block, per-band breakdown.
+- Backend pandas bug fix: `m.iloc[0]["entry_atm_iv_band"]` IndexError
+  → `m["entry_atm_iv_band"].dropna().iloc[0]`.
+
+**Phase 1 closeout polish (uncommitted at write-time; commits next):**
+- `m7_results.py:_compute_all_exits` — pct_drop_peak_to_trough formula
+  changed from `(peak − trough) / peak` (NaN when peak ≤ 0) to
+  `(peak − trough) / max(peak, |trough|, 0.01)` — bounded, ≥ 0,
+  meaningful when peak ≤ 0.
+- `M7IvBandBestComboTable.tsx`:
+  - New "◇ Pro metrics" toggle button next to Conservative preset.
+    State `showProMetrics` persisted under `m7:bestcombo:show_pro_metrics`.
+  - When on, 14 v6-only columns added at the end of the table:
+    Sharpe, Sortino, Calmar, VaR 95, CVaR 95, Worst-5, Peak-1 ($),
+    Trough ($), Peak-2 ($), Δ P1→T %, t(Peak-1), t(Trough), t(Peak-2),
+    Δ T→P2 %. All $ values scale by lots/100 when capital sizing is on.
+    t(*) uses `fmtExitClock` to convert rel_time to IST clock + duration.
+  - Frontend recomputes pct_drop / pct_recovery client-side when the v6
+    grid value is null (since v6 was built with the old formula). Once
+    v6 is rebuilt, the backend value will be used directly.
+
+### Verified live (Playwright)
+- v6 backend serving 206,016 cells after restart.
+- Conservative preset, 20-30 band (composite_score=0.223, n=16, win=87.5%):
+  - Sharpe 0.61, Sortino 4.83, Calmar 0.46
+  - VaR 95 = -$35.98, CVaR 95 = -$38.28, Worst-5 = -$0.35
+  - Peak-1 = -$2.28, Trough = -$16.60, Peak-2 = $45.96
+  - Δ P1→T = 86%, Δ T→P2 = 569%
+  - t(Peak-1) = 21:14 / t(Trough) = 21:40 / t(Peak-2) = 23:32
+- 🔍 modal Cross-band tab: 7 bands populated for the 0-20 pick.
+- 🔍 modal Single-combo tab: n=119, win=81.5%, scaled $77.44/Friday @ $600.
+- Force-fit availability toggle adds 13 cols on Missed Fridays;
+  2024-01-19 fits 10/10.
+
+### Files touched this session
+- `backend/app/api/m7_results.py` (pct_drop formula fix)
+- `frontend/src/components/m7/M7IvBandBestComboTable.tsx` (Pro Metrics
+  toggle, 14 columns, FE pct_drop fallback)
+
+### Conventions in force (unchanged)
+- Net P&L = full-cost; MTM = entry-slip-only.
+- Backtester qty = 100. Margin linear in qty.
+- Sequential capital, one position live at a time.
+
+---
+
+## Session 22 (2026-05-12) — M-Month module stage-1 end-to-end SHIPPED
+
+### Headline
+Brand-new analytical module for monthly-DTE strangles, sibling to M7's
+weekend module. User requested in plan-mode (`/plan i want to do …`),
+plan written + approved same session, full stack landed: 3 trade cycles
+(Monthly / Bimonthly / Last-Fri rolling), backend backtester reusing M7
+helpers, 2 FastAPI routers, frontend dashboard with cycle toggle and
+primary/tiebreak metric ranking. Verified live with Playwright.
+
+### What landed
+- **Plan written**: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`
+  (3 trade cycles, 9 deltas, 96-rule menu staged with new 11-slot
+  fixed_hold_duration family, 3 adjustment families, staged delivery
+  table, verification cases).
+- **Backend**:
+  - `app/analytics/m_month_batch_backtester.py` — new sibling to
+    `m7_batch_backtester.py`. Cycle-aware date enumerators
+    (`first_mondays_in_range`, `last_fridays_in_range`, `next_last_friday`),
+    new IST→UTC entry-ts helper, `TRADE_CYCLES` dict registering each
+    cycle's entry_fn / exit_fn / expiry_selector. Reuses M7's
+    `pick_strikes`, `_entry_cost_breakdown`, `compute_entry_margin`,
+    `load_leg_bars_1m`, `load_spot_window`, `compute_atm_iv_series`,
+    `_ff_lookup`, `iv_band_label` via `from app.analytics.m7_batch_backtester
+    import …`. Hive-partitions paths by `entry_month=YYYY-MM`. Trade row
+    columns: `trade_cycle`, `entry_month`, `anchor_date_ist`, `entry_dow`,
+    `expiry_variant`, plus the full M7 trade-row schema.
+  - `app/api/m_month_results.py` (new) — endpoints `/meta`, `/summary`,
+    `/trades`, `/iv_band_summary`, `/missed_sessions`. Lazy mtime-based
+    trades-parquet cache.
+  - `app/api/m_month_best_combo.py` (new) — endpoints
+    `/iv_band_best_combo`, `/available_primary_metrics`. On-the-fly
+    aggregation: DuckDB scan of `m_month_paths/entry_month=*/part.parquet`
+    to get hard-cap-exit `gross_pnl_usd` + `max_mtm_usd`/`min_mtm_usd`
+    per trade. Pandas groupby on (`trade_cycle`, `entry_atm_iv_band`,
+    `delta_target`, `entry_dow`, `entry_hour_ist`) with 14 aggregated
+    metrics. Ranking: per-band sort by primary + optional tiebreak.
+  - `app/main.py` — added `m_month_results.router` + `m_month_best_combo.router`
+    under prefix `/api/v1/m_month`.
+- **Frontend**:
+  - `services/m_month_api.ts` (new) — types + fetchers for all endpoints.
+  - `pages/MMonthSweepDashboard.tsx` (new) — self-contained dashboard
+    (does NOT depend on M7 components). Cycle toggle (Monthly /
+    Bimonthly / Last-Fri rolling / All cycles), KPI strip (# trades /
+    anchors / cycles / avg credit / avg margin / avg DTE), Best Combo
+    table with sign-coloured P&L cells, primary metric dropdown,
+    optional tiebreak, "Show full grid" toggle.
+  - `App.tsx` — added `M_MONTH_SWEEP` to AppMode enum, 7th button in
+    segmented control labeled "M-Month", route block mounting the new
+    dashboard, title "M-MONTH — MONTHLY + BIMONTHLY + LAST-FRI ROLLING".
+
+### Verification done
+- Backend imports clean inside docker: `python -c "from app.analytics.m_month_batch_backtester import run; ..."` and same for API modules.
+- Smoke test: `--since 2024-01-01 --through 2024-02-29 --cycles monthly`
+  produced 9 trades (Feb 5 anchor; Jan 1 anchor failed — Delta hadn't
+  listed the Jan 26 expiry on Jan 1 yet).
+- After backend rebuild: `curl /api/v1/m_month/meta` returns shape
+  expected. `/iv_band_best_combo?trade_cycle=monthly` returns 1 row
+  (the surviving Feb 0.10Δ trade, -$94.71 net).
+- Playwright: M-Month button visible after frontend restart, dashboard
+  renders, switching to Bimonthly shows "No data" empty state correctly,
+  M7 dashboard still renders fully.
+
+### Background work running at session end
+`docker exec docker-backend-1 python -m app.analytics.m_month_batch_backtester
+--since 2024-02-01 --through 2024-06-30 --cycles monthly,bimonthly,lastfri_rolling`
+in foreground/log to `/tmp/m_month_backtest.log`. 16 work items, ~2 min
+each. At session end was at 2/16. Next session: confirm parquet has all
+3 cycles' data after it finishes (snapshot writes happen every 5 items),
+verify dashboard shows populated Bimonthly + Last-Fri rolling cells.
+
+### Decisions / scope cuts made in-session
+1. **Self-contained MMonthSweepDashboard** instead of refactoring M7
+   components for `sessionLabel` prop. The plan called for component
+   reuse via prop refactor; that's a ~10-file change with merge-conflict
+   risk. Decided to ship a focused dashboard first; reuse becomes stage-2
+   refactor.
+2. **No 96-rule menu in stage 1**. Plan explicitly staged this for stage 2;
+   stage 1 uses hold-to-hard-cap exit and on-the-fly aggregation.
+3. **No pre-computed grid parquet** in stage 1. Aggregation runs at query
+   time. Performance fine on small dataset; will need grid caching once
+   the full multi-month / multi-cycle / multi-rule data lands.
+4. **No build_m_month_best_combo_grid.py script written**. The plan listed
+   it as a NEW file but it's only useful once we have the rule menu —
+   deferred to stage 2.
+
+### Stage 2 priority order (next session)
+1. Wait for background backtest to finish → verify all 3 cycles populate
+   the dashboard.
+2. Add the 96-rule exit menu including new 11-slot fixed_hold_duration
+   family. Port `_compute_all_exits` and `_derive_exits` from
+   m7_results.py with the partition-key swap.
+3. Pre-compute grid parquet (`m_month_best_combo_grid_v1.parquet`) via
+   a build script analogous to `build_m7_best_combo_grid.py`.
+4. Composite score + capital sizing port.
+5. Expand entry-time sweep (Mon/Tue/Wed × hours).
+
+---
+
+## Session 21 (2026-05-12) — Phase 0+1 backend + Conservative preset + rule-comparison modal SHIPPED
+
+### Headline
+Plan-mode-approved implementation of the M7 Best Combo Capital-Preservation
+Strategy Explorer. Phase 0 (data integrity) + Phase 1 (composite score,
+path peak-trough-peak, pro-trader metrics, diagnostic endpoints,
+Conservative preset, Hit % column, rule-comparison modal) landed and
+committed. Phase 2 (v6 grid rebuild) running in a dedicated container.
+
+### Files changed (committed in 4405d0b)
+
+Backend:
+- `backend/app/api/m7_results.py` — extended `mtm_sql` with CTE for trough
+  ts + peak-before/after-trough fields. New pandas columns:
+  `peak_before_trough_mtm`, `peak_after_trough_mtm`, `rel_time_peak_*`,
+  `pct_drop_peak_to_trough`, `pct_recovery_trough_to_peak`,
+  `alt_net_if_exit_at_peak1`. New _SIMPLE_METRICS (11) and
+  _SPECIAL_METRICS (8) for cell aggregation. New NaN-gross drops in
+  `_best_cells_for_metric`, `/iv_band_summary`, `/missed_fridays`.
+- `backend/app/api/m7_full_coverage.py` — NaN-gross drop applied here too.
+- `backend/app/api/m7_best_combo.py` — `_pick_best_per_band` gets 3 new
+  filters (`min_hit_pct` default 50, `max_loss_cap_pct`,
+  `max_drop_peak_to_trough_pct`). Grid-load enrichments:
+  `_attach_composite_score`, `_attach_risk_adjusted` (Sharpe / Sortino /
+  Calmar). `GRID_PARQUET_PATH` bumped to v6; v4 stays as fallback.
+  `_EXTRA_METRICS` and `_METRIC_DIRECTIONS` extended for v6 fields.
+  3 new endpoints:
+    - `GET /iv_band_best_combo/rule_comparison?band&expiry&Δ&hour`
+    - `GET /iv_band_best_combo/cross_band_check?band&expiry&Δ&hour&rule`
+    - `GET /iv_band_best_combo/single_combo_simulation?...`
+- `backend/app/scripts/build_m7_best_combo_grid.py` — docstring rewrite:
+  primary path is now `docker compose run -d --rm --name m7-grid-builder-v6`
+  (separate container, survives backend dev restarts). Legacy `docker exec`
+  marked as test-only.
+
+Frontend:
+- `frontend/src/components/m7/M7IvBandBestComboTable.tsx` —
+  Conservative preset button (sets Capital $600, deploy 100%,
+  composite_score primary, DD cap avg_min_mtm@30, max_loss 25%,
+  max_drop 30%, min_hit 50). New inputs: Hit % ≥, Max loss %, Max drop %.
+  Composite/Sharpe/Sortino/Calmar added to PRIMARY_GROUPS as 'Composite'
+  family. Hit % column rendered (green ≥50%, amber ≥25%, red below). Row
+  click opens M7RuleComparisonModal. Fetch args extended.
+- `frontend/src/components/m7/M7RuleComparisonModal.tsx` — NEW.
+  Click any Best Combo row → modal shows all 96 rules at that
+  (band, expiry, Δ, hour). Sortable columns (rule_label, hit_pct,
+  avg_net_pnl, win_rate, max_loss_usd, composite_score, n_trades).
+  Default sort: Hit % desc, then Avg net desc. Picked rule starred. ESC
+  closes.
+- `frontend/src/services/m7_api.ts` — `FetchBestComboArgs` extended with
+  min_hit_pct, max_loss_cap_pct, max_drop_peak_to_trough_pct.
+  M7IvBandBestComboRow extended with 30+ new optional fields (composite,
+  path, Sharpe, tail risk, edge stability). New types: M7RuleComparisonRow,
+  M7CrossBandCheckResponse, M7SingleComboSummary. New fetch funcs:
+  fetchM7RuleComparison, fetchM7CrossBandCheck,
+  fetchM7SingleComboSimulation.
+
+### Diagnostics resolved
+
+- **Issue 0A — NaN-gross trades**: 0.10Δ in low-IV regimes had
+  `put_entry_mark = NaN` → propagated through gross/net/MTM → counted as
+  losers but mean = NaN → "Avg loss" displayed `—`. Fixed at all
+  aggregation sites + the grid builder.
+- **Issue 0B — picker surfaces decorative rules**: cells where the
+  labelled rule never fires (Hit %=0%) could win the per-band pick when
+  raw aggregates favored them. `min_hit_pct=50` default now drops these.
+- **Diagnostic flow**: user originally saw `20-30 / 23:00 / 0.10Δ /
+  SL50+MaxProfit_75 / $71.92 / n=3` — turned out 2 of 3 trades had NaN
+  put marks AND the rule never fired. After Phase 0/0B, default picks
+  `20-30 / 22:00 / next_to_next (Mon) / Δ=0.5 / n=22 / 87% win`;
+  Conservative picks `20-30 / 23:00 / Δ=0.15 / SL100+Exit_15:00 / n=16 /
+  87.5% win / Hit%=100`.
+
+### What's NOT in this commit (deferred)
+
+- Phase 1 frontend: new v6-only display columns (path Peak-1/Trough/
+  Peak-2, full Sharpe/Sortino/Calmar/Kelly columns, edge-stability
+  badges) — these need v6 grid data to populate, so display columns can
+  be added in a follow-up after rebuild completes.
+- Phase 1 frontend: Friday Coverage drilldown UI (Features A/B/C in the
+  plan). Backend endpoints exist (`/missed_fridays`, `/cross_band_check`,
+  `/single_combo_simulation`); FE wiring deferred.
+- Phase 2: v6 grid rebuild — RUNNING in container `m7-grid-builder-v6`
+  via `docker compose run -d --rm`. Started 2026-05-12 15:22 UTC. After
+  ~5 min: 3/96 rules done at ~0.7-1.0 rules/min, ETA ~138 min. Output:
+  `/home/abhis/btc-data/derived/m7/m7_best_combo_grid_v6.parquet`. Build
+  log: `/home/abhis/btc-data/derived/m7/m7_v6_build.log`. Backend can
+  restart freely during the build (separate container lifecycle).
+
+### Plan location
+`/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md` (1480+ lines).
+
+---
+
 ## Session 20 (2026-05-12) — M7 capital deployment + 5-scenario loss/target/DD comparison
 
 ### Headline

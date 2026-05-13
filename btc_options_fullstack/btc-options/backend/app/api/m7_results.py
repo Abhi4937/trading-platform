@@ -762,18 +762,18 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
             merged["rel_time_peak_after_trough"] = (
                 (merged["ts_peak_after"] - merged["entry_ts_utc"]) / duration
             ).where(valid).clip(lower=0.0, upper=1.0)
-    # % drop from first peak down to trough (positive = gave back, NaN if
-    # no positive peak before trough). Same for recovery from trough to
-    # second peak. These are the headline path-shape metrics.
+    # % drop from first peak down to trough — what fraction of the highest
+    # unrealized P&L did the trade give back to the trough.
+    # Normalize by max(peak, |trough|, $0.01) so the ratio stays bounded even
+    # when peak ≤ 0 (trade never crossed into positive territory). Always ≥ 0
+    # since peak ≥ trough by construction; NaN only when both are NaN.
     if "peak_before_trough_mtm" in merged.columns:
         pb = merged["peak_before_trough_mtm"]
         pa = merged["peak_after_trough_mtm"]
         tr = merged["min_mtm_usd"]
-        merged["pct_drop_peak_to_trough"] = np.where(
-            pb > 0,
-            (pb - tr) / pb,
-            np.nan,
-        )
+        denom = np.maximum.reduce([pb.fillna(0), tr.abs().fillna(0),
+                                    pd.Series(0.01, index=merged.index)])
+        merged["pct_drop_peak_to_trough"] = (pb - tr) / denom
         merged["pct_recovery_trough_to_peak"] = np.where(
             tr.abs() > 0,
             (pa - tr) / tr.abs(),

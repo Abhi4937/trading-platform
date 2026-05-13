@@ -346,6 +346,10 @@ export function M7IvBandBestComboTable() {
   // Effective after v6 grid lands (column exists). Pre-v6 the filter is a no-op.
   const [maxDropPct, setMaxDropPct] = useState<number | null>(
     () => loadLS('max_drop_pct', null));
+  // Pro Metrics columns toggle — Sharpe/Sortino/VaR/CVaR/Worst-5 + path peak-trough-peak.
+  // Off by default to keep the table manageable; persisted to localStorage.
+  const [showProMetrics, setShowProMetrics] = useState<boolean>(
+    () => loadLS('show_pro_metrics', false));
 
   const [resp, setResp] = useState<M7IvBandBestComboResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -376,6 +380,7 @@ export function M7IvBandBestComboTable() {
   useEffect(() => { saveLS('min_hit_pct',       minHitPct);       }, [minHitPct]);
   useEffect(() => { saveLS('max_loss_cap_pct',  maxLossCapPct);   }, [maxLossCapPct]);
   useEffect(() => { saveLS('max_drop_pct',      maxDropPct);      }, [maxDropPct]);
+  useEffect(() => { saveLS('show_pro_metrics',  showProMetrics);  }, [showProMetrics]);
 
   useEffect(() => {
     let active = true;
@@ -674,6 +679,18 @@ export function M7IvBandBestComboTable() {
             title="Sets: Capital $600, Deploy 100%, Composite score primary, DD cap avg_min_mtm @ $30, Max loss 25%, Max drop 30%, Hit % ≥ 50, Pure mode. Picker chooses bounded-drawdown, rule-effective combos.">
             ◇ Conservative
           </button>
+          <button
+            onClick={() => setShowProMetrics(v => !v)}
+            style={{
+              padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+              background: showProMetrics ? '#1f6feb' : 'transparent',
+              color: showProMetrics ? '#fff' : '#cfd9e3',
+              border: '1px solid #1f6feb', borderRadius: 4,
+              fontWeight: 600,
+            }}
+            title="Toggle the Pro Metrics column group: Sharpe / Sortino / Calmar / VaR 95 / CVaR 95 / Worst-5 + path peak-trough-peak ($s, times, drop %). All populated by the v6 grid.">
+            {showProMetrics ? '◆' : '◇'} Pro metrics
+          </button>
           <div style={{ fontSize: 11, color: '#7a9bb5' }}>
             {err ? <span style={{ color: '#f85149' }}>{err}</span>
               : isWarming ? `Warming ${resp?.rules_done ?? 0}/${resp?.rules_total ?? 96} rules…`
@@ -811,6 +828,26 @@ export function M7IvBandBestComboTable() {
                 <th style={thR}>Avg exit time <InfoIcon text="Mean exit IST clock time across all trades = (entry hour + avg hold duration) mod 24h. Format: HH:MM (Xh Ym) where the bracketed value is the average hold duration." /></th>
                 <th style={thR}>Avg winner exit <InfoIcon text="Mean exit IST clock time restricted to winning trades, with avg winners' hold duration in brackets." /></th>
                 <th style={thR}>Avg loser exit <InfoIcon text="Mean exit IST clock time restricted to losing trades, with avg losers' hold duration in brackets." /></th>
+
+                {/* — Pro Metrics column group (v6 grid) — */}
+                {showProMetrics && (
+                  <>
+                    <th style={thR}>Sharpe <InfoIcon text="avg_net / stdev_net_pnl. Higher = more consistent edge. — when sample size is too small for stdev." /></th>
+                    <th style={thR}>Sortino <InfoIcon text="avg_net / stdev_losses_only. Downside-vol-only ratio. — when no losses to compute stdev." /></th>
+                    <th style={thR}>Calmar <InfoIcon text="avg_net / |max_loss|. Expected return per unit of worst-case loss." /></th>
+                    <th style={thR}>VaR 95 <InfoIcon text="5th-percentile net P&L distribution — at sized lots, this is your 1-in-20 trade outcome." /></th>
+                    <th style={thR}>CVaR 95 <InfoIcon text="Mean of trades below the 5th percentile. Expected loss conditional on tail event." /></th>
+                    <th style={thR}>Worst-5 <InfoIcon text="Mean of the 5 worst-net-P&L trades. Fat-left-tail indicator." /></th>
+                    <th style={thR}>Peak-1 <InfoIcon text="Avg max gross_pnl_usd seen BEFORE the trough across all trades in cell (entry-slip-only). Negative when the typical trade never went positive." /></th>
+                    <th style={thR}>Trough <InfoIcon text="Avg min MTM across all trades — worst unrealized point during the hold." /></th>
+                    <th style={thR}>Peak-2 <InfoIcon text="Avg max gross_pnl_usd seen AFTER the trough (recovery peak). High = trades typically bounce after dipping." /></th>
+                    <th style={thR}>Δ P1→T <InfoIcon text="Avg (peak-1 − trough) ÷ max(peak-1, |trough|, $0.01). What fraction of the peak (or absolute trough) the trade typically gives back. Lower = less stress." /></th>
+                    <th style={thR}>t(Peak-1) <InfoIcon text="Avg relative time of peak-1 within the hold (0=entry, 1=exit). Earlier means the trade typically tops out then turns." /></th>
+                    <th style={thR}>t(Trough) <InfoIcon text="Avg relative time of trough within the hold (0=entry, 1=exit). Late means losers crater near the end." /></th>
+                    <th style={thR}>t(Peak-2) <InfoIcon text="Avg relative time of the post-trough recovery peak." /></th>
+                    <th style={thR}>Δ T→P2 <InfoIcon text="Avg (peak-2 − trough) ÷ |trough|. How much the trade typically recovers after the trough. Higher = better mean reversion." /></th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -968,6 +1005,62 @@ export function M7IvBandBestComboTable() {
                   <td style={tdR}>{fmtExitClock(r.entry_hour_ist, r.avg_exit_offset_minutes)}</td>
                   <td style={tdR}>{fmtExitClock(r.entry_hour_ist, r.avg_winner_exit_offset_minutes)}</td>
                   <td style={tdR}>{fmtExitClock(r.entry_hour_ist, r.avg_loser_exit_offset_minutes)}</td>
+
+                  {/* — Pro Metrics cells (scaled by lots where applicable) — */}
+                  {showProMetrics && (() => {
+                    const dur = r.avg_exit_offset_minutes ?? null;
+                    const relTime = (relT: number | null | undefined) =>
+                      relT == null || dur == null ? '—' :
+                        fmtExitClock(r.entry_hour_ist, dur * relT);
+                    const dropColor = (v: number | null | undefined) => {
+                      if (v == null || isNaN(v as number)) return '#7a9bb5';
+                      const x = v as number;
+                      return x <= 0.2 ? '#3fb950' : x <= 0.5 ? '#f0b300' : '#f85149';
+                    };
+                    const numFmt = (v: number | null | undefined, dp = 2) =>
+                      v == null || isNaN(v as number) ? '—' : (v as number).toFixed(dp);
+                    // Pre-v6 fallback: if avg_pct_drop_peak_to_trough is null,
+                    // recompute from peak/trough means using the bounded formula
+                    // (peak − trough) / max(peak, |trough|, 0.01).
+                    const dropPct = (() => {
+                      if (r.avg_pct_drop_peak_to_trough != null) return r.avg_pct_drop_peak_to_trough;
+                      const pb = r.avg_peak_before_trough;
+                      const tr = r.avg_min_mtm;
+                      if (pb == null || tr == null) return null;
+                      const denom = Math.max(pb, Math.abs(tr), 0.01);
+                      return (pb - tr) / denom;
+                    })();
+                    const recoverPct = (() => {
+                      if (r.avg_pct_recovery_trough_to_peak != null) return r.avg_pct_recovery_trough_to_peak;
+                      const pa = r.avg_peak_after_trough;
+                      const tr = r.avg_min_mtm;
+                      if (pa == null || tr == null) return null;
+                      const denom = Math.max(Math.abs(tr), 0.01);
+                      return (pa - tr) / denom;
+                    })();
+                    return (
+                      <>
+                        <td style={tdR}>{numFmt(r.sharpe_per_trade)}</td>
+                        <td style={tdR}>{numFmt(r.sortino_per_trade)}</td>
+                        <td style={tdR}>{numFmt(r.calmar_like)}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.var_95_net)) }}>{usd(sk(r.var_95_net))}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.cvar_95_net)) }}>{usd(sk(r.cvar_95_net))}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.worst_5_avg_net)) }}>{usd(sk(r.worst_5_avg_net))}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_peak_before_trough)) }}>{usd(sk(r.avg_peak_before_trough))}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_min_mtm)) }}>{usd(sk(r.avg_min_mtm))}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_peak_after_trough)) }}>{usd(sk(r.avg_peak_after_trough))}</td>
+                        <td style={{ ...tdR, color: dropColor(dropPct) }}>
+                          {dropPct == null ? '—' : `${(dropPct * 100).toFixed(0)}%`}
+                        </td>
+                        <td style={tdR}>{relTime(r.avg_rel_time_peak_before)}</td>
+                        <td style={tdR}>{relTime(r.avg_rel_time_trough)}</td>
+                        <td style={tdR}>{relTime(r.avg_rel_time_peak_after)}</td>
+                        <td style={tdR}>
+                          {recoverPct == null ? '—' : `${(recoverPct * 100).toFixed(0)}%`}
+                        </td>
+                      </>
+                    );
+                  })()}
                 </tr>
                 );
               })}

@@ -1,6 +1,122 @@
 # Current Project State
 
 ## Active Projects
+
+- **M-Month module (Monthly + Bimonthly + Last-Fri rolling strangle) — Stage 1 SHIPPED (Session 22, 2026-05-12):**
+  Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`.
+  All 3 trade cycles enumerated; backend backtester + 2 routers + frontend
+  dashboard live. Background backtest running for Feb-Jun 2024 (all 3
+  cycles, 16 work items, ~30 min total). Log: `/tmp/m_month_backtest.log`.
+
+  **Trade cycles:**
+  - Monthly: first-Mon 23:00 IST → same-month last-Fri 11:00 IST, current-month expiry (~28→0 DTE)
+  - Bimonthly: same entry/exit, next-month expiry (~58→30 DTE)
+  - Last-Fri rolling: last-Fri 10:00 IST → next last-Fri 11:00 IST, next-month expiry (~28→0 DTE)
+
+  **Stage 1 limits (acknowledged):**
+  - Hold-to-hard-cap exit only (no 96-rule menu yet)
+  - Single anchor per cycle (no Mon/Tue/Wed × hours sweep)
+  - No adjustments (delta-rebalance / roll-untested / spot-distance)
+  - No composite score, capital sizing, drilldowns
+  - Self-contained dashboard (no shared M7 components)
+
+  **Stage 2 work (highest priority next):**
+  - Land the 96-rule exit menu including new 11-slot `fixed_hold_duration`
+    family (`3d/5d/1w/2w/3w/4w/5w/6w/7w/8w/last-Fri`, clipped to cycle expiry).
+  - Pre-computed grid parquet for faster picker queries.
+  - Composite score + capital sizing port from m7_best_combo.
+
+  **Files added:**
+  - `backend/app/analytics/m_month_batch_backtester.py`
+  - `backend/app/api/m_month_results.py`
+  - `backend/app/api/m_month_best_combo.py`
+  - `frontend/src/services/m_month_api.ts`
+  - `frontend/src/pages/MMonthSweepDashboard.tsx`
+  - `backend/app/main.py` (router registration)
+  - `frontend/src/App.tsx` (M_MONTH_SWEEP mode)
+
+  Verified live with Playwright: M-Month tab visible, cycle toggle works,
+  Best Combo table renders Feb 2024 monthly data, M7 dashboard intact.
+
+- **M7 Capital-Preservation Strategy Explorer — Phase 0/1/2 COMPLETE (Sessions 21+23, 2026-05-12 + 2026-05-13):**
+  Plan: `/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md`.
+  Commits: `4405d0b` (Phase 0+1 backend + Conservative preset + rule-comparison
+  modal), `1d83f2b` (Friday Coverage drilldown UI Features A/B/C).
+  Session 23 (today) closes Phase 1 polish: pct_drop formula fix
+  (`(peak − trough) / max(peak, |trough|, 0.01)` — bounded even when
+  peak ≤ 0) and Pro Metrics column group toggle.
+
+  **v6 grid build COMPLETED 2026-05-13 01:12 IST** (4h 20m runtime,
+  206,016 cells, 28 MB). 2,016 cells fewer than v4 — those were the
+  NaN-tainted low-Δ cells correctly dropped by the Phase 0A fix.
+  Output: `/home/abhis/btc-data/derived/m7/m7_best_combo_grid_v6.parquet`.
+  Backend serves v6 directly; v4 stays as fallback path.
+
+  **Shipped this session:**
+  - Phase 0A — NaN-gross trades dropped at all aggregation sites
+    (`_build_grid`, `_best_cells_for_metric`, `/iv_band_summary`,
+    `/missed_fridays`, `/iv_band_full_coverage`). Root cause: 0.10Δ
+    trades with `put_entry_mark = NaN` (unpriced put leg) cascaded NaN
+    through gross/net/MTM → counted as losers but mean = NaN → "Avg
+    loss" displayed `—`.
+  - Phase 0B — `_pick_best_per_band` filters: `min_hit_pct` (default 50;
+    drops cells where (n_trades − n_hard_cap)/n_trades < X%);
+    `max_loss_cap_pct`; `max_drop_peak_to_trough_pct`.
+  - Phase 1 — Path peak-trough-peak SQL (CTE in `mtm_sql`). Pandas
+    columns: peak/trough means, rel_time fields, drop/recovery, alt-net.
+  - Phase 1 — Pro-trader metrics: `composite_score`, `sharpe_per_trade`,
+    `sortino_per_trade`, `calmar_like` (grid-load enrichments from
+    existing cell columns + new stdev fields). VaR/CVaR, worst-5,
+    max_consec_loss_dollars, last-26w avg-net & win-rate (built into v6
+    grid).
+  - Phase 1 — 3 new diagnostic endpoints:
+      - `GET /iv_band_best_combo/rule_comparison` — all 96 rules at a
+        fixed (band, expiry, Δ, hour). Sortable. Verified with curl.
+      - `GET /iv_band_best_combo/cross_band_check` — same rule across
+        all 10 bands (regime-fragility check). Verified: e.g.
+        `sl100_exit_hr_15 @ 0.5Δ / 00:00` is robust 75-100% WR in all
+        6 covered bands.
+      - `GET /iv_band_best_combo/single_combo_simulation` — "what if I
+        always traded this combo?" counterfactual. At $600 cap, that
+        combo: n=119, win=81.5%, avg=$20.38, scaled=$77.44 per Friday.
+  - Phase 1 frontend (BestComboTable):
+      - "◇ Conservative" preset button (Capital $600, deploy 100%,
+        composite_score primary, DD cap avg_min_mtm@30, max_loss 25%,
+        max_drop 30%, min_hit 50, pure mode).
+      - New inputs: Hit % ≥, Max loss %, Max drop %.
+      - Composite/Sharpe/Sortino/Calmar entries in PRIMARY_GROUPS.
+      - Hit % column with green/amber/red coloring.
+      - Click any row → `M7RuleComparisonModal` (NEW component) shows
+        all 96 rules sortable, picked rule starred, ESC closes.
+  - Grid path bumped: `m7_best_combo_grid_v6.parquet` (v4 fallback).
+
+  **Behavior change confirmed live (Playwright):**
+  - 20-30 default pick (no Conservative): `22:00 / next_to_next (Mon) /
+    Δ=0.5 / n=22 / 87% win` (was `23:00 / 0.10Δ / n=3` NaN-tainted).
+  - 20-30 Conservative pick: `23:00 / Δ=0.15 / SL100+Exit_15:00 /
+    n=16 / 87.5% win / Hit %=100` (composite_score=0.223).
+
+  **Session 23 additions (Phase 1 closeout):**
+  - Pro Metrics column group toggle (◇ Pro metrics button next to
+    Conservative). When on, 14 v6-only columns: Sharpe / Sortino /
+    Calmar / VaR 95 / CVaR 95 / Worst-5 / Peak-1 $ / Trough $ /
+    Peak-2 $ / Δ P1→T % / t(Peak-1) / t(Trough) / t(Peak-2) /
+    Δ T→P2 %. All scaled by lots/100 when sizing is on.
+  - pct_drop formula fix: `(peak − trough) / max(peak, |trough|, 0.01)`.
+    FE falls back to recomputing from peak/trough means when v6 grid's
+    pre-fix value is null.
+  - Friday Coverage Features A/B/C all shipped + verified live.
+
+  **All Phase 1 items COMPLETE.** No follow-ups blocking.
+
+  **Deferred per plan (not blocking):**
+  - Weight tuning UI for composite (locked at 1,1,1).
+  - Pareto frontier per band.
+  - Composite/sizing port to Backtest / Historical dashboards.
+  - 5-layer / 34-test full protocol — partial regression done; full
+    run is a "nice to have" before next refactor.
+
+## Active Projects (prior)
 - **M7 capital-deployment analysis — DELIVERED (Session 20, 2026-05-12):**
   Comprehensive 5-scenario per-cell comparison for
   `20-30 IV × next_to_next (Mon) × Δ=0.5`. Winner identified:
