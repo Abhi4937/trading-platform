@@ -25,10 +25,23 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
     const ac = new AbortController();
     setLoading(true);
     setErr(null);
-    fetchM7BestComboMissedFridays(args, ac.signal)
-      .then(r => { if (active) setResp(r); })
-      .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
-      .finally(() => { if (active) setLoading(false); });
+    const tick = () => {
+      if (!active) return;
+      fetchM7BestComboMissedFridays(args, ac.signal)
+        .then(r => { if (active) setResp(r); })
+        .catch(e => {
+          if (!active || e?.name === 'AbortError') return;
+          const msg = String(e ?? '');
+          // Same restart-race retry as the parent table.
+          if (/\b500\b|NetworkError|Failed to fetch|ECONNRESET|fetch failed/i.test(msg)) {
+            window.setTimeout(() => { if (active) tick(); }, 2000);
+          } else {
+            setErr(msg);
+          }
+        })
+        .finally(() => { if (active) setLoading(false); });
+    };
+    tick();
     return () => { active = false; ac.abort(); };
   }, [JSON.stringify(args)]);
 

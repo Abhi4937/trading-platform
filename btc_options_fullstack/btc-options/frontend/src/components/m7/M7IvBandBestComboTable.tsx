@@ -463,7 +463,19 @@ export function M7IvBandBestComboTable() {
             window.setTimeout(tick, 5000);
           }
         })
-        .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
+        .catch(e => {
+          if (!active || e?.name === 'AbortError') return;
+          // Transient backend-restart races throw "500 Internal Server Error"
+          // or "Failed to fetch" / "NetworkError" briefly. Auto-retry once
+          // after 2s before surfacing the error to the user.
+          const msg = String(e ?? '');
+          const isTransient = /\b500\b|NetworkError|Failed to fetch|ECONNRESET|fetch failed/i.test(msg);
+          if (isTransient) {
+            window.setTimeout(() => { if (active) tick(); }, 2000);
+          } else {
+            setErr(msg);
+          }
+        })
         .finally(() => { if (active) setLoading(false); });
     };
     tick();
