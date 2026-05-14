@@ -361,7 +361,13 @@ export function M7IvBandBestComboTable() {
     () => loadLS('pick_mode', 'by_hour') as 'by_hour' | 'aggregate_hours');
   // Dimension whitelists — constrain the picker's search space. Empty = no filter.
   const [expiryFilter, setExpiryFilter] = useState<string[]>(
-    () => loadLS('expiry_filter', []) as string[]);
+    () => {
+      const saved = (loadLS('expiry_filter', []) as string[]) || [];
+      // Drop legacy entries (biweekly/monthly/quarterly) that were removed
+      // from the picker on 2026-05-14 — keeps stale localStorage harmless.
+      const allowed = new Set(['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)']);
+      return saved.filter(x => allowed.has(x));
+    });
   const [deltaFilter, setDeltaFilter] = useState<number[]>(
     () => loadLS('delta_filter', []) as number[]);
   const [hourFilter, setHourFilter] = useState<number[]>(
@@ -750,7 +756,10 @@ export function M7IvBandBestComboTable() {
               Empty = "All" (no filter on that dimension). "✓ All" buttons
               explicitly select every option. */}
           {(() => {
-            const ALL_EXPIRIES = ['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)', 'biweekly (14d)', 'monthly (30d)', 'quarterly'];
+            // Excluded by policy 2026-05-14: biweekly / monthly / quarterly
+            // carry too few historical Fridays — backend drops them from
+            // the in-memory grid at load time.
+            const ALL_EXPIRIES = ['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)'];
             const ALL_DELTAS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
             const ALL_HOURS = [0, 1, 2, 3, 21, 22, 23];
             const exp_all = expiryFilter.length === ALL_EXPIRIES.length;
@@ -773,7 +782,7 @@ export function M7IvBandBestComboTable() {
             onChange={e => setExpiryFilter(Array.from(e.target.selectedOptions, o => o.value))}
             style={{ ...inputStyle, width: 130, height: 22, opacity: expiryFilter.length ? 1 : 0.55 }}
             title="Optional — Ctrl/Cmd-click to whitelist expiry buckets. Empty selection (default) = all expiries are considered by the picker. Select 1+ to restrict the search space.">
-            {['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)', 'biweekly (14d)', 'monthly (30d)', 'quarterly'].map(e => (
+            {ALL_EXPIRIES.map(e => (
               <option key={e} value={e}>{e}</option>
             ))}
           </select>

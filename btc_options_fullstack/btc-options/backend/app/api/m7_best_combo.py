@@ -499,12 +499,22 @@ def _attach_risk_adjusted(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# Permanently-excluded expiry buckets — the longer-dated expiries
+# (biweekly / monthly / quarterly) carry too few historical Fridays to
+# be useful in the picker AND distort the search space. User decision
+# 2026-05-14: only the four short expiries are used everywhere.
+_ALLOWED_EXPIRIES = {
+    "current (Sat)", "next (Sun)", "next_to_next (Mon)", "weekly (7d)",
+}
+
+
 def _try_load_grid_from_disk() -> Optional[pd.DataFrame]:
     """Load persisted grid if present and fresh; else None.
 
     Tries v6 first, then v4. v4 lacks path peak-trough-peak / risk-adjusted
     columns — those flow through as None / NaN. After load we enrich with
-    overall (all-trades) MTM composites AND composite score.
+    overall (all-trades) MTM composites AND composite score, then drop
+    the longer-dated expiry buckets per `_ALLOWED_EXPIRIES`.
     """
     for path in (GRID_PARQUET_PATH, _GRID_FALLBACK_PATH):
         if not _grid_path_is_valid(path):
@@ -514,7 +524,13 @@ def _try_load_grid_from_disk() -> Optional[pd.DataFrame]:
             df = _unflatten_after_load(df)
             df = _enrich_grid_with_overall_mtm(df)
             df = _attach_composite_score(df)
-            return _attach_risk_adjusted(df)
+            df = _attach_risk_adjusted(df)
+            # Drop excluded expiries so every downstream consumer (picker,
+            # rule_comparison, missed_fridays, etc.) automatically ignores
+            # them — no need to filter at each endpoint.
+            if "expiry_bucket" in df.columns:
+                df = df[df["expiry_bucket"].isin(_ALLOWED_EXPIRIES)].copy()
+            return df
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to load M7 best-combo grid from %s: %s",
                         path, exc)
@@ -573,6 +589,12 @@ def _warmup_thread() -> None:
         _GRID_STATE["status"] = "warming"
         _GRID_STATE["started_at"] = time.time()
         grid = _build_grid(progress_cb=_on_progress)
+        # Mirror the load-path filter: keep only the four allowed expiries
+        # in the in-memory grid so the in-process build matches the cached
+        # disk-load path. The persisted parquet keeps all expiries (cheap)
+        # so we can change _ALLOWED_EXPIRIES later without a rebuild.
+        if grid is not None and not grid.empty and "expiry_bucket" in grid.columns:
+            grid = grid[grid["expiry_bucket"].isin(_ALLOWED_EXPIRIES)].copy()
         _GRID_STATE["grid"] = grid
         _GRID_STATE["status"] = "ready"
         _GRID_STATE["finished_at"] = time.time()
