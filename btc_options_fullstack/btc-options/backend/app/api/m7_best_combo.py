@@ -1026,6 +1026,42 @@ _VALID_RANKINGS = set(_METRIC_DIRECTIONS.keys()) | {"credit", "margin"}
 _VALID_RULE_FAMILIES = {"all", "max_profit", "margin_target"}
 
 
+def _apply_dimension_filters(
+    grid: pd.DataFrame,
+    expiry_buckets: Optional[str],
+    delta_targets: Optional[str],
+    entry_hours: Optional[str],
+) -> pd.DataFrame:
+    """Pre-filter the grid by expiry / delta / hour before per-band picking.
+
+    Each param is a comma-separated CSV ('' or None disables that filter).
+    Lets the user constrain the picker's search space (e.g. only Saturday
+    expiry and Δ ≤ 0.20 — useful when the picker keeps choosing
+    high-delta straddles you don't want to trade).
+    """
+    if expiry_buckets:
+        keep = {s.strip() for s in expiry_buckets.split(",") if s.strip()}
+        if keep:
+            grid = grid[grid["expiry_bucket"].isin(keep)]
+    if delta_targets:
+        try:
+            keep_d = {round(float(s.strip()), 2) for s in delta_targets.split(",") if s.strip()}
+        except ValueError:
+            keep_d = set()
+        if keep_d:
+            grid = grid[grid["delta_target"].astype(float).round(2).isin(keep_d)]
+    if entry_hours:
+        try:
+            keep_h = {int(s.strip()) for s in entry_hours.split(",") if s.strip()}
+        except ValueError:
+            keep_h = set()
+        if keep_h and "entry_hour_ist" in grid.columns:
+            # Handle None (aggregate_hours mode) — pass through; else filter
+            mask = grid["entry_hour_ist"].isna() | grid["entry_hour_ist"].astype("Int64").isin(keep_h)
+            grid = grid[mask]
+    return grid
+
+
 def _filter_grid_by_family(grid: pd.DataFrame, rule_family: str) -> pd.DataFrame:
     """Restrict the grid to a take-profit family before per-band picking.
 
@@ -1070,6 +1106,12 @@ def get_iv_band_best_combo(
                                           description="Filter out cells whose win_rate is below this percentage (0–100). Default off."),
     pick_mode: str = Query("by_hour",
                             description="'by_hour' (default) picks one cell per (band, hour); 'aggregate_hours' collapses the entry_hour dimension so each band's pick reflects every Friday whose IV landed in that band across all entry hours — much larger n_trades per pick."),
+    expiry_buckets: Optional[str] = Query(None,
+        description="CSV whitelist of expiry buckets (e.g. 'current (Sat),next (Sun)'). Empty/absent = no filter."),
+    delta_targets: Optional[str] = Query(None,
+        description="CSV whitelist of delta targets (e.g. '0.1,0.2,0.5'). Empty/absent = no filter."),
+    entry_hours: Optional[str] = Query(None,
+        description="CSV whitelist of entry hours IST (e.g. '21,22,23'). Empty/absent = no filter."),
     include_grid: bool = Query(False,
                                description="If true, also return the full grid"),
 ):
@@ -1128,6 +1170,11 @@ def get_iv_band_best_combo(
                 "n_rules": 0, "n_cells": 0}
 
     family_grid = _filter_grid_by_family(grid, rule_family)
+    # Dimension whitelists — applied BEFORE aggregation/picker so they
+    # constrain the search space exactly the way the user expects.
+    family_grid = _apply_dimension_filters(
+        family_grid, expiry_buckets, delta_targets, entry_hours,
+    )
     if pick_mode == "aggregate_hours":
         # Collapse entry_hour_ist BEFORE filters/picker so n_trades reflects
         # all-hours coverage and the picker chooses from the aggregated grid.
@@ -1602,6 +1649,9 @@ def get_missed_fridays_for_best_combo(
     min_n_trades: int = Query(5, ge=0),
     min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0),
     pick_mode: str = Query("by_hour"),
+    expiry_buckets: Optional[str] = Query(None),
+    delta_targets: Optional[str] = Query(None),
+    entry_hours: Optional[str] = Query(None),
 ):
     """Missed Fridays tied to the Best Combo picker. Accepts ALL sizing + filter
     params from /iv_band_best_combo so the picks computed here exactly match
@@ -1620,6 +1670,9 @@ def get_missed_fridays_for_best_combo(
     if grid is None or grid.empty:
         return {"rows": [], "status": "empty"}
     family_grid = _filter_grid_by_family(grid, rule_family)
+    family_grid = _apply_dimension_filters(
+        family_grid, expiry_buckets, delta_targets, entry_hours,
+    )
     if pick_mode == "aggregate_hours":
         family_grid = _aggregate_across_hours(family_grid)
     picks = _pick_best_per_band(

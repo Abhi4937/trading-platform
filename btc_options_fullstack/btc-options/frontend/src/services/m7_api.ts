@@ -266,16 +266,28 @@ export interface FetchBestComboArgs {
   min_n_trades?: number | null;           // default 5; drops cells with too-small sample
   min_win_rate?: number | null;           // 0–100; drops cells whose win_rate is below this
   pick_mode?: 'by_hour' | 'aggregate_hours';  // 'aggregate_hours' collapses entry_hour dimension
+  // Dimension whitelists — constrain the picker's search space.
+  // Empty array / undefined = no filter on that dimension.
+  expiry_buckets?: string[];              // e.g. ['current (Sat)', 'next (Sun)']
+  delta_targets?: number[];               // e.g. [0.1, 0.2, 0.5]
+  entry_hours?: number[];                 // e.g. [21, 22, 23]
 }
 
 export function fetchM7IvBandBestCombo(
   args: FetchBestComboArgs | M7Ranking = {},
   signal?: AbortSignal,
+  endpointPrefix: string = '/iv_band_best_combo',
+  bandMode?: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
 ): Promise<M7IvBandBestComboResponse> {
   // Legacy: callers passing a bare 'credit' | 'margin' string still work.
   const opts: FetchBestComboArgs =
     typeof args === 'string' ? { ranking: args } : args;
   const params = new URLSearchParams();
+  if (bandMode) params.set('band_mode', bandMode);
+  if (d1Tiebreakers && d1Tiebreakers.length > 0) {
+    params.set('d1_tiebreakers', d1Tiebreakers.join(','));
+  }
   params.set('ranking', opts.ranking ?? 'avg_net_pnl');
   if (opts.secondary) {
     params.set('secondary', opts.secondary);
@@ -315,8 +327,17 @@ export function fetchM7IvBandBestCombo(
   if (opts.pick_mode && opts.pick_mode !== 'by_hour') {
     params.set('pick_mode', opts.pick_mode);
   }
+  if (opts.expiry_buckets && opts.expiry_buckets.length > 0) {
+    params.set('expiry_buckets', opts.expiry_buckets.join(','));
+  }
+  if (opts.delta_targets && opts.delta_targets.length > 0) {
+    params.set('delta_targets', opts.delta_targets.map(d => String(d)).join(','));
+  }
+  if (opts.entry_hours && opts.entry_hours.length > 0) {
+    params.set('entry_hours', opts.entry_hours.map(h => String(h)).join(','));
+  }
   return jsonFetch<M7IvBandBestComboResponse>(
-    `${BASE}/iv_band_best_combo?${params.toString()}`, signal);
+    `${BASE}${endpointPrefix}?${params.toString()}`, signal);
 }
 
 // ── New diagnostic endpoints (Phase 1) ────────────────────────────────────────
@@ -366,6 +387,9 @@ export function fetchM7RuleComparison(args: {
   min_n_trades?: number | null;
   min_win_rate?: number | null;
   rule_family?: M7RuleFamily;
+  endpointPrefix?: string;
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
 }, signal?: AbortSignal): Promise<M7RuleComparisonResponse> {
   const p = new URLSearchParams({
     band: args.band,
@@ -387,8 +411,13 @@ export function fetchM7RuleComparison(args: {
   if (args.min_n_trades != null) p.set('min_n_trades', String(args.min_n_trades));
   if (args.min_win_rate != null) p.set('min_win_rate', String(args.min_win_rate));
   if (args.rule_family && args.rule_family !== 'all') p.set('rule_family', args.rule_family);
+  if (args.bandMode) p.set('band_mode', args.bandMode);
+  if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
+    p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
+  }
+  const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
   return jsonFetch<M7RuleComparisonResponse>(
-    `${BASE}/iv_band_best_combo/rule_comparison?${p}`, signal);
+    `${BASE}${prefix}/rule_comparison?${p}`, signal);
 }
 
 export interface M7CrossBandCheckResponse {
@@ -407,6 +436,9 @@ export function fetchM7CrossBandCheck(args: {
   delta_target: number;
   entry_hour_ist: number;
   rule_label: string;
+  endpointPrefix?: string;
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
 }, signal?: AbortSignal): Promise<M7CrossBandCheckResponse> {
   const p = new URLSearchParams({
     band: args.band,
@@ -415,8 +447,13 @@ export function fetchM7CrossBandCheck(args: {
     entry_hour_ist: String(args.entry_hour_ist),
     rule_label: args.rule_label,
   });
+  if (args.bandMode) p.set('band_mode', args.bandMode);
+  if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
+    p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
+  }
+  const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
   return jsonFetch<M7CrossBandCheckResponse>(
-    `${BASE}/iv_band_best_combo/cross_band_check?${p}`, signal);
+    `${BASE}${prefix}/cross_band_check?${p}`, signal);
 }
 
 export interface M7SingleComboSummary {
@@ -460,6 +497,9 @@ export function fetchM7SingleComboSimulation(args: {
   rule_label: string;
   total_capital_usd?: number | null;
   pct_deploy?: number;
+  endpointPrefix?: string;
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
 }, signal?: AbortSignal): Promise<M7SingleComboSimulationResponse> {
   const p = new URLSearchParams({
     expiry_bucket: args.expiry_bucket,
@@ -473,8 +513,13 @@ export function fetchM7SingleComboSimulation(args: {
       p.set('pct_deploy', String(args.pct_deploy));
     }
   }
+  if (args.bandMode) p.set('band_mode', args.bandMode);
+  if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
+    p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
+  }
+  const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
   return jsonFetch<M7SingleComboSimulationResponse>(
-    `${BASE}/iv_band_best_combo/single_combo_simulation?${p}`, signal);
+    `${BASE}${prefix}/single_combo_simulation?${p}`, signal);
 }
 
 // Missed-Friday force-fit drilldown (Feature A)
@@ -540,6 +585,15 @@ export function fetchM7BestComboMissedFridays(
   if (args.min_n_trades != null) p.set('min_n_trades', String(args.min_n_trades));
   if (args.min_win_rate != null) p.set('min_win_rate', String(args.min_win_rate));
   if (args.pick_mode && args.pick_mode !== 'by_hour') p.set('pick_mode', args.pick_mode);
+  if (args.expiry_buckets && args.expiry_buckets.length > 0) {
+    p.set('expiry_buckets', args.expiry_buckets.join(','));
+  }
+  if (args.delta_targets && args.delta_targets.length > 0) {
+    p.set('delta_targets', args.delta_targets.map(d => String(d)).join(','));
+  }
+  if (args.entry_hours && args.entry_hours.length > 0) {
+    p.set('entry_hours', args.entry_hours.map(h => String(h)).join(','));
+  }
   return jsonFetch<M7MissedFridaysForceFitResponse>(
     `${BASE}/iv_band_best_combo/missed_fridays?${p.toString()}`, signal);
 }

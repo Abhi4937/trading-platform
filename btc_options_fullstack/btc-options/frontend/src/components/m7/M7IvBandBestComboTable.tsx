@@ -359,6 +359,13 @@ export function M7IvBandBestComboTable() {
   // (collapse hours so every Friday with this band's IV is tested).
   const [pickMode, setPickMode] = useState<'by_hour' | 'aggregate_hours'>(
     () => loadLS('pick_mode', 'by_hour') as 'by_hour' | 'aggregate_hours');
+  // Dimension whitelists — constrain the picker's search space. Empty = no filter.
+  const [expiryFilter, setExpiryFilter] = useState<string[]>(
+    () => loadLS('expiry_filter', []) as string[]);
+  const [deltaFilter, setDeltaFilter] = useState<number[]>(
+    () => loadLS('delta_filter', []) as number[]);
+  const [hourFilter, setHourFilter] = useState<number[]>(
+    () => loadLS('hour_filter', []) as number[]);
   // Pro Metrics columns toggle — Sharpe/Sortino/VaR/CVaR/Worst-5 + path peak-trough-peak.
   // Off by default to keep the table manageable; persisted to localStorage.
   const [showProMetrics, setShowProMetrics] = useState<boolean>(
@@ -397,6 +404,9 @@ export function M7IvBandBestComboTable() {
   useEffect(() => { saveLS('min_n_trades',      minNTrades);      }, [minNTrades]);
   useEffect(() => { saveLS('min_win_rate',      minWinRate);      }, [minWinRate]);
   useEffect(() => { saveLS('pick_mode',         pickMode);        }, [pickMode]);
+  useEffect(() => { saveLS('expiry_filter',     expiryFilter);    }, [expiryFilter]);
+  useEffect(() => { saveLS('delta_filter',      deltaFilter);     }, [deltaFilter]);
+  useEffect(() => { saveLS('hour_filter',       hourFilter);      }, [hourFilter]);
 
   useEffect(() => {
     let active = true;
@@ -436,6 +446,9 @@ export function M7IvBandBestComboTable() {
         args.min_win_rate = minWinRate;
       }
       args.pick_mode = pickMode;
+      if (expiryFilter.length > 0) args.expiry_buckets = expiryFilter;
+      if (deltaFilter.length > 0) args.delta_targets = deltaFilter;
+      if (hourFilter.length > 0) args.entry_hours = hourFilter;
       fetchM7IvBandBestCombo(args, ac.signal)
         .then(r => {
           if (!active) return;
@@ -453,7 +466,8 @@ export function M7IvBandBestComboTable() {
   }, [primary, family, mode, secondary, tolerancePct,
       sizingMode, fixedLots,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
-      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode]);
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode,
+      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter)]);
 
   // Same args we send to /iv_band_best_combo so the missed-Fridays panel
   // below computes its picks against the user's exact filter/sizing state.
@@ -471,10 +485,14 @@ export function M7IvBandBestComboTable() {
     a.min_n_trades = minNTrades;
     if (minWinRate != null && minWinRate > 0) a.min_win_rate = minWinRate;
     a.pick_mode = pickMode;
+    if (expiryFilter.length > 0) a.expiry_buckets = expiryFilter;
+    if (deltaFilter.length > 0) a.delta_targets = deltaFilter;
+    if (hourFilter.length > 0) a.entry_hours = hourFilter;
     return a;
   }, [primary, family, mode, secondary, tolerancePct, sizingMode,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
-      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode]);
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode,
+      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter)]);
 
   const isWarming = resp?.status === 'warming';
   const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
@@ -728,6 +746,49 @@ export function M7IvBandBestComboTable() {
             title="When ON, the picker collapses the entry_hour_ist dimension so every Friday whose IV landed in a band — across ALL entry hours — is tested for that band's combo. n_trades reflects every hour the band touched. When OFF (default), one cell per (band, hour) and only the picked hour's Fridays are counted.">
             {pickMode === 'aggregate_hours' ? '∑ All hours' : '⏱ Per hour'}
           </button>
+          {/* Dimension whitelists — restrict the picker's search space. */}
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Expiry</span>
+          <select
+            multiple
+            value={expiryFilter}
+            onChange={e => setExpiryFilter(Array.from(e.target.selectedOptions, o => o.value))}
+            style={{ ...inputStyle, width: 130, height: 22 }}
+            title="Ctrl/Cmd-click to multi-select expiry buckets. Empty = all expiries. Picker only considers cells whose expiry is in the whitelist.">
+            {['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)', 'biweekly (14d)', 'monthly (30d)', 'quarterly'].map(e => (
+              <option key={e} value={e}>{e}</option>
+            ))}
+          </select>
+          {expiryFilter.length > 0 && (
+            <button onClick={() => setExpiryFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer' }} title="Clear expiry filter">×</button>
+          )}
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Δ</span>
+          <select
+            multiple
+            value={deltaFilter.map(String)}
+            onChange={e => setDeltaFilter(Array.from(e.target.selectedOptions, o => parseFloat(o.value)))}
+            style={{ ...inputStyle, width: 70, height: 22 }}
+            title="Ctrl/Cmd-click to multi-select delta targets. Empty = all deltas. Picker only considers cells whose Δ is in the whitelist.">
+            {[0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50].map(d => (
+              <option key={d} value={d}>{d.toFixed(2)}</option>
+            ))}
+          </select>
+          {deltaFilter.length > 0 && (
+            <button onClick={() => setDeltaFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer' }} title="Clear delta filter">×</button>
+          )}
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Hour</span>
+          <select
+            multiple
+            value={hourFilter.map(String)}
+            onChange={e => setHourFilter(Array.from(e.target.selectedOptions, o => parseInt(o.value, 10)))}
+            style={{ ...inputStyle, width: 60, height: 22 }}
+            title="Ctrl/Cmd-click to multi-select entry hours (IST). Empty = all hours. Picker only considers cells at the whitelisted entry hour(s).">
+            {[0, 1, 2, 3, 21, 22, 23].map(h => (
+              <option key={h} value={h}>{String(h).padStart(2, '0')}</option>
+            ))}
+          </select>
+          {hourFilter.length > 0 && (
+            <button onClick={() => setHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer' }} title="Clear hour filter">×</button>
+          )}
           {/* Conservative preset */}
           <button
             onClick={() => {
