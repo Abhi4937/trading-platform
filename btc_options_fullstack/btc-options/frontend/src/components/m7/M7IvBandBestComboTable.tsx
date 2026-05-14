@@ -747,8 +747,23 @@ export function M7IvBandBestComboTable() {
             {pickMode === 'aggregate_hours' ? '∑ All hours' : '⏱ Per hour'}
           </button>
           {/* Dimension whitelists — restrict the picker's search space.
-              Empty = "All" (no filter on that dimension). Active filters
-              get a coloured badge + ✕ to clear them. */}
+              Empty = "All" (no filter on that dimension). "✓ All" buttons
+              explicitly select every option. */}
+          {(() => {
+            const ALL_EXPIRIES = ['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)', 'biweekly (14d)', 'monthly (30d)', 'quarterly'];
+            const ALL_DELTAS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
+            const ALL_HOURS = [0, 1, 2, 3, 21, 22, 23];
+            const exp_all = expiryFilter.length === ALL_EXPIRIES.length;
+            const dlt_all = deltaFilter.length === ALL_DELTAS.length;
+            const hr_all  = hourFilter.length === ALL_HOURS.length;
+            const allBtnStyle = (on: boolean): React.CSSProperties => ({
+              ...inputStyle,
+              padding: '0 6px',
+              cursor: 'pointer',
+              color: on ? '#3fb950' : '#7a9bb5',
+              border: `1px solid ${on ? '#3fb950' : '#1a2d42'}`,
+            });
+            return (<>
           <span style={{ fontSize: 11, color: expiryFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: expiryFilter.length ? 700 : 400 }}>
             Expiry {expiryFilter.length ? `(${expiryFilter.length})` : '(All)'}
           </span>
@@ -762,6 +777,9 @@ export function M7IvBandBestComboTable() {
               <option key={e} value={e}>{e}</option>
             ))}
           </select>
+          <button onClick={() => setExpiryFilter(ALL_EXPIRIES)} style={allBtnStyle(exp_all)} title="Select every expiry bucket (same effect as empty for the picker; just makes the selection explicit).">
+            ✓ All
+          </button>
           {expiryFilter.length > 0 && (
             <button onClick={() => setExpiryFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear expiry filter (revert to All)">×</button>
           )}
@@ -778,6 +796,9 @@ export function M7IvBandBestComboTable() {
               <option key={d} value={d}>{d.toFixed(2)}</option>
             ))}
           </select>
+          <button onClick={() => setDeltaFilter(ALL_DELTAS)} style={allBtnStyle(dlt_all)} title="Select every delta target.">
+            ✓ All
+          </button>
           {deltaFilter.length > 0 && (
             <button onClick={() => setDeltaFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear delta filter (revert to All)">×</button>
           )}
@@ -794,9 +815,14 @@ export function M7IvBandBestComboTable() {
               <option key={h} value={h}>{String(h).padStart(2, '0')}</option>
             ))}
           </select>
+          <button onClick={() => setHourFilter(ALL_HOURS)} style={allBtnStyle(hr_all)} title="Select every entry hour.">
+            ✓ All
+          </button>
           {hourFilter.length > 0 && (
             <button onClick={() => setHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear hour filter (revert to All)">×</button>
           )}
+            </>);
+          })()}
           {/* Conservative preset */}
           <button
             onClick={() => {
