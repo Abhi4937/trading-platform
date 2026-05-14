@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { InfoIcon } from './InfoIcon';
 import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
-import { fetchM7IvBandSummary } from '../../services/m7_api';
+import { fetchM7IvBandSummary, fetchM7FridayBandSummaryTable } from '../../services/m7_api';
 import type { M7ExitRule, M7Filters, M7IvBandSummaryRow } from '../../types/m7';
 
 // Indeterminate progress bar — keyframes injected via inline <style>.
@@ -75,8 +75,12 @@ function fmtScore(metric: string, v: number): string {
   return `$${v.toFixed(2)}`;
 }
 
-export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl' }: {
+export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl',
+                                       useFridayBand = false, bandMode, d1Tiebreakers }: {
   filters: M7Filters; exitRule: M7ExitRule; metric?: string;
+  useFridayBand?: boolean;
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
 }) {
   const [rows, setRows] = useState<M7IvBandSummaryRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -87,12 +91,15 @@ export function M7IvBandSummaryTable({ filters, exitRule, metric = 'avg_net_pnl'
     const ac = new AbortController();
     setLoading(true);
     setErr(null);
-    fetchM7IvBandSummary({ ...filters, metric }, exitRule, ac.signal)
-      .then(r => { if (active) setRows(r.rows); })
-      .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
-      .finally(() => { if (active) setLoading(false); });
+    const p = useFridayBand
+      ? fetchM7FridayBandSummaryTable({ ...filters, metric }, exitRule, bandMode, d1Tiebreakers, ac.signal)
+          .then(r => ({ rows: r.rows as unknown as M7IvBandSummaryRow[] }))
+      : fetchM7IvBandSummary({ ...filters, metric }, exitRule, ac.signal);
+    p.then(r => { if (active) setRows(r.rows); })
+     .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
+     .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
-  }, [JSON.stringify(filters), JSON.stringify(exitRule), metric]);
+  }, [JSON.stringify(filters), JSON.stringify(exitRule), metric, useFridayBand, bandMode, JSON.stringify(d1Tiebreakers ?? [])]);
 
   const th: React.CSSProperties = { padding: '6px 8px', color: '#7a9bb5', whiteSpace: 'nowrap' };
   const thR: React.CSSProperties = { ...th, textAlign: 'right' };

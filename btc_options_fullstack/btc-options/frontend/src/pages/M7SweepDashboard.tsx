@@ -5,6 +5,7 @@ import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers'
 import { M7FilterBar } from '../components/m7/M7FilterBar';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
 import { M7IvBandBestComboTable } from '../components/m7/M7IvBandBestComboTable';
+import { M7FridayBandBestComboTable } from '../components/m7/M7FridayBandBestComboTable';
 import { M7IvBandFullCoverageTable } from '../components/m7/M7IvBandFullCoverageTable';
 import { M7IvBandSummaryTable } from '../components/m7/M7IvBandSummaryTable';
 import { M7LegAttributionTable } from '../components/m7/M7LegAttributionTable';
@@ -55,6 +56,16 @@ export function M7SweepDashboard() {
   const [metric, setMetric] = useState<string>('avg_net_pnl');
   const [selectedTrade, setSelectedTrade] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Best-combo variant tab: per-trade IV band (existing) vs Friday-locked IV
+  // band (new). Persisted to localStorage.
+  const [bestComboTab, setBestComboTab] = useState<'per_trade' | 'friday_band'>(() => {
+    try {
+      return (window.localStorage.getItem('m7:bestcombo:tab') as 'per_trade' | 'friday_band') || 'per_trade';
+    } catch { return 'per_trade'; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem('m7:bestcombo:tab', bestComboTab); } catch {}
+  }, [bestComboTab]);
 
   // Debounce filter / exit-rule / metric so rapid changes coalesce into a
   // single backend round-trip instead of firing on every keystroke. The
@@ -180,7 +191,31 @@ export function M7SweepDashboard() {
       <M7IvBandSummaryTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
       <M7IvBandFullCoverageTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
       <M7MissedFridaysTable filters={dFilters} exitRule={dExitRule} metric={dMetric} />
-      <M7IvBandBestComboTable />
+
+      {/* Best-combo variant selector: per-trade IV band (existing) vs Friday-locked IV band (new) */}
+      <div style={{ display: 'flex', gap: 6, marginTop: 14, marginBottom: 4 }}>
+        <button onClick={() => setBestComboTab('per_trade')}
+          style={{
+            padding: '6px 14px', borderRadius: 4, fontSize: 12,
+            background: bestComboTab === 'per_trade' ? '#1f6feb' : '#0a1018',
+            color: bestComboTab === 'per_trade' ? '#fff' : '#cfd9e3',
+            border: bestComboTab === 'per_trade' ? '1px solid #2f7feb' : '1px solid #1a2d42',
+            cursor: 'pointer', fontWeight: bestComboTab === 'per_trade' ? 700 : 400,
+          }}>
+          Per-trade IV band (existing)
+        </button>
+        <button onClick={() => setBestComboTab('friday_band')}
+          style={{
+            padding: '6px 14px', borderRadius: 4, fontSize: 12,
+            background: bestComboTab === 'friday_band' ? '#1f6feb' : '#0a1018',
+            color: bestComboTab === 'friday_band' ? '#fff' : '#cfd9e3',
+            border: bestComboTab === 'friday_band' ? '1px solid #2f7feb' : '1px solid #1a2d42',
+            cursor: 'pointer', fontWeight: bestComboTab === 'friday_band' ? 700 : 400,
+          }}>
+          Friday-locked IV band (new)
+        </button>
+      </div>
+      {bestComboTab === 'per_trade' ? <M7IvBandBestComboTable /> : <M7FridayBandBestComboTable />}
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric} />
 
       {/* Chunk 1 — Per-leg Attribution: skew heatmap + per-trade table.

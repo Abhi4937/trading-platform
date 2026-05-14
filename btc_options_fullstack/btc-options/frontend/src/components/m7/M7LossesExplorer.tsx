@@ -15,6 +15,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   fetchM7LossesDistribution,
+  fetchM7FridayBandLossesDistribution,
   type M7LossesDistResponse,
   type M7LossesRanking,
   type M7LossesScope,
@@ -28,6 +29,9 @@ interface Props {
   filters: M7Filters;
   exitRule: M7ExitRule;
   metric?: string;  // dashboard's PnL-Analytics dropdown — drives FC best-cell pick
+  useFridayBand?: boolean;
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
 }
 
 const CAUSE_COLORS: Record<string, string> = {
@@ -56,7 +60,8 @@ function fmtUsd(v: number): string {
   return `${sign}$${abs.toFixed(2)}`;
 }
 
-export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
+export function M7LossesExplorer({ filters, exitRule, metric,
+                                   useFridayBand = false, bandMode, d1Tiebreakers }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [data, setData] = useState<M7LossesDistResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -79,26 +84,41 @@ export function M7LossesExplorer({ filters, exitRule, metric }: Props) {
     const ac = new AbortController();
     setLoading(true); setErr(null);
     const dimensions = secondaryDim ? `${primaryDim},${secondaryDim}` : primaryDim;
-    fetchM7LossesDistribution({
-      ...filters,
-      dimensions,
-      exit_rule: exitRule,
-      scope: scope ?? undefined,
-      ranking: scope === 'best_combo' ? ranking : undefined,
-      metric,
-      include_trades: tradesExpanded,
-      trades_limit: TRADES_PER_PAGE,
-      trades_offset: tradesPage * TRADES_PER_PAGE,
-      trades_sort: tradesSort,
-      only_sl_hits: onlySlHits,
-    }, ac.signal)
-      .then(setData)
-      .catch(e => { if ((e as Error).name !== 'AbortError') setErr(String(e)); })
-      .finally(() => setLoading(false));
+    const fbScope = scope === 'full_coverage' ? null : scope;  // full_coverage not supported in FB mode
+    const p = useFridayBand
+      ? fetchM7FridayBandLossesDistribution({
+          ...filters,
+          dimensions,
+          exit_rule: exitRule,
+          scope: (fbScope === 'best_combo' ? 'best_combo' : null) as 'best_combo' | null,
+          metric,
+          include_trades: tradesExpanded,
+          trades_limit: TRADES_PER_PAGE,
+          trades_offset: tradesPage * TRADES_PER_PAGE,
+          trades_sort: tradesSort,
+          only_sl_hits: onlySlHits,
+        }, bandMode, d1Tiebreakers, ac.signal)
+      : fetchM7LossesDistribution({
+          ...filters,
+          dimensions,
+          exit_rule: exitRule,
+          scope: scope ?? undefined,
+          ranking: scope === 'best_combo' ? ranking : undefined,
+          metric,
+          include_trades: tradesExpanded,
+          trades_limit: TRADES_PER_PAGE,
+          trades_offset: tradesPage * TRADES_PER_PAGE,
+          trades_sort: tradesSort,
+          only_sl_hits: onlySlHits,
+        }, ac.signal);
+    p.then(setData)
+     .catch(e => { if ((e as Error).name !== 'AbortError') setErr(String(e)); })
+     .finally(() => setLoading(false));
     return () => ac.abort();
   }, [collapsed, JSON.stringify(filters), JSON.stringify(exitRule),
       primaryDim, secondaryDim, scope, ranking, metric,
-      tradesExpanded, tradesSort, onlySlHits, tradesPage]);
+      tradesExpanded, tradesSort, onlySlHits, tradesPage,
+      useFridayBand, bandMode, JSON.stringify(d1Tiebreakers ?? [])]);
 
   // Reset pagination when filters/scope/sort change.
   useEffect(() => { setTradesPage(0); }, [

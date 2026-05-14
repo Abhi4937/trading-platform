@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo, m_month_results, m_month_best_combo
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo, m7_friday_band_best_combo, m7_friday_band_results, m_month_results, m_month_best_combo, m9_friday_weekly_results, m9_friday_weekly_best_combo
 
 # Fresh ID per process — frontend uses this to detect a backend restart and
 # wipe its auto-persisted UI state on the next page load.
@@ -76,6 +76,24 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Startup — M7 best-combo grid NOT cached; "
                     "run scripts/build_m7_best_combo_grid.py to build")
+    # M7 Friday-band grid: load synchronously from disk (instant — small file).
+    # The 600MB per-trade archive used by B1/D1 modes is deferred to first hit
+    # (lazy-loaded inside _load_per_trade_archive). To avoid the 30-45s
+    # cold-start hit when a user first switches to B1/D1, schedule a
+    # background pre-warm of the archive.
+    if m7_friday_band_best_combo._load_grid_and_sat_iv():
+        logger.info("Startup — M7 Friday-band A1 grid loaded from disk cache")
+        # Pre-warm the per-trade archive in a background thread so that the
+        # first user click on B1/D1 doesn't pay the 30-45s load cost.
+        def _prewarm():
+            try:
+                m7_friday_band_best_combo._load_per_trade_archive()
+                logger.info("Startup pre-warm — Friday-band per-trade archive loaded")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Friday-band per-trade pre-warm failed: %s", e)
+        asyncio.get_event_loop().run_in_executor(None, _prewarm)
+    else:
+        logger.info("Startup — M7 Friday-band grid NOT cached")
     yield
     logger.info("Shutdown — stopping live recorder + merge scheduler...")
     await stop_recorder()
@@ -156,5 +174,9 @@ app.include_router(m4_results.router,  prefix="/api/v1/m4",           tags=["M4 
 app.include_router(m7_results.router,  prefix="/api/v1/m7",           tags=["M7 Sweep"])
 app.include_router(m7_full_coverage.router, prefix="/api/v1/m7",       tags=["M7 Sweep"])
 app.include_router(m7_best_combo.router,    prefix="/api/v1/m7",       tags=["M7 Sweep"])
+app.include_router(m7_friday_band_best_combo.router, prefix="/api/v1/m7", tags=["M7 Sweep"])
+app.include_router(m7_friday_band_results.router, prefix="/api/v1/m7", tags=["M7 Friday-Band"])
 app.include_router(m_month_results.router,    prefix="/api/v1/m_month",  tags=["M-Month Sweep"])
 app.include_router(m_month_best_combo.router, prefix="/api/v1/m_month",  tags=["M-Month Sweep"])
+app.include_router(m9_friday_weekly_results.router,    prefix="/api/v1/m9", tags=["M9 Friday Weekly"])
+app.include_router(m9_friday_weekly_best_combo.router, prefix="/api/v1/m9", tags=["M9 Friday Weekly"])

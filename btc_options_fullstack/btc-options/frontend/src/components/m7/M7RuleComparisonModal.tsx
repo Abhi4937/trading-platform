@@ -24,6 +24,7 @@ export function M7RuleComparisonModal({
   minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate,
   ruleFamily,
   primaryMetric = 'avg_net_pnl', primaryLabel = 'Avg net',
+  endpointPrefix, bandMode, d1Tiebreakers,
   onClose,
 }: {
   band: string;
@@ -43,6 +44,9 @@ export function M7RuleComparisonModal({
   ruleFamily?: 'all' | 'max_profit' | 'margin_target';
   primaryMetric?: string;  // which column the parent picker ranks on
   primaryLabel?: string;   // display label, e.g. "Composite score"
+  endpointPrefix?: string;             // '/iv_band_best_combo' (default) or '/friday_band_best_combo'
+  bandMode?: 'A1' | 'B1' | 'D1';       // Friday-band variant mode (passes band_mode query param)
+  d1Tiebreakers?: string[];            // Friday-band D1 priority chain
   onClose: () => void;
 }) {
   const sizingActive = totalCapitalUsd != null && totalCapitalUsd > 0;
@@ -84,6 +88,7 @@ export function M7RuleComparisonModal({
       min_n_trades: minNTrades ?? null,
       min_win_rate: minWinRate ?? null,
       rule_family: ruleFamily,
+      endpointPrefix, bandMode, d1Tiebreakers,
     }, ac.signal)
       .then(r => { if (active) setRows(r.rows ?? []); })
       .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
@@ -91,7 +96,8 @@ export function M7RuleComparisonModal({
     return () => { active = false; ac.abort(); };
   }, [band, expiry_bucket, delta_target, entry_hour_ist,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
-      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, ruleFamily]);
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, ruleFamily,
+      endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
 
   // ESC closes
   useEffect(() => {

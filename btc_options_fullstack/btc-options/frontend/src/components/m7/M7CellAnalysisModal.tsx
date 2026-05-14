@@ -21,7 +21,9 @@ type Tab = 'cross_band' | 'single_combo';
 
 export function M7CellAnalysisModal({
   band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
-  totalCapitalUsd, pctDeploy, lots = 100, onClose,
+  totalCapitalUsd, pctDeploy, lots = 100,
+  endpointPrefix, bandMode, d1Tiebreakers,
+  onClose,
 }: {
   band: string;
   expiry_bucket: string;
@@ -31,6 +33,9 @@ export function M7CellAnalysisModal({
   totalCapitalUsd?: number | null;
   pctDeploy?: number;
   lots?: number;  // sized-lots from the parent table row; defaults to 100 (baseline)
+  endpointPrefix?: string;             // '/iv_band_best_combo' (default) or '/friday_band_best_combo'
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
   onClose: () => void;
 }) {
   const k = (lots > 0 ? lots : 100) / 100;
@@ -54,17 +59,22 @@ export function M7CellAnalysisModal({
     setLoading(true);
     setErr(null);
     Promise.all([
-      fetchM7CrossBandCheck({ band, expiry_bucket, delta_target, entry_hour_ist, rule_label }, ac.signal),
+      fetchM7CrossBandCheck({
+        band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
+        endpointPrefix, bandMode, d1Tiebreakers,
+      }, ac.signal),
       fetchM7SingleComboSimulation({
         expiry_bucket, delta_target, entry_hour_ist, rule_label,
         total_capital_usd: totalCapitalUsd ?? null, pct_deploy: pctDeploy,
+        endpointPrefix, bandMode, d1Tiebreakers,
       }, ac.signal),
     ])
       .then(([cb, sc]) => { if (active) { setCrossBand(cb); setSingleCombo(sc); } })
       .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
-  }, [band, expiry_bucket, delta_target, entry_hour_ist, rule_label, totalCapitalUsd, pctDeploy]);
+  }, [band, expiry_bucket, delta_target, entry_hour_ist, rule_label, totalCapitalUsd, pctDeploy,
+      endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
 
   const tabStyle = (active: boolean): React.CSSProperties => ({
     padding: '6px 14px', cursor: 'pointer', fontSize: 12,

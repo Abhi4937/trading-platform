@@ -921,6 +921,146 @@ export interface M7TradeDiagnosticResponse {
   hypotheses: M7TradeHypothesis[];
 }
 
+// ── M7 Friday-Band parallel dashboard (new) ──────────────────────────────────
+
+export interface M7FridayBandSummary extends M7Summary {
+  band_mode: 'A1' | 'B1' | 'D1';
+  n_fridays_per_band: Record<string, number>;
+  n_fridays_total: number;
+}
+
+function appendFbParams(params: URLSearchParams,
+                       bandMode?: 'A1' | 'B1' | 'D1',
+                       d1Tiebreakers?: string[]) {
+  if (bandMode) params.set('band_mode', bandMode);
+  if (d1Tiebreakers && d1Tiebreakers.length > 0) {
+    params.set('d1_tiebreakers', d1Tiebreakers.join(','));
+  }
+}
+
+export function fetchM7FridayBandSummary(
+  filters: M7Filters = {},
+  exit_rule?: M7ExitRule,
+  bandMode?: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
+  signal?: AbortSignal,
+): Promise<M7FridayBandSummary> {
+  const params = new URLSearchParams();
+  appendFbParams(params, bandMode, d1Tiebreakers);
+  for (const [k, v] of Object.entries(filters)) {
+    if (v === null || v === undefined || v === '') continue;
+    params.set(k, String(v));
+  }
+  if (exit_rule && Object.keys(exit_rule).length > 0) {
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(exit_rule)) {
+      if (v !== null && v !== undefined) cleaned[k] = v as number;
+    }
+    if (Object.keys(cleaned).length > 0) {
+      params.set('exit_rule', JSON.stringify(cleaned));
+    }
+  }
+  return jsonFetch<M7FridayBandSummary>(
+    `${BASE}/friday_band_summary?${params.toString()}`, signal);
+}
+
+export function fetchM7FridayBandSummaryTable(
+  filters: M7Filters & { metric?: string } = {},
+  exit_rule?: M7ExitRule,
+  bandMode?: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
+  signal?: AbortSignal,
+): Promise<{ rows: M7IvBandSummaryRow[]; metric: string; band_mode: string;
+            n_fridays_per_band: Record<string, number> }> {
+  const params = new URLSearchParams();
+  appendFbParams(params, bandMode, d1Tiebreakers);
+  for (const [k, v] of Object.entries(filters)) {
+    if (v === null || v === undefined || v === '') continue;
+    params.set(k, String(v));
+  }
+  if (exit_rule && Object.keys(exit_rule).length > 0) {
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(exit_rule)) {
+      if (v !== null && v !== undefined) cleaned[k] = v as number;
+    }
+    if (Object.keys(cleaned).length > 0) {
+      params.set('exit_rule', JSON.stringify(cleaned));
+    }
+  }
+  return jsonFetch(`${BASE}/friday_band_summary_table?${params.toString()}`, signal);
+}
+
+export function fetchM7FridayBandBestComboMarkers(
+  filters: M7Filters & { metric?: string } = {},
+  exit_rule?: M7ExitRule,
+  bandMode?: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
+  signal?: AbortSignal,
+): Promise<M7BestComboMarkersResponse> {
+  const params = new URLSearchParams();
+  appendFbParams(params, bandMode, d1Tiebreakers);
+  for (const [k, v] of Object.entries(filters)) {
+    if (v === null || v === undefined || v === '') continue;
+    params.set(k, String(v));
+  }
+  if (exit_rule && Object.keys(exit_rule).length > 0) {
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(exit_rule)) {
+      if (v !== null && v !== undefined) cleaned[k] = v as number;
+    }
+    if (Object.keys(cleaned).length > 0) {
+      params.set('exit_rule', JSON.stringify(cleaned));
+    }
+  }
+  return jsonFetch<M7BestComboMarkersResponse>(
+    `${BASE}/friday_band_best_combo_markers?${params.toString()}`, signal);
+}
+
+export function fetchM7FridayBandLossesDistribution(
+  opts: M7Filters & {
+    dimensions?: string;
+    exit_rule?: M7ExitRule;
+    scope?: 'best_combo' | null;
+    metric?: string;
+    include_trades?: boolean;
+    trades_limit?: number;
+    trades_offset?: number;
+    trades_sort?: M7LossesTradesSort;
+    only_sl_hits?: boolean;
+  } = {},
+  bandMode?: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
+  signal?: AbortSignal,
+): Promise<M7LossesDistResponse> {
+  const { dimensions, exit_rule, scope, metric,
+          include_trades, trades_limit, trades_offset, trades_sort, only_sl_hits,
+          ...filters } = opts;
+  const params = new URLSearchParams();
+  appendFbParams(params, bandMode, d1Tiebreakers);
+  for (const [k, v] of Object.entries(filters)) {
+    if (v == null || v === '') continue;
+    params.append(k, String(v));
+  }
+  if (include_trades) params.append('include_trades', 'true');
+  if (trades_limit != null)  params.append('trades_limit', String(trades_limit));
+  if (trades_offset != null) params.append('trades_offset', String(trades_offset));
+  if (trades_sort)           params.append('trades_sort', trades_sort);
+  if (only_sl_hits)          params.append('only_sl_hits', 'true');
+  if (dimensions) params.append('dimensions', dimensions);
+  if (scope) params.append('scope', scope);
+  if (metric) params.append('metric', metric);
+  if (exit_rule && Object.keys(exit_rule).length > 0) {
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(exit_rule)) {
+      if (v != null) cleaned[k] = v as number;
+    }
+    if (Object.keys(cleaned).length > 0)
+      params.append('exit_rule', JSON.stringify(cleaned));
+  }
+  return jsonFetch<M7LossesDistResponse>(
+    `${BASE}/friday_band_losses_distribution?${params.toString()}`, signal);
+}
+
 export function fetchM7TradeDiagnostic(
   trade_id: string,
   exit_rule?: M7ExitRule,

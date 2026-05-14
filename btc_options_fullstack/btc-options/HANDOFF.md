@@ -2,10 +2,46 @@
 
 ## Last Session
 **Who:** Claude
-**Date:** 2026-05-13 (Session 24 — M-Month Phase A + B + B+ shipped, strike-matching, 96-rule menu, Greeks)
+**Date:** 2026-05-14 (Session 25 — M7 Friday-Band parallel dashboard shipped)
 **Branch:** `mainbranch-gemini_claude`
 
-### Session 24 highlights — M-Month Phase A + B + B+ landed (committed `864cd32`)
+### Session 25 highlights — M7 Friday-Band dashboard (uncommitted)
+Plan: `/home/abhis/.claude/plans/can-u-check-the-lovely-rain.md`
+
+**What landed (NEW parallel dashboard "M7 Friday-Band"):**
+
+1. **Backend — 4 new endpoints** in `backend/app/api/m7_friday_band_results.py`:
+   - `GET /m7/friday_band_summary` — headline universe metrics + per-band Friday counts
+   - `GET /m7/friday_band_summary_table` — best (hour, expiry, Δ) per Friday-band
+   - `GET /m7/friday_band_best_combo_markers` — per-trade path markers grouped by Friday-band
+   - `GET /m7/friday_band_losses_distribution` — losses anatomy; `scope=full_coverage` returns 400 (dropped on this dashboard)
+   - All accept `band_mode` (A1/B1/D1), `d1_tiebreakers`, full `M7Filters` (incl. skew/leg_winner), `exit_rule`, `friday_band` filter
+   - Registered in `backend/app/main.py:160`
+   - **Per-trade archive pre-warmed at startup** (~3.25M rows) to eliminate 30-45s cold-start on first B1/D1 click
+
+2. **Frontend — new page `M7FridayBandDashboard.tsx`** mirrors all M7 Sweep sections except Full Coverage + Missed Fridays (banner explains: "every Friday is assigned to exactly one band by construction"). Promoted `M7FridayBandHeaderControls.tsx` (mode + D1 tiebreakers + pick + ranking) as page-level state shared across all sections. localStorage prefix `m7:fbdashboard:*` (isolated from existing).
+
+3. **Component parameterization** — `M7IvBandSummaryTable`, `M7BestComboPathMarkers`, `M7LossesExplorer` now accept `useFridayBand`+`bandMode`+`d1Tiebreakers`. `M7FridayBandBestComboTable` accepts optional `controlled` prop so the parent page drives shared state.
+
+4. **App.tsx** — new `M7_FRIDAY_BAND` mode + nav button between M7 Sweep and M-Month.
+
+5. **Code review agent** found 2 P0 + 5 P1; all P0 + 4 P1 applied. Deferred P1-1: D1-tiebreaker UI logic duplicated between header-controls + best-combo-table (~80 lines, refactor pending).
+
+6. **E2E agent** — A1/B1 fully clean; D1 cold-click can hit Vite-proxy 500s on burst (backend always 200). Pre-warm mostly fixes it; multi-tiebreaker D1 still slow on first hit (~20s in-process build). Default `['best_avg_net_pnl']` hits the pre-built disk grid → fast.
+
+7. **Side-by-side comparison** at `docs/m7_friday_band_vs_per_trade_comparison.md`. Universe conserved (34,166 trades on both); Friday cohort sums to 121 under A1; picks agree on 4 bands, differ on 5. Coverage % = 100% under Friday-band (every Friday in band traded).
+
+8. **M7 Sweep regression check** — page unchanged, 10 bands rendered identically.
+
+**Files changed:**
+- Backend: `backend/app/api/m7_friday_band_results.py` (new ~712 lines), `backend/app/main.py` (router + prewarm)
+- Frontend new: `frontend/src/pages/M7FridayBandDashboard.tsx`, `frontend/src/components/m7/M7FridayBandHeaderControls.tsx`
+- Frontend modified: `App.tsx`, `services/m7_api.ts` (4 fetch wrappers), `components/m7/M7IvBandSummaryTable.tsx`, `M7BestComboPathMarkers.tsx`, `M7LossesExplorer.tsx`, `M7FridayBandBestComboTable.tsx`
+- Docs: `docs/m7_friday_band_vs_per_trade_comparison.md` (new)
+
+---
+
+## Session 24 — M-Month Phase A + B + B+ landed (committed `864cd32`)
 Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`
 Builds on Session 22's stage-1 self-contained dashboard.
 
