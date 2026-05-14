@@ -746,48 +746,56 @@ export function M7IvBandBestComboTable() {
             title="When ON, the picker collapses the entry_hour_ist dimension so every Friday whose IV landed in a band — across ALL entry hours — is tested for that band's combo. n_trades reflects every hour the band touched. When OFF (default), one cell per (band, hour) and only the picked hour's Fridays are counted.">
             {pickMode === 'aggregate_hours' ? '∑ All hours' : '⏱ Per hour'}
           </button>
-          {/* Dimension whitelists — restrict the picker's search space. */}
-          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Expiry</span>
+          {/* Dimension whitelists — restrict the picker's search space.
+              Empty = "All" (no filter on that dimension). Active filters
+              get a coloured badge + ✕ to clear them. */}
+          <span style={{ fontSize: 11, color: expiryFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: expiryFilter.length ? 700 : 400 }}>
+            Expiry {expiryFilter.length ? `(${expiryFilter.length})` : '(All)'}
+          </span>
           <select
             multiple
             value={expiryFilter}
             onChange={e => setExpiryFilter(Array.from(e.target.selectedOptions, o => o.value))}
-            style={{ ...inputStyle, width: 130, height: 22 }}
-            title="Ctrl/Cmd-click to multi-select expiry buckets. Empty = all expiries. Picker only considers cells whose expiry is in the whitelist.">
+            style={{ ...inputStyle, width: 130, height: 22, opacity: expiryFilter.length ? 1 : 0.55 }}
+            title="Optional — Ctrl/Cmd-click to whitelist expiry buckets. Empty selection (default) = all expiries are considered by the picker. Select 1+ to restrict the search space.">
             {['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)', 'biweekly (14d)', 'monthly (30d)', 'quarterly'].map(e => (
               <option key={e} value={e}>{e}</option>
             ))}
           </select>
           {expiryFilter.length > 0 && (
-            <button onClick={() => setExpiryFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer' }} title="Clear expiry filter">×</button>
+            <button onClick={() => setExpiryFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear expiry filter (revert to All)">×</button>
           )}
-          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Δ</span>
+          <span style={{ fontSize: 11, color: deltaFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: deltaFilter.length ? 700 : 400 }}>
+            Δ {deltaFilter.length ? `(${deltaFilter.length})` : '(All)'}
+          </span>
           <select
             multiple
             value={deltaFilter.map(String)}
             onChange={e => setDeltaFilter(Array.from(e.target.selectedOptions, o => parseFloat(o.value)))}
-            style={{ ...inputStyle, width: 70, height: 22 }}
-            title="Ctrl/Cmd-click to multi-select delta targets. Empty = all deltas. Picker only considers cells whose Δ is in the whitelist.">
+            style={{ ...inputStyle, width: 70, height: 22, opacity: deltaFilter.length ? 1 : 0.55 }}
+            title="Optional — Ctrl/Cmd-click to whitelist delta targets. Empty selection (default) = all 8 deltas are considered. Select 1+ to restrict.">
             {[0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50].map(d => (
               <option key={d} value={d}>{d.toFixed(2)}</option>
             ))}
           </select>
           {deltaFilter.length > 0 && (
-            <button onClick={() => setDeltaFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer' }} title="Clear delta filter">×</button>
+            <button onClick={() => setDeltaFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear delta filter (revert to All)">×</button>
           )}
-          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Hour</span>
+          <span style={{ fontSize: 11, color: hourFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: hourFilter.length ? 700 : 400 }}>
+            Hour {hourFilter.length ? `(${hourFilter.length})` : '(All)'}
+          </span>
           <select
             multiple
             value={hourFilter.map(String)}
             onChange={e => setHourFilter(Array.from(e.target.selectedOptions, o => parseInt(o.value, 10)))}
-            style={{ ...inputStyle, width: 60, height: 22 }}
-            title="Ctrl/Cmd-click to multi-select entry hours (IST). Empty = all hours. Picker only considers cells at the whitelisted entry hour(s).">
+            style={{ ...inputStyle, width: 60, height: 22, opacity: hourFilter.length ? 1 : 0.55 }}
+            title="Optional — Ctrl/Cmd-click to whitelist entry hours (IST). Empty selection (default) = all hours are considered. Select 1+ to restrict.">
             {[0, 1, 2, 3, 21, 22, 23].map(h => (
               <option key={h} value={h}>{String(h).padStart(2, '0')}</option>
             ))}
           </select>
           {hourFilter.length > 0 && (
-            <button onClick={() => setHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer' }} title="Clear hour filter">×</button>
+            <button onClick={() => setHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear hour filter (revert to All)">×</button>
           )}
           {/* Conservative preset */}
           <button
