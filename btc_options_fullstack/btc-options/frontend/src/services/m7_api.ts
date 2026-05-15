@@ -32,13 +32,70 @@ function buildQuery(filters: Record<string, unknown>,
   return qs ? `?${qs}` : '';
 }
 
+// Friday-band endpoints crash uvicorn under 5 concurrent calls. Throttle
+// them to 2 concurrent so the dashboard's burst doesn't tip the backend
+// over. Each friday_band endpoint is ~2-15s; serial 2-at-a-time costs
+// ~6-15s total which is acceptable while a proper backend fix is pending.
+const _FB_THROTTLE_MAX = 2;
+let _fbInflight = 0;
+const _fbWaiters: Array<() => void> = [];
+
+function _fbAcquire(): Promise<void> {
+  return new Promise(resolve => {
+    if (_fbInflight < _FB_THROTTLE_MAX) {
+      _fbInflight++; resolve();
+    } else {
+      _fbWaiters.push(() => { _fbInflight++; resolve(); });
+    }
+  });
+}
+
+function _fbRelease(): void {
+  _fbInflight--;
+  const next = _fbWaiters.shift();
+  if (next) next();
+}
+
 async function jsonFetch<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const r = await fetch(url, signal ? { signal } : undefined);
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    throw new Error(`${r.status} ${r.statusText}: ${text}`);
+  // Throttle friday_band endpoints (5-concurrent crashes the backend).
+  const needsThrottle = url.includes('/friday_band_');
+  if (needsThrottle) await _fbAcquire();
+  try {
+    return await _jsonFetchInner<T>(url, signal);
+  } finally {
+    if (needsThrottle) _fbRelease();
   }
-  return (await r.json()) as T;
+}
+
+async function _jsonFetchInner<T>(url: string, signal?: AbortSignal): Promise<T> {
+  // Auto-retry on transient 500/502/503/504 (typically Vite proxy giving up
+  // while backend is mid-build on a cold cache). Up to 3 attempts with
+  // 1.5s / 3s backoff so the dashboard's 5-concurrent burst on a restart
+  // doesn't permanently 500. Don't retry 4xx — those are real errors.
+  const maxAttempts = 4;
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const r = await fetch(url, signal ? { signal } : undefined);
+      if (r.ok) return (await r.json()) as T;
+      // Retry on 5xx; bail on 4xx (caller's problem, not transient).
+      if (r.status >= 500 && r.status < 600 && attempt < maxAttempts - 1) {
+        await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
+        continue;
+      }
+      const text = await r.text().catch(() => '');
+      throw new Error(`${r.status} ${r.statusText}: ${text}`);
+    } catch (e: any) {
+      if (e?.name === 'AbortError') throw e;
+      lastErr = e;
+      if (attempt < maxAttempts - 1) {
+        await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr ?? new Error('jsonFetch: exhausted retries');
 }
 
 export function fetchM7Summary(filters: M7Filters = {}, exit_rule?: M7ExitRule, signal?: AbortSignal): Promise<M7Summary> {
@@ -187,6 +244,14 @@ export interface M7IvBandBestComboRow {
   lots?: number | null;
   // v6 — composite + overall-MTM (grid-load enrichments, available even on v4 fallback)
   composite_score?: number | null;
+  // v2 composite — 5-component normalised score, hard-filtered cells flagged.
+  // See m7_ranking_config.py for weights and gate thresholds.
+  composite_score_v2?: number | null;
+  composite_score_v2_components_used?: number | null;
+  rank_in_band?: number | null;
+  rank_status?: 'ranked' | 'low_n' | 'filtered' | null;
+  filter_reason?: string | null;
+  score_components?: string | null;  // JSON-string blob
   avg_min_mtm?: number | null;
   avg_max_mtm?: number | null;
   min_mtm?: number | null;
@@ -201,6 +266,11 @@ export interface M7IvBandBestComboRow {
   avg_pct_drop_peak_to_trough?: number | null;
   avg_pct_recovery_trough_to_peak?: number | null;
   avg_alt_net_if_exit_at_peak1?: number | null;
+  // v7 — 5-landmark zigzag intermediate landmarks (NaN on v6 fallback)
+  avg_peak_2_mid?: number | null;
+  avg_trough_2_mid?: number | null;
+  avg_rel_time_peak_2_mid?: number | null;
+  avg_rel_time_trough_2_mid?: number | null;
   // v6 — risk-adjusted (grid-load from stdev cols, NaN on v4)
   stdev_net_pnl?: number | null;
   stdev_losses_only?: number | null;
@@ -250,6 +320,11 @@ export interface M7IvBandBestComboResponse {
 
 export type M7RuleFamily = 'all' | 'max_profit' | 'margin_target';
 
+export interface DDCap {
+  metric: string;
+  threshold: number;
+}
+
 export interface FetchBestComboArgs {
   ranking?: M7Ranking;
   secondary?: M7Ranking | null;
@@ -257,20 +332,30 @@ export interface FetchBestComboArgs {
   rule_family?: M7RuleFamily;
   total_capital_usd?: number | null;
   pct_deploy?: number;
+  // Legacy single-DD-cap (kept for backward compat; combined with dd_caps via min()).
   dd_metric?: string | null;
   dd_threshold?: number | null;
+  // Multi-DD-cap: each (metric, threshold) caps lots independently; final
+  // per-band lots = min(margin-cap, …all DD caps…).
+  dd_caps?: DDCap[];
   // Phase 0/1 — picker filters
   min_hit_pct?: number | null;            // default 50; 0 disables
   max_loss_cap_pct?: number | null;       // drop cells where scaled |max_loss| > cap%
   max_drop_peak_to_trough_pct?: number | null;  // drop cells where avg drop > cap (v6 only)
   min_n_trades?: number | null;           // default 5; drops cells with too-small sample
   min_win_rate?: number | null;           // 0–100; drops cells whose win_rate is below this
+  max_losing_streak?: number | null;      // drop cells whose max_consec_losses exceeds this
   pick_mode?: 'by_hour' | 'aggregate_hours';  // 'aggregate_hours' collapses entry_hour dimension
   // Dimension whitelists — constrain the picker's search space.
   // Empty array / undefined = no filter on that dimension.
   expiry_buckets?: string[];              // e.g. ['current (Sat)', 'next (Sun)']
   delta_targets?: number[];               // e.g. [0.1, 0.2, 0.5]
   entry_hours?: number[];                 // e.g. [21, 22, 23]
+  // Multi-dim bucketing tab (Phase B). Default 'band' = legacy single grid.
+  tab?: 'band' | 'band_ivrv' | 'band_ivrv_slope_cn' | 'band_ivrv_slope_nn'
+      | 'band_ivrv_slope_cnn' | 'band_ivrv_ts_legacy';
+  ivrv_bucket?: 'rich' | 'fair' | 'cheap' | null;
+  slope_bucket?: 'backwardation' | 'neutral' | 'contango' | null;
 }
 
 export function fetchM7IvBandBestCombo(
@@ -307,6 +392,14 @@ export function fetchM7IvBandBestCombo(
       params.set('dd_metric', opts.dd_metric);
       params.set('dd_threshold', String(opts.dd_threshold));
     }
+    // Multi-DD-cap → CSVs in matching order.
+    if (opts.dd_caps && opts.dd_caps.length > 0) {
+      const valid = opts.dd_caps.filter(c => c.metric && c.threshold > 0);
+      if (valid.length > 0) {
+        params.set('dd_metrics', valid.map(c => c.metric).join(','));
+        params.set('dd_thresholds', valid.map(c => String(c.threshold)).join(','));
+      }
+    }
   }
   // Picker filters
   if (opts.min_hit_pct != null) {
@@ -324,6 +417,9 @@ export function fetchM7IvBandBestCombo(
   if (opts.min_win_rate != null) {
     params.set('min_win_rate', String(opts.min_win_rate));
   }
+  if (opts.max_losing_streak != null) {
+    params.set('max_losing_streak', String(opts.max_losing_streak));
+  }
   if (opts.pick_mode && opts.pick_mode !== 'by_hour') {
     params.set('pick_mode', opts.pick_mode);
   }
@@ -336,8 +432,89 @@ export function fetchM7IvBandBestCombo(
   if (opts.entry_hours && opts.entry_hours.length > 0) {
     params.set('entry_hours', opts.entry_hours.map(h => String(h)).join(','));
   }
+  if (opts.tab && opts.tab !== 'band') {
+    params.set('tab', opts.tab);
+  }
+  if (opts.ivrv_bucket) {
+    params.set('ivrv_bucket', opts.ivrv_bucket);
+  }
+  if (opts.slope_bucket) {
+    params.set('slope_bucket', opts.slope_bucket);
+  }
   return jsonFetch<M7IvBandBestComboResponse>(
     `${BASE}${endpointPrefix}?${params.toString()}`, signal);
+}
+
+// ── Best Combo + Full Coverage (deduped Friday attribution) ───────────────────
+
+export type M7CoverageMode = 'force_fit' | 'touched_band';
+
+export interface M7BestComboCoverageRow extends M7IvBandBestComboRow {
+  // Per-cell Friday assignment counts (NEW)
+  n_assigned?: number | null;
+  n_rule?: number | null;
+  n_force_fit?: number | null;
+  n_touched_band?: number | null;
+  n_closest_fallback?: number | null;
+}
+
+export interface M7BestComboCoverageSummary {
+  total_fridays: number;
+  n_assigned: number;
+  n_uncovered: number;
+  n_rule: number;
+  n_force_fit: number;
+  n_touched_band: number;
+  n_closest_fallback: number;
+}
+
+export interface M7BestComboCoverageResponse extends Omit<M7IvBandBestComboResponse, 'rows'> {
+  coverage_mode: M7CoverageMode;
+  rows: M7BestComboCoverageRow[];
+  coverage_summary: M7BestComboCoverageSummary;
+}
+
+export function fetchM7IvBandBestComboCoverage(
+  args: FetchBestComboArgs & { coverage_mode?: M7CoverageMode } = {},
+  signal?: AbortSignal,
+): Promise<M7BestComboCoverageResponse> {
+  const params = new URLSearchParams();
+  params.set('ranking', args.ranking ?? 'avg_net_pnl');
+  if (args.secondary) {
+    params.set('secondary', args.secondary);
+    if (args.tolerance_pct != null) params.set('tolerance_pct', String(args.tolerance_pct));
+  }
+  if (args.rule_family && args.rule_family !== 'all') params.set('rule_family', args.rule_family);
+  if (args.total_capital_usd != null && args.total_capital_usd > 0) {
+    params.set('total_capital_usd', String(args.total_capital_usd));
+    if (args.pct_deploy != null) params.set('pct_deploy', String(args.pct_deploy));
+    if (args.dd_metric && args.dd_threshold != null) {
+      params.set('dd_metric', args.dd_metric);
+      params.set('dd_threshold', String(args.dd_threshold));
+    }
+    if (args.dd_caps && args.dd_caps.length > 0) {
+      const valid = args.dd_caps.filter(c => c.metric && c.threshold > 0);
+      if (valid.length > 0) {
+        params.set('dd_metrics', valid.map(c => c.metric).join(','));
+        params.set('dd_thresholds', valid.map(c => String(c.threshold)).join(','));
+      }
+    }
+  }
+  if (args.min_hit_pct != null) params.set('min_hit_pct', String(args.min_hit_pct));
+  if (args.max_loss_cap_pct != null) params.set('max_loss_cap_pct', String(args.max_loss_cap_pct));
+  if (args.max_drop_peak_to_trough_pct != null) params.set('max_drop_peak_to_trough_pct', String(args.max_drop_peak_to_trough_pct));
+  if (args.min_n_trades != null) params.set('min_n_trades', String(args.min_n_trades));
+  if (args.min_win_rate != null) params.set('min_win_rate', String(args.min_win_rate));
+  if (args.max_losing_streak != null) params.set('max_losing_streak', String(args.max_losing_streak));
+  if (args.pick_mode && args.pick_mode !== 'by_hour') params.set('pick_mode', args.pick_mode);
+  if (args.expiry_buckets && args.expiry_buckets.length > 0) params.set('expiry_buckets', args.expiry_buckets.join(','));
+  if (args.delta_targets && args.delta_targets.length > 0) params.set('delta_targets', args.delta_targets.map(d => String(d)).join(','));
+  if (args.entry_hours && args.entry_hours.length > 0) params.set('entry_hours', args.entry_hours.map(h => String(h)).join(','));
+  params.set('coverage_mode', args.coverage_mode ?? 'force_fit');
+  return jsonFetch<M7BestComboCoverageResponse>(
+    `${BASE}/iv_band_best_combo/coverage?${params.toString()}`,
+    signal,
+  );
 }
 
 // ── New diagnostic endpoints (Phase 1) ────────────────────────────────────────
@@ -381,6 +558,7 @@ export function fetchM7RuleComparison(args: {
   pct_deploy?: number;
   dd_metric?: string | null;
   dd_threshold?: number | null;
+  dd_caps?: DDCap[];
   min_hit_pct?: number | null;
   max_loss_cap_pct?: number | null;
   max_drop_peak_to_trough_pct?: number | null;
@@ -403,6 +581,13 @@ export function fetchM7RuleComparison(args: {
     if (args.dd_metric && args.dd_threshold != null) {
       p.set('dd_metric', args.dd_metric);
       p.set('dd_threshold', String(args.dd_threshold));
+    }
+    if (args.dd_caps && args.dd_caps.length > 0) {
+      const valid = args.dd_caps.filter(c => c.metric && c.threshold > 0);
+      if (valid.length > 0) {
+        p.set('dd_metrics', valid.map(c => c.metric).join(','));
+        p.set('dd_thresholds', valid.map(c => String(c.threshold)).join(','));
+      }
     }
   }
   if (args.min_hit_pct != null) p.set('min_hit_pct', String(args.min_hit_pct));
@@ -529,6 +714,19 @@ export interface M7MissedFridayForceFitPick {
   rule_label: string;
   fits: boolean;
   actual_iv_band_on_this_friday: string | null;
+  // Backend rescue extension: realised net P&L if this pick had absorbed the
+  // missed Friday (i.e. its rule applied at its hour/expiry/Δ on that Friday).
+  rule_net_pnl?: number | null;
+  rule_is_win?: boolean | null;
+  rule_exit_reason?: string | null;
+}
+
+export interface M7MissedFridayRescue {
+  rescued_band: string;
+  rescued_rule_label: string;
+  rescued_net_pnl: number;
+  rescued_is_win: boolean;
+  rescued_exit_reason: string;
 }
 
 export interface M7MissedFridayForceFitRow {
@@ -536,6 +734,7 @@ export interface M7MissedFridayForceFitRow {
   n_total_trades: number;
   bands_touched: string[];
   pick_availability: M7MissedFridayForceFitPick[];
+  rescue?: M7MissedFridayRescue | null;
 }
 
 export interface M7MissedFridayPickInfo {
@@ -552,6 +751,7 @@ export interface M7MissedFridaysForceFitResponse {
   n_missed?: number;
   n_total_fridays?: number;
   n_matched?: number;
+  n_rescuable?: number;
   picks?: M7MissedFridayPickInfo[];
 }
 
@@ -577,6 +777,13 @@ export function fetchM7BestComboMissedFridays(
     if (args.dd_metric && args.dd_threshold != null) {
       p.set('dd_metric', args.dd_metric);
       p.set('dd_threshold', String(args.dd_threshold));
+    }
+    if (args.dd_caps && args.dd_caps.length > 0) {
+      const valid = args.dd_caps.filter(c => c.metric && c.threshold > 0);
+      if (valid.length > 0) {
+        p.set('dd_metrics', valid.map(c => c.metric).join(','));
+        p.set('dd_thresholds', valid.map(c => String(c.threshold)).join(','));
+      }
     }
   }
   if (args.min_hit_pct != null) p.set('min_hit_pct', String(args.min_hit_pct));
@@ -794,6 +1001,24 @@ export interface M7LossesDistResponse {
   losers_sample_limit?: number;
 }
 
+// One per-band cell selection — what M7IvBandBestComboTable picks for each
+// IV band, after all dashboard-level filters. The Losses Explorer sends a
+// list of these to /losses_distribution so it analyses ONLY the dashboard's
+// currently-displayed best-combo trade set.
+export interface M7LossesCell {
+  entry_atm_iv_band: string;
+  entry_hour_ist?: number | null;
+  expiry_bucket: string;
+  delta_target: number;
+  rule: {
+    premium_sl_pct?: number;
+    max_profit_pct?: number;
+    margin_target_pct?: number;
+    fixed_exit_hour_ist?: number;
+  };
+  rule_label?: string;
+}
+
 export function fetchM7LossesDistribution(
   opts: M7Filters & {
     dimensions?: string;
@@ -806,12 +1031,13 @@ export function fetchM7LossesDistribution(
     trades_offset?: number;
     trades_sort?: M7LossesTradesSort;
     only_sl_hits?: boolean;
+    cells?: M7LossesCell[];
   } = {},
   signal?: AbortSignal,
 ): Promise<M7LossesDistResponse> {
   const { dimensions, exit_rule, scope, ranking, metric,
           include_trades, trades_limit, trades_offset, trades_sort, only_sl_hits,
-          ...filters } = opts;
+          cells, ...filters } = opts;
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(filters)) {
     if (v == null || v === '') continue;
@@ -823,6 +1049,9 @@ export function fetchM7LossesDistribution(
   if (trades_sort)           params.append('trades_sort', trades_sort);
   if (only_sl_hits)          params.append('only_sl_hits', 'true');
   if (dimensions) params.append('dimensions', dimensions);
+  if (cells && cells.length > 0) {
+    params.append('cells', JSON.stringify(cells));
+  }
   if (scope) params.append('scope', scope);
   if (ranking) params.append('ranking', ranking);
   if (metric) params.append('metric', metric);
@@ -920,6 +1149,37 @@ export interface M7TradeDiagnosticResponse {
   context_premium: Record<string, number | null>;
   hypotheses: M7TradeHypothesis[];
 }
+
+// ── M7 Friday-Band build progress (D1 multi-tiebreaker chains) ────────────
+
+export interface M7FridayBandBuildProgress {
+  phase: 'idle' | 'loading_disk_cache' | 'loading_per_trade_archive'
+       | 'building_band_map' | 'aggregating_grid' | 'saving_to_disk'
+       | 'done' | 'error';
+  progress: number;             // 0.0 – 1.0
+  message: string | null;
+  ts: number | null;
+  ready: boolean;
+  cache_key?: string;
+  source?: string;              // a1_disk_grid | named_disk_grid | memory_cache
+  disk_cache_path?: string | null;
+  disk_cache_exists?: boolean;
+}
+
+export function fetchM7FridayBandBuildProgress(
+  bandMode: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
+  signal?: AbortSignal,
+): Promise<M7FridayBandBuildProgress> {
+  const params = new URLSearchParams();
+  params.set('band_mode', bandMode);
+  if (d1Tiebreakers && d1Tiebreakers.length > 0) {
+    params.set('d1_tiebreakers', d1Tiebreakers.join(','));
+  }
+  return jsonFetch<M7FridayBandBuildProgress>(
+    `${BASE}/friday_band_best_combo/build_progress?${params.toString()}`, signal);
+}
+
 
 // ── M7 Friday-Band parallel dashboard (new) ──────────────────────────────────
 
