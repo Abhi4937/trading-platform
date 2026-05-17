@@ -3,6 +3,7 @@
 import type {
   M7AggregateResponse, M7BestComboMarkersResponse, M7BestComboRow,
   M7CostBreakdown, M7ExitRule, M7Filters,
+  M7FridayBandMtmOverlayResponse,
   M7IvBandSummaryRow, M7LegAttributionResponse, M7LegSkewHeatmapResponse,
   M7Meta, M7MissedFridaysResponse, M7PathResponse,
   M7Summary, M7TradesResponse,
@@ -351,6 +352,10 @@ export interface FetchBestComboArgs {
   expiry_buckets?: string[];              // e.g. ['current (Sat)', 'next (Sun)']
   delta_targets?: number[];               // e.g. [0.1, 0.2, 0.5]
   entry_hours?: number[];                 // e.g. [21, 22, 23]
+  iv_bands?: string[];                    // e.g. ['30-40', '40-50']
+  // Exit-hour suffixes from rule_label (sl{X}_exit_hr_{h}). Values match the
+  // backend's _hour_label output: '8'..'17' and '1729' for 17:29.
+  exit_hours?: string[];                  // e.g. ['14', '15', '1729']
   // Multi-dim bucketing tab (Phase B). Default 'band' = legacy single grid.
   tab?: 'band' | 'band_ivrv' | 'band_ivrv_slope_cn' | 'band_ivrv_slope_nn'
       | 'band_ivrv_slope_cnn' | 'band_ivrv_ts_legacy';
@@ -431,6 +436,12 @@ export function fetchM7IvBandBestCombo(
   }
   if (opts.entry_hours && opts.entry_hours.length > 0) {
     params.set('entry_hours', opts.entry_hours.map(h => String(h)).join(','));
+  }
+  if (opts.iv_bands && opts.iv_bands.length > 0) {
+    params.set('iv_bands', opts.iv_bands.join(','));
+  }
+  if (opts.exit_hours && opts.exit_hours.length > 0) {
+    params.set('exit_hours', opts.exit_hours.join(','));
   }
   if (opts.tab && opts.tab !== 'band') {
     params.set('tab', opts.tab);
@@ -1274,6 +1285,43 @@ export function fetchM7FridayBandBestComboMarkers(
   }
   return jsonFetch<M7BestComboMarkersResponse>(
     `${BASE}/friday_band_best_combo_markers?${params.toString()}`, signal);
+}
+
+export function fetchM7FridayBandMtmOverlay(
+  filters: M7Filters & {
+    metric?: string;
+    expiry_buckets?: string[];
+    max_minutes?: number;
+    min_n_trades_in_avg?: number;
+  } = {},
+  exit_rule?: M7ExitRule,
+  bandMode?: 'A1' | 'B1' | 'D1',
+  d1Tiebreakers?: string[],
+  signal?: AbortSignal,
+): Promise<M7FridayBandMtmOverlayResponse> {
+  const { max_minutes, min_n_trades_in_avg, expiry_buckets, ...rest } = filters;
+  const params = new URLSearchParams();
+  appendFbParams(params, bandMode, d1Tiebreakers);
+  for (const [k, v] of Object.entries(rest)) {
+    if (v === null || v === undefined || v === '') continue;
+    params.set(k, String(v));
+  }
+  if (expiry_buckets && expiry_buckets.length > 0) {
+    params.set('expiry_buckets', expiry_buckets.join(','));
+  }
+  if (max_minutes != null) params.set('max_minutes', String(max_minutes));
+  if (min_n_trades_in_avg != null) params.set('min_n_trades_in_avg', String(min_n_trades_in_avg));
+  if (exit_rule && Object.keys(exit_rule).length > 0) {
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(exit_rule)) {
+      if (v !== null && v !== undefined) cleaned[k] = v as number;
+    }
+    if (Object.keys(cleaned).length > 0) {
+      params.set('exit_rule', JSON.stringify(cleaned));
+    }
+  }
+  return jsonFetch<M7FridayBandMtmOverlayResponse>(
+    `${BASE}/friday_band_mtm_overlay?${params.toString()}`, signal);
 }
 
 export function fetchM7FridayBandLossesDistribution(

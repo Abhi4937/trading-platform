@@ -1,9 +1,483 @@
 # Handoff Log
 
 ## Last Session
-**Who:** Claude
-**Date:** 2026-05-14 (Session 25 — M7 Friday-Band parallel dashboard shipped)
+**Who:** Claude (Opus 4.7 orchestrator + Sonnet 4.6 sub-agents for coding/tests)
+**Date:** 2026-05-17 (Session 29 — M7 Friday-Band MTM Overlay panel)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 29 highlights — uncommitted
+
+1. **New M7 Friday-Band MTM Overlay panel** — answers "how does the
+   average trade in this IV band evolve, and how do the extremes compare?"
+   For each IV band's *winning combo* (matches the Best Combo Markers
+   universe), renders ONE chart with 5 overlaid traces on a
+   minutes-since-entry x-axis:
+   - **Avg MTM** (thick green) — carry-forward mean across all trades
+   - **Best** (solid green) — trade with max `net_pnl_estimate_usd`
+   - **Worst** (solid red) — trade with min `net_pnl_estimate_usd`
+   - **Best Max-MTM** (dashed gold) — trade with highest intra-trade peak
+   - **Worst Min-MTM** (dashed pink) — trade with deepest intra-trade trough
+   Plus a faint `n_trades_alive` line on a secondary scale (disclosed as
+   trades exit and carry-forward kicks in). Legend rows show Friday date +
+   net P&L; click to open the existing `M7TradePathChart` modal.
+
+2. **Backend endpoint** `GET /api/v1/m7/friday_band_mtm_overlay` in
+   `backend/app/api/m7_friday_band_results.py:1187` (+512 LoC total in
+   that file).
+   - Mirrors `/friday_band_best_combo_markers` filter pipeline and picks
+     the best `(entry_hour_ist, expiry_bucket, delta_target)` combo per
+     band BEFORE filtering trades — universe parity with markers endpoint.
+   - **Single combined DuckDB query** with both
+     `friday_date IN (combo-restricted dates)` AND `trade_id IN (combo
+     trade ids)` predicates for hive-partition pruning.
+   - Acquires `_EXIT_COMPUTE_LOCK` (threading.Lock from
+     `m7_results.py:59`) inside an `asyncio.to_thread` worker —
+     serialises path-parquet scans (prior crashes with parallel scans).
+   - **Carry-forward avg semantic**: `pivot_table(minute_offset × trade_id)`
+     + `ffill()`, `mean_pnl = row_sum / n_trades` (constant denominator).
+     `n_trades_alive[m]` = count of trades whose `last_minute_offset >= m`.
+   - Columnar wire format: `{minutes:[], pnl:[], n_trades_alive:[]}` —
+     ~55–60% smaller payload than list-of-dicts.
+   - **`trade_id` serialised as string** in JSON (BIGINT precision-safe
+     for JS Number).
+   - Dict + lock cache `_OVERLAY_CACHE` keyed on full param tuple.
+   - `max_minutes` cap (default 720, max 1440). `min_n_trades_in_avg`
+     truncation (default 3) drops tail minutes where too few trades remain.
+   - Tiebreaker: `.sort_values([col,'trade_id'])` after `.dropna(col)` —
+     deterministic + NaN-safe.
+
+3. **Frontend component**
+   `frontend/src/components/m7/M7FridayBandMtmOverlayPanel.tsx` (new,
+   ~370 LoC) mounted between `<M7BestComboPathMarkers/>` and Leg
+   Attribution in `M7FridayBandDashboard.tsx:227`. Collapsed by default.
+   - lightweight-charts v5 with `time = minute*60` as `UTCTimestamp` +
+     `tickMarkFormatter: t => Math.round(t/60) + 'm'` (numeric minute
+     offsets aren't natively supported by lc-v5's Time type).
+   - `lineWidth: 2 | 3` (lc-v5 only accepts integer 1|2|3|4).
+   - Legend de-dups slots that resolve to the same `trade_id` (e.g.,
+     when the best trade is also the best Max-MTM).
+   - Disclaimer below chart: *"Curves are gross P&L; legend shows net
+     after slippage + brokerage."*
+   - Types + API client function added to `types/m7.ts` and
+     `services/m7_api.ts`.
+
+4. **Backend tests** — `backend/tests/test_m7_friday_band_mtm_overlay.py`
+   (new, 14 tests + 1 skipped benchmark):
+   - 4 synthetic-mock tests for `_build_avg_curve` semantics (carry-forward,
+     NaN handling, deterministic ties, columnar format) — all passing.
+   - 10 integration tests guarded by `@pytest.mark.slow` + a grid-fresh
+     gate; they SKIP when the Friday-band grid is stale.
+   - `conftest.py` got a `benchmark` marker registration.
+
+5. **Plan + reviews** — full design in
+   `/home/abhis/.claude/plans/i-want-average-1-memoized-valley.md`.
+   Pre-implementation review by two fresh-context Opus agents caught 8
+   blockers / fix-before-merge items (gross-vs-net legend mismatch,
+   carry-forward semantic, BIGINT precision, lightweight-charts numeric
+   time, missing `_EXIT_COMPUTE_LOCK`, missing `friday_date` predicate,
+   columnar format, deterministic ties) — all incorporated into v2 plan
+   before coding started. Implementation done by Sonnet 4.6 sub-agents,
+   reviewed by this Opus session.
+
+### Open blockers / next steps for the user
+
+- **Friday-band grid is stale** (May 13 file vs May 15 trades parquet).
+  The entire Friday-Band dashboard returns 503 — affects every endpoint
+  including the new one. Frontend panel mounts cleanly, calls the new
+  endpoint, but gets 503 until grid is rebuilt.
+  - Rebuild via: `docker compose run -d --rm --name m7-grid-rebuild_$(date +%s) backend python -m app.scripts.build_m7_friday_band_grid` (per RULE #5).
+- After grid rebuild, run the 10 `@pytest.mark.slow` integration tests:
+  `docker exec docker-backend-1 pytest backend/tests/test_m7_friday_band_mtm_overlay.py -m slow -v`
+- After grid rebuild, run the visual verification via Playwright as
+  outlined in the plan §Verification. Screenshot reference saved:
+  `m7-fb-mtm-overlay-panel-mounted.png` (current state — panel mounted,
+  503 loading state).
+
+### Files changed (uncommitted)
+- `backend/app/api/m7_friday_band_results.py` — +512 LoC (new endpoint)
+- `backend/tests/test_m7_friday_band_mtm_overlay.py` — NEW (~28 KB)
+- `backend/tests/conftest.py` — +5 LoC (benchmark marker)
+- `frontend/src/components/m7/M7FridayBandMtmOverlayPanel.tsx` — NEW (~13 KB)
+- `frontend/src/pages/M7FridayBandDashboard.tsx` — +22 LoC (mount)
+- `frontend/src/services/m7_api.ts` — +48 LoC (API client)
+- `frontend/src/types/m7.ts` — +36 LoC (response types)
+
+---
+
+## Previous: Session 28 highlights — uncommitted
+
+1. **M7 Loss Explorer — cells-mode refactor** (Losses Explorer mirrors the
+   dashboard's Best Combo per IV band table 1:1):
+   - Backend `/api/v1/m7/losses_distribution` accepts a new `cells` JSON
+     query param `[{entry_atm_iv_band, entry_hour_ist, expiry_bucket,
+     delta_target, rule, rule_label}, ...]`. Takes priority over the
+     legacy `scope` / `ranking` parameters. Groups cells by unique
+     `rule_dict`, calls `_derive_exits` once per rule, filters per cell,
+     concats, dedups by `trade_id`.
+   - Frontend lifts `M7IvBandBestComboTable` selections to
+     `M7SweepDashboard` via `onSelectionsChange` callback. Debounced 250ms
+     to coalesce rapid filter edits. `M7LossesExplorer` accepts `cells`
+     prop; in cells-mode the scope/ranking UI is hidden and a blue
+     "⛓ Mirroring Best Combo per IV band" banner replaces the override
+     banner. Universe view dropped entirely per user request.
+
+2. **M7 Diagnostic modal — closed indicator gaps from `docs/m7_loss_indicators.md`**:
+   - Spot regime tab now renders a full **6×4 timeframe table** (24 cells):
+     5m / 15m / 30m / 1h / 4h / 1d × RSI(14), MACD hist, BB %b, ATR %.
+     Previously only 5 of the 24 were exposed.
+   - Overview tab adds "Premium calibration" section with all 9
+     `context_premium` fields (fair_credit_at_ivp, structural_credit_pct,
+     iv_regime_premium_pct, excess_over_fair_pct, pattern_winrate,
+     expectancy_per_credit_pct, bucket_overall_winrate,
+     n_trades_in_bucket, bucket_sl_hit_rate).
+   - Overview adds "Trade context" (dte_days, dte_hours_at_entry,
+     entry_time_label, quantity_lots) and expands P&L grid (max/min
+     gross, P&L % of credit/margin, peak/trough ts).
+   - Per-leg tab adds "Cost summary" grid (total_entry/exit_cost +
+     per-leg slip/brokerage for CE & PE).
+   - Backend `_project_trade_to_diagnostic` extended in
+     `backend/app/api/m7_results.py` to project all 24 spot-technicals,
+     all 4 premium-structure cols, identity/pnl/per_leg/costs additions.
+
+3. **Hardened best-combo grid cache validation**:
+   - `_grid_path_is_valid(path)` in `m7_best_combo.py` now ALSO checks
+     `len(set(grid["rule_label"])) == len(_rule_variants())`. Prevents a
+     stale 21-rule grid from loading when the variant count has grown to
+     96 (3 SL × 32 base rules). Hardcoded `21` fallback in `m7_results.py`
+     warming banner replaced with `len(bc._rule_variants())`.
+
+4. **Cells-mode warming pattern** (defensive against backend restarts +
+   slow cold cache):
+   - `m7_results.py` adds `_warmup_rule_async(rule_dict)` — idempotent
+     daemon thread runner with `_CELLS_WARMUP_TASKS` + lock.
+   - Cells-mode endpoint pre-checks `_EXIT_CACHE` per unique rule_dict.
+     If any are cold, fires async warmups and returns `warming=true`
+     instantly instead of blocking ~60s for 10 cells / 8 unique rules.
+   - Frontend `M7LossesExplorer` polls every 3s on `warming=true`
+     (warmingTick state). Warming banner shows `rules_done / rules_total`.
+
+5. **`/iv_band_best_combo/coverage` warming pattern** (same approach
+   applied to the coverage endpoint, replacing/augmenting the existing
+   response cache):
+   - `_kick_off_coverage_warmup(cache_key, **kw)` spawns one daemon
+     thread per cache key. `_compute_coverage_payload(...)` extracted as
+     the heavy worker.
+   - Endpoint returns `status='warming'` on cache miss, frontend polls
+     every 2s. Cold call no longer blocks ~16s; surviving backend
+     restarts. The other Claude session's `_COVERAGE_CACHE` is preserved
+     — warmup writes into it, the endpoint reads from it.
+
+6. **Test fixes & additions**:
+   - Updated `test_rule_variants_count_and_shape` (21 → 96 expectations
+     + SL-prefixed labels).
+   - Added `score` column to `_make_best_cells` fixture in
+     `test_m7_full_coverage.py` (required by
+     `_classify_fridays_to_cells` since rename).
+   - New tests: `test_cells_param_cold_cache_returns_warming`,
+     `test_endpoint_warming_returns_immediately`,
+     `test_endpoint_cache_hit_returns_cached_payload`,
+     `test_kick_off_coverage_warmup_idempotent`.
+   - Full m7 suite green: **117 passed**.
+
+### Files touched (uncommitted)
+
+Backend:
+- `backend/app/api/m7_results.py` — cells param, warmup state, indicator projections
+- `backend/app/api/m7_best_combo.py` — grid cache validator, coverage warming
+- `backend/tests/test_m7_losses_distribution_scope.py`
+- `backend/tests/test_m7_best_combo.py`
+- `backend/tests/test_m7_full_coverage.py`
+- `backend/tests/test_m7_best_combo_coverage.py`
+- `backend/tests/test_m7_trade_diagnostic.py`
+
+Frontend:
+- `frontend/src/services/m7_api.ts` — `M7LossesCell` type, cells param
+- `frontend/src/components/m7/M7IvBandBestComboTable.tsx` — `onSelectionsChange`
+- `frontend/src/components/m7/M7LossesExplorer.tsx` — cells mode + warming poll
+- `frontend/src/components/m7/M7TradeDiagnosticModal.tsx` — 24-cell spot grid, premium calibration, cost summary
+- `frontend/src/components/m7/M7BestComboCoverageTable.tsx` — warming poll + banner
+- `frontend/src/pages/M7SweepDashboard.tsx` — lifts bestCells state
+
+### Pending (waiting on user)
+
+- **Backend rebuild** to pick up the warming-pattern code. Per RULE #4,
+  5+ Claude sessions were active and one was running live diagnostics
+  against the backend; user asked me to wait and trigger the rebuild
+  themselves. Run `cd docker && docker compose up --build -d backend`
+  when safe.
+
+---
+
+## Session 27 (previous)
+**Date:** 2026-05-16 (Margin safety-buffer tune + M7 Sweep Exit-time filter)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 27 highlights — short, focused (uncommitted)
+
+1. **Margin `SAFETY_BUFFER_PCT` lowered 0.20 → 0.10** (both engines):
+   - `frontend/src/utils/marginEngine.ts:152`
+   - `scripts/margin_engine.py:124`
+   - User observed a 2-DTE strangle estimated at 858 USDT vs Delta's actual
+     ~650 USDT (~32% over). Native engine residual is ±7%, so 10% keeps the
+     bias safely over the actual ARM while reclaiming ~22 percentage points
+     of headroom. Verified via existing live UI strategy panel.
+
+2. **M7 Sweep — "Exit time" filter chip** (M7IvBandBestComboTable / Bands +
+   bucketed tabs):
+   - Frontend: new `exitHourFilter` state, persisted to localStorage under
+     `m7:bestcombo:exit_hour_filter`. Chip placed right of "IV band" with
+     11 options (08:00..17:00 + 17:29 — matches backend `_FIXED_HOURS`).
+     Empty selection = no restriction (default).
+   - API client: `exit_hours?: string[]` on `FetchBestComboArgs`,
+     serialized as CSV.
+   - Backend: `exit_hours` query param on `/iv_band_best_combo`. Filter
+     applied in `_apply_dimension_filters` via regex on `rule_label`
+     matching `_exit_hr_(<suffix>)$`. Non-fixed-hour rule families
+     (baseline / max_profit / margin_target) are excluded when the filter
+     is active — orthogonal to the existing `rule_family` filter.
+   - Verified: with `exit_hours=14,15`, candidate cells drop from 20,640 →
+     1,290; picked rule_labels match the selected hours. Playwright
+     screenshot confirms the chip is live (`m7sweep-exit-time-filter.png`).
+
+3. **Ad-hoc analysis** on cell `(iv_band=20-30, hr=0, next_to_next (Mon),
+   Δ=0.50, SL100+Exit@14:00)` — answered user's two questions:
+   - Avg min MTM of the 8 below-avg winners = **-$14.83 raw / -$68.95
+     scaled** (UI applies `k = lots/100 ≈ 4.65` in capital-sizing mode).
+   - The -$147 winner is **Friday 2025-05-16, trade_id
+     2620453956066327597**; entered at IV 22.86%, spot dropped -1.15%,
+     recovered to net +$14.43 at the 14:00 IST hard exit.
+   - No code changes from this — user can re-run via
+     `GET /api/v1/m7/cell_worst_fridays` with the matching cell+rule.
+
+### Open / next-up (carried over from Session 26)
+
+The Phase B bucketed-grid parquets are still **not built**. The unblock plan
+(quiesce other workloads, restart backend, launch dedicated
+`m7-bucketed-builder` container) from the previous "Last Session" block
+below still applies — read on for details.
+
+---
+
+## Session 26 (previous)
+**Date:** 2026-05-14 → 2026-05-15 (Composite Ranking v2 + Multi-Dim Bucketing; PAUSED after Phase 1 verified live)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 26 highlights — Composite Ranking v2 + Multi-Dim Bucketing (uncommitted)
+Plan: `/home/abhis/.claude/plans/now-for-best-combo-lively-creek.md`
+
+### TL;DR — what's done vs what's pending
+
+| Layer | Status |
+|---|---|
+| Phase A — Composite Score v2 backend + filter gates | ✅ DONE + verified live |
+| Phase A — Frontend Composite v2 dropdown entry + rank badge | ✅ DONE + verified live |
+| Phase B — IV-slope per-trade enrichment script | ✅ DONE (ran; parquet has slope cols) |
+| Phase B — Slope cutoff calibration script | ✅ DONE (ran; JSON on disk) |
+| Phase B — IVRV + slope bucket assignment in `_load_trades` | ✅ DONE (fixed np.where pandas-2.x issue) |
+| Phase B — `_build_grid(grouping_keys)` refactor | ✅ DONE |
+| Phase B — Multi-grid manager (`_TAB_DEFS`, lazy-build, disk persist) | ✅ DONE |
+| Phase B — `?tab=` query param + dispatch | ✅ DONE |
+| Phase B — **The 5 bucketed grid parquets** | ❌ **NOT BUILT** (compute budget exceeded — see below) |
+| Phase C — Six-button tab strip + IVRV/slope chips | ✅ DONE + visible in UI |
+| Phase D — Audit XLSX dump script | ✅ DONE (not yet run; needs bucketed grids first) |
+| Phase D — Bucketed-grid offline builder script | ✅ DONE (v1+v2 attempted; v2 will work, just slow) |
+| E2E verification on band tab | ✅ DONE via Playwright |
+| E2E verification on bucketed tabs | ❌ blocked on grid parquets |
+
+**The headline feature — `Composite v2 (5-comp, filtered)` — is live and correct on the Bands tab.** The remaining work is purely a one-time compute job to produce the 5 bucketed-grid parquets. No code is missing.
+
+### Why the bucketed grids haven't been built yet
+
+Each bucketed grid requires:
+- 96 `_derive_exits` calls (~10-30s cold, ~1s warm per call)
+- Per rule: groupby on a 180-column DataFrame across an extra dimension (~7s/groupby × 5 tabs = 35s)
+- Per rule total: **~45-60s**
+- Per grid total: **~70-100 min**
+
+The unified offline builder (`build_m7_bucketed_grids.py`) processes all 5 grids in one rule-iteration pass: **~60-90 min wall-clock**.
+
+Two build attempts this session failed:
+1. **v1**: ran 20 min, produced EMPTY grids because `derived` (from DuckDB) doesn't carry the in-memory bucket columns attached by `_attach_ivrv_and_slope_buckets`.
+2. **v2**: added merge to attach bucket columns onto `derived`. The merge itself is 0.1s, but per-rule 5-groupby work compounded to ~45-60s/rule. Killed at rule ~1 after 10 min of CPU work to free resources.
+
+Also bit by **WSL memory ceiling** (7.6 GB): backend + builder + concurrent `m9_full_*` workload + browser process pushes total usage past 5 GB. WSL has restarted the backend container at least once mid-session, wiping in-flight build progress. This is the structural risk — any long-running task here is fragile.
+
+### To finish the bucketed-tab work in a future session
+
+**Recommended approach (clean):**
+1. Stop/pause any other Claude sessions and the `m9_full_*` long-runner. Confirm backend has ~5 GB free.
+2. Restart docker-backend-1 (`cd docker && docker compose up -d --force-recreate backend`) — pulls the latest code with `_attach_ivrv_and_slope_buckets` fix.
+3. Launch the offline builder in a dedicated container per RULE #5:
+   ```
+   docker compose -f docker/docker-compose.yml run -d --rm \
+     --name m7-bucketed-builder \
+     -e PYTHONUNBUFFERED=1 \
+     backend sh -c "python -m app.scripts.build_m7_bucketed_grids \
+       > /home/abhis/btc-data/logs/m7_bucketed_build.log 2>&1"
+   ```
+4. Wait 60-90 min. Monitor via `tail -F /home/abhis/btc-data/logs/m7_bucketed_build.log`.
+5. After "Done in X min total." line, verify all 5 parquets:
+   ```
+   ls -la /home/abhis/btc-data/derived/m7/m7_best_combo_grid_v7_*.parquet
+   ```
+   Expected: `m7_best_combo_grid_v7_band_ivrv.parquet` + 4 slope variants.
+6. Restart backend so it picks up the on-disk grids:
+   ```
+   cd docker && docker compose up -d --force-recreate backend
+   ```
+7. Smoke-test each bucketed tab via curl:
+   ```
+   curl -sf 'http://localhost:8000/api/v1/m7/iv_band_best_combo?tab=band_ivrv&ranking=composite_score_v2&min_hit_pct=50'
+   ```
+   Same for `tab=band_ivrv_slope_cn`, `_nn`, `_cnn`, `_ts_legacy`.
+8. Run audit XLSX:
+   ```
+   docker compose -f docker/docker-compose.yml run --rm backend \
+     python -m app.scripts.m7_composite_score_calibration
+   ```
+   Output lands at `scripts/m7_composite_v2_audit_<timestamp>.xlsx`. The "Slope_Spread" sheet is the empirical decider for which of the 4 slope candidates discriminates best.
+9. Playwright UI sweep — click each of 6 tab buttons, verify rows render with IVRV/slope chips on bucketed tabs.
+
+**Optimization opportunities (deferred — current code is correct, just slow):**
+- Slice `derived` to ~30 columns BEFORE groupby (5-10× speedup).
+- Replace `_compute_cell_metrics`'s per-group Python loop with vectorized `groupby.agg({metric: agg_fn})` calls.
+- Persist incrementally per rule so a WSL restart loses seconds, not hours.
+
+### Empirical slope cutoffs (already on disk)
+
+`/home/abhis/btc-data/derived/m7/slope_cutoffs_v1.json` — empirical p33/p67 across all trades, balanced thirds (~11.3k each per bucket):
+
+```
+slope_current_next             p33=+0.0280  p67=+0.0595
+slope_next_next_to_next        p33=-0.0716  p67=-0.0459
+slope_current_next_to_next     p33=-0.0348  p67=+0.0053
+ctx_term_slope_7_30            p33=+0.0063  p67=+0.0379
+```
+
+### Files changed/added this session (all UNCOMMITTED)
+
+| File | Status |
+|---|---|
+| `backend/app/api/m7_ranking_config.py` | NEW (constants + weights) |
+| `backend/app/api/m7_best_combo.py` | MODIFIED (+ 200 lines: filters, v2 score, multi-grid manager, tab dispatch) |
+| `backend/app/api/m7_results.py` | MODIFIED (`_attach_ivrv_and_slope_buckets`, vectorized via np.where) |
+| `backend/app/scripts/enrich_m7_trades_with_iv_slopes.py` | NEW (one-shot enrichment, already run) |
+| `backend/app/scripts/calibrate_m7_slope_cutoffs.py` | NEW (one-shot calibration, already run) |
+| `backend/app/scripts/build_m7_bucketed_grids.py` | NEW (offline 5-grid builder; v2 verified correct, needs ~60-90 min to run) |
+| `backend/app/scripts/m7_composite_score_calibration.py` | NEW (audit XLSX; runs after grids exist) |
+| `frontend/src/services/m7_api.ts` | MODIFIED (`tab`, `ivrv_bucket`, `slope_bucket` args + 6 row fields) |
+| `frontend/src/components/m7/M7IvBandBestComboTable.tsx` | MODIFIED (Composite v2 dropdown entry, rank badge, tab strip, IVRV/slope chips) |
+| `frontend/src/pages/M7SweepDashboard.tsx` | UNCHANGED by me; user reverted the Friday-band tab |
+
+### Verified live (Phase 1, Bands tab)
+
+At Conservative settings (Capital $600, max_loss 25%, max_drop 30%, min_hit 50%, min_n 5), Composite v2 picks 4 of 10 bands (0-20, 20-30, 40-50, 50-60). All flagged `⚠ low_n (v2)` because their n is in [10, 20). The other 6 bands return ZERO picks because every cell fails a hard gate (n<10 or win_rate<70% or |CVaR|>2×credit or losing_streak>3). This is **exactly the intended behavior** — the picker honestly says "no edge here" instead of picking 1-trade noise.
+
+**No regressions on existing rankings.** Old `composite_score` (v1), `avg_net_pnl`, `sortino_per_trade`, `calmar_like` etc. all still selectable and produce the same picks as before this session.
+
+### Session 26 highlights (deprecated, kept for trace) — original Phase-1-only marker
+
+### What landed in Phase B (new since the Phase-1-only marker)
+
+1. **Per-trade IV-slope enrichment** — `backend/app/scripts/enrich_m7_trades_with_iv_slopes.py`. Reads `m7_trades_enriched.parquet`, de-dupes by (Friday, hour) → 847 unique (ts, expiry) lookups × 4 expiries = 3,388 `atm_iv_at` calls. Wrote back: 34,131 of 34,166 trades have valid `slope_current_next` / `slope_next_next_to_next` / `slope_current_next_to_next`. Runtime: ~3.5 min on warm DuckDB cache.
+
+2. **Slope cutoff calibration** — `backend/app/scripts/calibrate_m7_slope_cutoffs.py`. Wrote `/home/abhis/btc-data/derived/m7/slope_cutoffs_v1.json`. Empirical p33/p67 cutoffs per slope: balanced thirds (~11.3k trades each):
+   ```
+   slope_current_next             p33=+0.0280  p67=+0.0595  (BW=11,356 / neut=11,402 / CT=11,373)
+   slope_next_next_to_next        p33=-0.0716  p67=-0.0459  (BW=11,355 / neut=11,402 / CT=11,374)
+   slope_current_next_to_next     p33=-0.0348  p67=+0.0053  (BW=11,364 / neut=11,426 / CT=11,341)
+   ctx_term_slope_7_30            p33=+0.0063  p67=+0.0379  (BW=11,341 / neut=11,429 / CT=11,361)
+   ```
+
+3. **`_attach_ivrv_and_slope_buckets()` in `m7_results._load_trades`** — derives `ivrv_bucket` from `ctx_iv_rv_spread_7d` (cutoffs from `m7_ranking_config`) plus 4 slope-bucket columns from the slope JSON. Runs at every trade-load mtime check.
+
+4. **`_build_grid(extra_group_keys=...)`** — refactored to take a tuple. Adds the extra cols into the groupby + into each cell's output dict.
+
+5. **`_TAB_DEFS` + `_BUCKETED_GRIDS` + `get_grid_for_tab(tab)`** in `m7_best_combo.py`. Six tabs total (`band`, `band_ivrv`, `band_ivrv_slope_{cn,nn,cnn}`, `band_ivrv_ts_legacy`). Lazy build on first request, persisted to `m7_best_combo_grid_v7_<tab>.parquet` for fast reload on backend restart. Cells with `n<10` dropped (noise floor).
+
+6. **`?tab=…&ivrv_bucket=…&slope_bucket=…`** params on `/iv_band_best_combo`. Tab `band` returns the legacy v6+v2 grid unchanged. Bucketed tabs run `_apply_composite_filters` + `_attach_composite_score_v2(group_keys=...)` so normalisation is band×ivrv-local (Tab 2) or band×ivrv×slope-local (Tabs 3A-D).
+
+### What landed in Phase C
+
+7. **Six-button tab strip** in `M7IvBandBestComboTable.tsx` above the existing Score/Family/sizing controls. Persisted under `m7:bestcombo:tab`. Tab 1 = `Bands` (default — legacy single-grid behavior). When a bucketed tab is active, additional IVRV chip-filter row + Slope chip-filter row appear.
+
+8. **Row badges**: when a row has an `ivrv_bucket` column populated (bucketed tabs), a small purple chip after the `iv_band` label shows `rich`/`fair`/`cheap`. Similarly an amber chip for the active slope bucket.
+
+9. **`FetchBestComboArgs`** extended with `tab`, `ivrv_bucket`, `slope_bucket` (all optional). The fetch wrapper forwards them as URL params.
+
+### What landed in Phase D
+
+10. **`backend/app/scripts/m7_composite_score_calibration.py`** — audit XLSX generator. 5 sheets: Tab1_v1_vs_v2, Filter_Audit, Slope_Spread, IVRV_Spread, Config. Forces lazy-build of all 6 grids before dumping. Run with: `docker compose run --rm backend python -m app.scripts.m7_composite_score_calibration`.
+
+### Verified live (Phase 1 — band tab)
+
+At Conservative settings (Capital $600, max_loss 25%, max_drop 30%, min_hit 50%, min_n 5), Composite v2 picks 4 bands (0-20, 20-30, 40-50, 50-60), all flagged `low_n (v2)` because n in 10-19. The other 6 bands return ZERO picks because every cell fails a hard gate.
+
+### What's PENDING (only end-to-end checks, no more code)
+
+- **First bucketed-grid build in progress** at session end — `band_ivrv`. ~30 min runtime on cold cache (~16/96 rules done at last check, racing concurrent builds). Once first finishes, exit-cache is warm; subsequent slope tabs each build in ~1-2 min.
+- After the 5 bucketed grids exist on disk, run `m7_composite_score_calibration` to produce the audit XLSX. Numbers in that file's "Slope_Spread" sheet will tell us which of the 4 slope candidates is most predictive.
+- Playwright click-through of each of the 6 tabs (verify rows + IVRV/slope chips render).
+
+### What landed (Phase 1 — the headline `composite_score_v2` is selectable in the Score dropdown and produces hard-filtered picks):
+
+1. **New config module** `backend/app/api/m7_ranking_config.py` — all thresholds (MIN_N_TRADES=20, LOW_N_THRESHOLD=10, MIN_WIN_RATE=0.70, MAX_CVAR_TO_CREDIT_RATIO=2.0, MAX_LOSING_STREAK=3) + the 5-component weight dict + IVRV cutoff constants + a placeholder `load_slope_cutoffs()` reader. Single source of truth so tuning the formula = editing one file.
+
+2. **Two new helpers in `m7_best_combo.py`**:
+   - `_apply_composite_filters(df)` — tags every cell with `rank_status` ∈ {`ranked`,`low_n`,`filtered`} + a `filter_reason` CSV. Hard gates: n, win_rate, |CVaR|/credit ratio, max losing streak. Rows never dropped — visibility controlled by the UI.
+   - `_attach_composite_score_v2(df, group_keys)` — band-local min-max-normalised weighted score across 5 components (sortino, calmar, avg_net/|CVaR|, ret/margin, win_rate). Edge cases per spec: sortino undefined → 2× sharpe; calmar undefined → 90th-pct fallback; cvar undefined → drop term + re-weight to 1.0. Attaches `composite_score_v2`, `rank_in_band`, `composite_score_v2_components_used`, `score_components` (JSON of un-normalised values).
+   - Both run after `_attach_risk_adjusted` in `_try_load_grid_from_disk` AND in the in-memory `_build_grid` rebuild path.
+
+3. **Picker honors the hard gates** — `_pick_best_per_band` excludes `rank_status="filtered"` rows when ranking on `composite_score_v2` (other ranking metrics unchanged so existing behavior is preserved).
+
+4. **Metric registered** — `composite_score_v2` added to `_METRIC_DIRECTIONS` (direction "max").
+
+5. **Frontend surfacing**:
+   - `composite_score_v2` is the FIRST option in the Score dropdown's Composite group, labeled "Composite v2 (5-comp, filtered)". Old `composite_score` (v1) remains selectable underneath.
+   - Each row's IV-band cell now renders `⚠ low_n (v2)` (amber) or `⊘ filtered` (red) badge + `#<rank_in_band>` after the iv_band label. Hover tooltip shows `filter_reason`.
+   - `M7IvBandBestComboRow` extended in `m7_api.ts` with the 6 new optional columns.
+
+**Verified live via Playwright**: at user's Conservative settings (Capital $600, max_loss 25%, max_drop 30%, min_hit 50%), Composite v2 picks 4 bands (0-20, 20-30, 40-50, 50-60), all flagged `low_n (v2)` because n in 10-19. The other 6 bands return ZERO picks because every cell fails a hard gate — the picker honestly says "no edge here" instead of picking 1-trade noise.
+
+### What's PENDING (Phases B/C/D from the same plan)
+
+Still TODO before the plan can be marked complete:
+
+6. **Per-trade IV-slope enrichment** — `scripts/enrich_m7_trades_with_iv_slopes.py` (new). For each of 34,166 trades, call `atm_iv_at(entry_ts_utc, expiry)` for the 4 short expiries (current Sat, next Sun, next_to_next Mon, weekly 7d) → derive `slope_current_next`, `slope_next_next_to_next`, `slope_current_next_to_next`. Plus carry through the existing `ctx_term_slope_7_30` as a control axis. Estimated runtime: ≥20 min naive; ~2 min if batched per (Friday, hour) cell since only 121 Fridays × 24 hours = 2,904 distinct (ts, expiry) lookups. Recommend batching.
+
+7. **Slope cutoff calibration** — `scripts/calibrate_m7_slope_cutoffs.py` (new). Computes p33/p67 of each of the 4 slope columns across all trades, writes `/home/abhis/btc-data/derived/m7/slope_cutoffs_v1.json`. Backend's `m7_ranking_config.load_slope_cutoffs()` already reads this file with a conservative fallback.
+
+8. **IVRV bucket on per-trade table at load** — in `m7_results._load_trades()`, derive `ivrv_bucket` ∈ {`rich`,`fair`,`cheap`} from `ctx_iv_rv_spread_7d` using the constants in m7_ranking_config (IVRV_RICH_THRESHOLD=0.10, IVRV_CHEAP_THRESHOLD=0.0). Same loop derives the 4 slope buckets from the enriched columns once they exist.
+
+9. **Refactor `_build_grid(grouping_keys)`** — accept a tuple. Build/load 6 grids (`m7_best_combo_grid_v7_band.parquet`, `…_band_ivrv.parquet`, `…_band_ivrv_slope_cn.parquet`, `…_slope_nn.parquet`, `…_slope_cnn.parquet`, `…_ts_legacy.parquet`). Each runs `_apply_composite_filters` + `_attach_composite_score_v2(group_keys=…)` at load. Drop cells with n<10 from the persisted parquet (noise floor).
+
+10. **Endpoint `?tab=` param** — `/iv_band_best_combo?tab=band|band_ivrv|band_ivrv_slope_cn|…|band_ivrv_ts_legacy` dispatching to the right cached grid.
+
+11. **Six-tab strip in `M7IvBandBestComboTable.tsx`** — buttons above the Score dropdown, controlled by localStorage key `m7:bestcombo:tab`. New columns visible in bucketed tabs: `IVRV` chip + `Slope` chip. Filter chips: `Hide filtered` (default ON), `Hide low_n` (default ON for tab 1, OFF for tabs 2-3), `Min n` slider.
+
+12. **Audit XLSX dump** — `scripts/m7_composite_score_calibration.py` (new). 4 sheets: Tab 1 (v1 vs v2), Filter audit, Slope-spread per candidate, IVRV spread. The slope-spread sheet is the empirical decider for which of the 4 slopes most informatively splits this strategy's returns.
+
+13. **End-to-end Playwright verification of bucketed tabs.**
+
+### Files changed this session (uncommitted)
+
+```
+backend/app/api/m7_ranking_config.py             (NEW, ~80 lines)
+backend/app/api/m7_best_combo.py                 (+ 2 helpers, picker filter, _METRIC_DIRECTIONS entry, wired into 2 grid-load paths)
+frontend/src/services/m7_api.ts                  (+ 6 fields on M7IvBandBestComboRow)
+frontend/src/components/m7/M7IvBandBestComboTable.tsx (Score dropdown entry + rank_status badge + #rank chip)
+```
+
+Also from prior sessions this commit cycle (uncommitted):
+- M7 Missed Fridays rescue (per-Friday band reassignment with rule-derived P&L)
+- M7 Sweep dashboard simplification (FilterBar / PnL Analytics / IV Band Summary / Full Coverage / old Missed Fridays / Leg Attribution all removed; LossesExplorer respects per-trade vs Friday-locked tab)
+- M7 Best Combo missed-Fridays endpoint that accepts ALL sizing+filter params (matches user's actual settings)
+- M7 Rule Comparison modal that shows per-rule lots + scaled values (`scaled_avg_net_pnl`)
+- M7 IvBandBestComboTable expiry/delta/hour multi-select filter strip; expiry whitelist enforced at load
+- Composite v2 (this session, Phase 1 only — see above)
+
+### Original Session 25 highlights — M7 Friday-Band parallel dashboard
+Plan: `/home/abhis/.claude/plans/can-u-check-the-lovely-rain.md`
 
 ### Session 25 highlights — M7 Friday-Band dashboard (uncommitted)
 Plan: `/home/abhis/.claude/plans/can-u-check-the-lovely-rain.md`

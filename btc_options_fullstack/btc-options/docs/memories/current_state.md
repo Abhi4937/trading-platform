@@ -2,6 +2,64 @@
 
 ## Active Projects
 
+- **M7 Friday-Band MTM Overlay panel (Session 29, 2026-05-17, UNCOMMITTED):**
+  - New `GET /api/v1/m7/friday_band_mtm_overlay` endpoint at
+    `backend/app/api/m7_friday_band_results.py:1187` (+512 LoC). Operates
+    on each band's winning-combo trade universe (parity with markers
+    endpoint). Single combined DuckDB query with `friday_date IN` +
+    `trade_id IN` predicates under `_EXIT_COMPUTE_LOCK`. Carry-forward
+    avg via `pivot_table.ffill()` + constant n_trades denominator.
+    Columnar wire format. `trade_id` as string for JS Number precision
+    safety.
+  - New frontend panel `M7FridayBandMtmOverlayPanel.tsx` (~370 LoC)
+    mounted at `M7FridayBandDashboard.tsx:227`. One chart per band with
+    5 overlaid `LineSeries` (avg + best/worst/best-max/worst-min) +
+    faint `n_trades_alive` on secondary scale. lightweight-charts v5
+    with `time = minute*60` + `tickMarkFormatter` for minute-offset
+    display. Legend de-dups slots sharing a trade_id; click opens the
+    existing `M7TradePathChart` modal.
+  - Backend rebuilt + frontend restarted; Playwright verified panel
+    mounts cleanly and calls the new endpoint. Screenshot:
+    `m7-fb-mtm-overlay-panel-mounted.png`.
+  - 14 backend tests in `test_m7_friday_band_mtm_overlay.py`. 4
+    synthetic-mock tests pass; 10 `@pytest.mark.slow` integration tests
+    skip until grid is fresh.
+  - **OPEN — Friday-band grid is stale** (May 13 file vs May 15 trades
+    parquet). Every Friday-band endpoint returns 503, not just the new
+    one. User needs to rebuild via:
+    `docker compose run -d --rm --name m7-grid-rebuild_$(date +%s) backend python -m app.scripts.build_m7_friday_band_grid`
+    Then re-run integration tests + Playwright visual verification.
+  - Plan: `/home/abhis/.claude/plans/i-want-average-1-memoized-valley.md`
+    (v2 — review-incorporated). Two fresh-context review agents caught
+    8 blockers before coding.
+
+- **M7 Loss Explorer redesign + warming patterns (Session 28, 2026-05-16, UNCOMMITTED):**
+  - Losses Explorer now mirrors the dashboard's Best Combo per IV band
+    table 1:1 via a new `cells` JSON param on `/losses_distribution`.
+    Scope/ranking toggles removed in M7Sweep mode; universe view dropped.
+    Friday-Band dashboard still uses the legacy scope toggle path.
+  - Diagnostic modal closed the 24-cell spot-technicals gap (5m / 15m /
+    30m / 1h / 4h / 1d × RSI / MACD hist / BB %b / ATR %) and added the
+    9-field premium calibration block + cost summary + trade context.
+  - Best-combo grid validator now also checks `rule_label` cardinality
+    (was silently loading 21-rule grids after expansion to 96).
+  - **Cells-mode warming pattern**: `/losses_distribution?cells=...`
+    pre-checks `_EXIT_CACHE`; cold rules trigger async daemon threads
+    (`_warmup_rule_async`) and the endpoint returns `warming=true`
+    immediately. Frontend polls every 3s.
+  - **Coverage warming pattern**: same applied to
+    `/iv_band_best_combo/coverage` — picker+classifier moved to
+    `_compute_coverage_payload`, daemon thread per cache_key writes to
+    `_COVERAGE_CACHE`, endpoint returns `status='warming'` on cold key.
+    Frontend polls every 2s. Solves the "500 Internal Server Error" the
+    UI showed when the cold call exceeded browser/proxy timeouts.
+  - **Tests**: 117 m7 passed (incl. 4 new: cells cold-cache warming,
+    coverage endpoint warming, coverage cache hit short-circuit,
+    coverage warmup idempotency).
+  - **Open**: backend rebuild pending (waited per RULE #4 — multiple
+    other Claude sessions active). Run `cd docker && docker compose up
+    --build -d backend` when safe.
+
 - **M-Month module — Phase A + B + B+ SHIPPED (Session 24, 2026-05-13, commit `864cd32`):**
   Plan: `/home/abhis/.claude/plans/i-want-to-do-wiggly-planet.md`.
 

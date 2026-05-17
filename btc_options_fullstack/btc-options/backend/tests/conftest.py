@@ -13,6 +13,11 @@ def pytest_configure(config):
         "slow: full-dataset historical validations against the M7 parquet "
         "(use `pytest -m slow`); excluded from default run via `-m 'not slow'`.",
     )
+    config.addinivalue_line(
+        "markers",
+        "benchmark: manual performance benchmarks; skipped by default "
+        "(use `pytest -m benchmark` to run).",
+    )
 
 
 def pytest_collection_modifyitems(config, items):

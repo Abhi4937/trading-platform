@@ -13,6 +13,7 @@ import {
 import type { M7ExitRule, M7Filters, M7Meta } from '../types/m7';
 
 import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers';
+import { M7FridayBandMtmOverlayPanel } from '../components/m7/M7FridayBandMtmOverlayPanel';
 import { M7FilterBar } from '../components/m7/M7FilterBar';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
 import { M7FridayBandBestComboTable } from '../components/m7/M7FridayBandBestComboTable';
@@ -77,6 +78,7 @@ export function M7FridayBandDashboard() {
   const d1Tb      = dHeader.bandMode === 'D1' ? dHeader.d1Tiebreakers : undefined;
 
   useEffect(() => {
+    // jsonFetch handles 5xx auto-retry. FilterBar degrades gracefully on null meta.
     fetchM7Meta().then(setMeta).catch(e => setError(String(e)));
   }, []);
 
@@ -86,6 +88,7 @@ export function M7FridayBandDashboard() {
     setSummaryLoading(true);
     setSummary(null);  // clear stale numbers while a new fetch is in-flight
     setError(null);
+    // jsonFetch handles 5xx auto-retry — no need for per-call retry logic.
     fetchM7FridayBandSummary(dFilters, dExitRule, dHeader.bandMode, d1Tb, ac.signal)
       .then(s => { if (active) setSummary(s); })
       .catch(e => { if (active && e?.name !== 'AbortError') setError(String(e)); })
@@ -94,13 +97,9 @@ export function M7FridayBandDashboard() {
   }, [JSON.stringify(dFilters), JSON.stringify(dExitRule),
       dHeader.bandMode, JSON.stringify(d1Tb ?? [])]);
 
-  if (error && !meta) {
-    return (
-      <div style={{ padding: 20, color: '#f85149', fontSize: 13 }}>
-        Failed to load M7 data: {error}
-      </div>
-    );
-  }
+  // Don't tank the whole page on transient errors — render the dashboard
+  // and let per-section error UI surface specifics. The build-progress bar
+  // in the best-combo table is the user's signal during long D1 builds.
 
   return (
     <div style={{ padding: 14, color: '#cfd9e3', minHeight: '100vh', overflowY: 'auto', height: '100%' }}>
@@ -223,6 +222,15 @@ export function M7FridayBandDashboard() {
       <M7BestComboPathMarkers
         filters={dFilters} exitRule={dExitRule} metric={dMetric}
         useFridayBand bandMode={dHeader.bandMode} d1Tiebreakers={d1Tb}
+      />
+
+      <M7FridayBandMtmOverlayPanel
+        filters={dFilters}
+        exitRule={dExitRule}
+        metric={dMetric}
+        bandMode={dHeader.bandMode}
+        d1Tiebreakers={d1Tb}
+        onPickClick={(id) => setSelectedTrade(id)}
       />
 
       <div style={{

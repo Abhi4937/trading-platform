@@ -227,6 +227,42 @@ export interface M7BestComboMarkersResponse {
   bands: M7BestComboMarkersBand[];
 }
 
+export interface M7MtmPickPath {
+  trade_id: string;
+  friday_date_ist: string;
+  net_pnl_estimate_usd: number | null;
+  max_mtm_usd?: number | null;
+  min_mtm_usd?: number | null;
+  minutes: number[];
+  pnl: number[];
+}
+
+export interface M7MtmAvgCurve {
+  minutes: number[];
+  mean_pnl: number[];
+  n_trades_alive: number[];
+}
+
+export interface M7BandOverlay {
+  friday_band: string;
+  entry_hour_ist: number;
+  expiry_bucket: string;
+  delta_target: number;
+  n_trades: number;
+  picks: {
+    best:          M7MtmPickPath | null;
+    worst:         M7MtmPickPath | null;
+    best_max_mtm:  M7MtmPickPath | null;
+    worst_min_mtm: M7MtmPickPath | null;
+  };
+  avg_curve: M7MtmAvgCurve;
+}
+
+export interface M7FridayBandMtmOverlayResponse {
+  band_mode: string;
+  bands: M7BandOverlay[];
+}
+
 export interface M7MissedFridayRow {
   friday_date_ist: string;
   entry_hour_ist: number;

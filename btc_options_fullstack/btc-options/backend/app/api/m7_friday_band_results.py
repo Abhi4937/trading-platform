@@ -16,12 +16,16 @@ so trade counts (and headline strip values) are conserved.
 """
 from __future__ import annotations
 
-from typing import Optional
+import asyncio
+import threading
 import logging
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+import duckdb
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel
 
 from app.api import m7_results as m7r
 from app.api import m7_best_combo as m7bc
@@ -29,6 +33,16 @@ from app.api import m7_friday_band_best_combo as m7fb
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+
+
+# Friday→band map cache, keyed by (band_mode, sorted tiebreakers).
+# CRITICAL: without this cache, every endpoint call rebuilds the map. For D1
+# with lookahead tiebreakers, the build does a groupby on the 3.25M-row
+# per-trade archive — 5 concurrent rebuilds = OOM/crash. Sharing one map
+# across the dashboard's burst (5 endpoints fire simultaneously) eliminates
+# the crash.
+_FB_MAP_CACHE: dict[tuple, dict[str, str]] = {}
+_FB_MAP_LOCK = threading.Lock()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -51,15 +65,34 @@ def _resolve_friday_band_map(band_mode: str, d1_tiebreakers_raw: Optional[str]) 
     if sat is None or sat.empty:
         return {}
     tb = m7fb._parse_d1_tiebreakers(d1_tiebreakers_raw) if band_mode == "D1" else []
-    if band_mode == "A1":
-        return m7fb._friday_band_map_a1(sat)
-    if band_mode == "B1":
-        return m7fb._friday_band_map_b1(sat)
-    # D1
-    pt = m7fb._load_per_trade_archive() if any(
-        t in m7fb._D1_TIEBREAKERS_LOOKAHEAD for t in tb
-    ) else None
-    return m7fb._friday_band_map_d1(sat, pt, tb)
+
+    # Cache the (band_mode, tiebreakers) → Friday→band map so concurrent
+    # endpoint calls share one result. Lookahead D1 builds do a groupby on
+    # the 3.25M-row per-trade archive — without this cache, 5 concurrent
+    # rebuilds crash uvicorn under memory/CPU pressure.
+    cache_key: tuple = (band_mode, tuple(tb))
+    cached = _FB_MAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    with _FB_MAP_LOCK:
+        cached = _FB_MAP_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if band_mode == "A1":
+            fb_map = m7fb._friday_band_map_a1(sat)
+        elif band_mode == "B1":
+            fb_map = m7fb._friday_band_map_b1(sat)
+        else:  # D1
+            pt = m7fb._load_per_trade_archive() if any(
+                t in m7fb._D1_TIEBREAKERS_LOOKAHEAD for t in tb
+            ) else None
+            fb_map = m7fb._friday_band_map_d1(sat, pt, tb)
+
+        _FB_MAP_CACHE[cache_key] = fb_map
+        log.info("M7 Friday-band map cached: mode=%s tb=%s (%d Fridays)",
+                 band_mode, ",".join(tb) if tb else "-", len(fb_map))
+        return fb_map
 
 
 def _annotate_friday_band(derived: pd.DataFrame, fb_map: dict[str, str]) -> pd.DataFrame:
@@ -819,3 +852,462 @@ def _friday_band_losses_assemble(
         "losers_sample_offset": trades_offset if include_trades else 0,
         "losers_sample_limit":  trades_limit  if include_trades else 0,
     }
+
+
+# ── Endpoint 5: /friday_band_mtm_overlay ─────────────────────────────────────
+
+# ── Pydantic response models ──────────────────────────────────────────────────
+
+class _PickPath(BaseModel):
+    trade_id: str
+    friday_date_ist: str
+    minutes: List[int]
+    pnl: List[float]
+    net_pnl_estimate_usd: Optional[float] = None
+    max_mtm_usd: Optional[float] = None
+    min_mtm_usd: Optional[float] = None
+
+
+class _BandPicks(BaseModel):
+    best: Optional[_PickPath] = None
+    worst: Optional[_PickPath] = None
+    best_max_mtm: Optional[_PickPath] = None
+    worst_min_mtm: Optional[_PickPath] = None
+
+
+class _AvgCurve(BaseModel):
+    minutes: List[int]
+    mean_pnl: List[float]
+    n_trades_alive: List[int]
+
+
+class _BandOverlay(BaseModel):
+    friday_band: str
+    entry_hour_ist: int
+    expiry_bucket: str
+    delta_target: float
+    n_trades: int
+    picks: _BandPicks
+    avg_curve: _AvgCurve
+
+
+class FridayBandMtmOverlayResponse(BaseModel):
+    band_mode: str
+    bands: List[_BandOverlay]
+
+
+# ── Overlay cache (mirrors _FB_MAP_CACHE pattern) ────────────────────────────
+
+_OVERLAY_CACHE: dict[tuple, FridayBandMtmOverlayResponse] = {}
+_OVERLAY_CACHE_LOCK = threading.Lock()
+
+
+# ── Private helpers ───────────────────────────────────────────────────────────
+
+def _pick_trade_row(df: pd.DataFrame, col: str, ascending: bool):
+    """Return the first row of df sorted by (col, trade_id ASC), or None."""
+    d = df.dropna(subset=[col])
+    if d.empty:
+        return None
+    return d.sort_values([col, "trade_id"], ascending=[ascending, True]).iloc[0]
+
+
+def _run_overlay_query(
+    friday_dates: tuple[str, ...],
+    trade_ids: tuple[int, ...],
+    max_minutes: int,
+) -> pd.DataFrame:
+    """Execute one DuckDB query that fetches path rows for all picked trades.
+
+    Acquires _EXIT_COMPUTE_LOCK (threading.Lock) synchronously — safe to call
+    from a thread spawned by asyncio.to_thread.
+
+    Returns a DataFrame with columns: trade_id (int64), minute_offset, gross_pnl_usd.
+    Returns empty DataFrame if no data.
+    """
+    if not friday_dates or not trade_ids:
+        return pd.DataFrame(columns=["trade_id", "minute_offset", "gross_pnl_usd"])
+
+    dates_csv = ", ".join(f"'{d}'" for d in friday_dates)
+    ids_csv = ", ".join(str(i) for i in trade_ids)
+
+    sql = f"""
+    SELECT trade_id, minute_offset, gross_pnl_usd
+    FROM read_parquet('{m7r.PATHS_GLOB}', hive_partitioning=true)
+    WHERE friday_date IN ({dates_csv})
+      AND trade_id IN ({ids_csv})
+      AND minute_offset BETWEEN 0 AND {max_minutes}
+    ORDER BY trade_id, minute_offset
+    """
+    with m7r._EXIT_COMPUTE_LOCK:
+        conn = duckdb.connect()
+        try:
+            df = conn.execute(sql).df()
+        finally:
+            conn.close()
+    return df
+
+
+def _build_pick_path(
+    row,
+    path_df: pd.DataFrame,
+    max_minutes: int,
+    net_pnl_col: Optional[str],
+    scalar_col: Optional[str],
+) -> Optional[_PickPath]:
+    """Build a _PickPath from a derived-frame row + pre-fetched path DataFrame."""
+    if row is None:
+        return None
+    tid = int(row["trade_id"])
+    trade_path = path_df[path_df["trade_id"] == tid].sort_values("minute_offset")
+    if trade_path.empty:
+        return None
+
+    minutes_list = trade_path["minute_offset"].tolist()
+    pnl_list = [round(float(v), 4) for v in trade_path["gross_pnl_usd"]]
+
+    net_pnl = None
+    if net_pnl_col and net_pnl_col in row.index and pd.notna(row[net_pnl_col]):
+        net_pnl = round(float(row[net_pnl_col]), 2)
+
+    scalar_val = None
+    if scalar_col and scalar_col in row.index and pd.notna(row[scalar_col]):
+        scalar_val = round(float(row[scalar_col]), 2)
+
+    kwargs: dict = {
+        "trade_id": str(tid),
+        "friday_date_ist": str(row["friday_date_ist"]),
+        "minutes": minutes_list,
+        "pnl": pnl_list,
+        "net_pnl_estimate_usd": net_pnl,
+    }
+    if scalar_col == "max_mtm_usd":
+        kwargs["max_mtm_usd"] = scalar_val
+    elif scalar_col == "min_mtm_usd":
+        kwargs["min_mtm_usd"] = scalar_val
+
+    return _PickPath(**kwargs)
+
+
+def _build_avg_curve(
+    band_df: pd.DataFrame,
+    path_df: pd.DataFrame,
+    max_minutes: int,
+    min_n_trades_in_avg: int,
+) -> _AvgCurve:
+    """Build the carry-forward average curve for one band.
+
+    Carry-forward: after a trade's last recorded minute its final gross_pnl_usd
+    is propagated to max_minutes so it keeps contributing to the per-minute mean.
+    n_trades_alive counts trades whose last path minute >= m (still actually live
+    at that minute per the path data, before carry-forward).
+
+    mean_pnl denominator is always n_trades (constant) — carry-forward semantics.
+    Tail minutes with n_trades_alive < min_n_trades_in_avg are dropped.
+    """
+    n_trades = len(band_df)
+    if n_trades == 0:
+        return _AvgCurve(minutes=[], mean_pnl=[], n_trades_alive=[])
+
+    trade_ids_in_band = set(band_df["trade_id"].astype(int).tolist())
+    band_paths = path_df[path_df["trade_id"].isin(trade_ids_in_band)].copy()
+
+    if band_paths.empty:
+        return _AvgCurve(minutes=[], mean_pnl=[], n_trades_alive=[])
+
+    all_minutes = list(range(0, max_minutes + 1))
+
+    # Build a pivot: rows=minute_offset, columns=trade_id, values=gross_pnl_usd
+    # Only include minutes present in the path; fill gaps per trade with ffill.
+    pivot = (
+        band_paths
+        .pivot_table(index="minute_offset", columns="trade_id",
+                     values="gross_pnl_usd", aggfunc="last")
+        .reindex(all_minutes)
+    )
+
+    # Forward-fill each trade's column to carry the exit value forward.
+    pivot = pivot.ffill()
+
+    # n_trades_alive: at minute m, count of trades whose last recorded minute >= m.
+    last_minute_by_trade = band_paths.groupby("trade_id")["minute_offset"].max()
+    # Align to trade_ids actually present in pivot columns.
+    last_mins = last_minute_by_trade.reindex(pivot.columns).fillna(-1).values
+
+    n_alive_arr = np.array([
+        int((last_mins >= m).sum())
+        for m in all_minutes
+    ])
+
+    # Compute mean_pnl: sum of carry-forward values / n_trades (not n_alive).
+    # Trades with no path data at all contribute 0 (their column stays NaN after
+    # ffill until their first minute, which at minute 0 should be 0).
+    row_sums = pivot.sum(axis=1, skipna=True).values
+    mean_pnl_arr = row_sums / n_trades
+
+    # Apply min_n_trades_in_avg truncation: drop tail where n_alive < threshold.
+    # Find the last minute where n_alive >= threshold.
+    qualifying = np.where(n_alive_arr >= min_n_trades_in_avg)[0]
+    if len(qualifying) == 0:
+        return _AvgCurve(minutes=[], mean_pnl=[], n_trades_alive=[])
+    last_valid = int(qualifying[-1])
+
+    minutes_out = all_minutes[:last_valid + 1]
+    mean_pnl_out = [round(float(v), 4) for v in mean_pnl_arr[:last_valid + 1]]
+    n_alive_out = [int(v) for v in n_alive_arr[:last_valid + 1]]
+
+    return _AvgCurve(minutes=minutes_out, mean_pnl=mean_pnl_out, n_trades_alive=n_alive_out)
+
+
+def _compute_overlay_response(
+    derived: pd.DataFrame,
+    best: pd.DataFrame,
+    fb_map: dict[str, str],
+    band_mode: str,
+    max_minutes: int,
+    min_n_trades_in_avg: int,
+) -> FridayBandMtmOverlayResponse:
+    """Pure computation: build the overlay response from a derived-exits frame.
+
+    `best` is the per-band winning-combo DataFrame (same selection logic as
+    get_friday_band_best_combo_markers). For each band, only the trades that
+    belong to that band's winning (entry_hour_ist, expiry_bucket, delta_target)
+    combo are used — matching the markers endpoint's trade universe exactly.
+
+    Separated from the endpoint so the result can be cached keyed on param tuple.
+    """
+    if derived is None or derived.empty or best is None or best.empty:
+        return FridayBandMtmOverlayResponse(band_mode=band_mode, bands=[])
+
+    # Determine ordered band list (same order as _band_sort_key, mirrors markers endpoint).
+    all_bands = sorted(set(fb_map.values()), key=_band_sort_key)
+
+    # For each band, identify the 4 picked trade rows.
+    # Collect all (friday_date, trade_id) pairs we need paths for.
+    all_friday_dates: set[str] = set()
+    all_trade_ids: set[int] = set()
+
+    band_trade_map: dict[str, pd.DataFrame] = {}
+    band_pick_rows: dict[str, dict] = {}
+    band_combo_meta: dict[str, dict] = {}
+
+    for _, combo_row in best.iterrows():
+        band = combo_row["friday_band"]
+        # Restrict derived to this band's winning combo — same filter as markers endpoint.
+        sub = derived[
+            (derived["friday_band"] == combo_row["friday_band"]) &
+            (derived["entry_hour_ist"] == combo_row["entry_hour_ist"]) &
+            (derived["expiry_bucket"] == combo_row["expiry_bucket"]) &
+            (derived["delta_target"] == combo_row["delta_target"])
+        ]
+        if sub.empty:
+            continue
+
+        band_trade_map[band] = sub
+        band_combo_meta[band] = {
+            "entry_hour_ist": int(combo_row["entry_hour_ist"]),
+            "expiry_bucket": str(combo_row["expiry_bucket"]),
+            "delta_target": float(combo_row["delta_target"]),
+            "n_trades": int(combo_row["n_trades"]),
+        }
+        picks = {
+            "best":          _pick_trade_row(sub, "net_pnl_estimate_usd", False),
+            "worst":         _pick_trade_row(sub, "net_pnl_estimate_usd", True),
+            "best_max_mtm":  _pick_trade_row(sub, "max_mtm_usd",          False),
+            "worst_min_mtm": _pick_trade_row(sub, "min_mtm_usd",          True),
+        }
+        band_pick_rows[band] = picks
+
+        # Collect only the combo-restricted friday_dates for partition pruning.
+        all_friday_dates.update(sub["friday_date_ist"].astype(str).tolist())
+
+        # Collect picked trade_ids.
+        for pick_row in picks.values():
+            if pick_row is not None:
+                all_trade_ids.add(int(pick_row["trade_id"]))
+
+    if not all_trade_ids:
+        return FridayBandMtmOverlayResponse(band_mode=band_mode, bands=[])
+
+    # ONE DuckDB query for all trade paths (partition-pruned by friday_date).
+    path_df = _run_overlay_query(
+        friday_dates=tuple(sorted(all_friday_dates)),
+        trade_ids=tuple(sorted(all_trade_ids)),
+        max_minutes=max_minutes,
+    )
+
+    # Build per-band overlay entries (in sorted band order).
+    bands_out: list[_BandOverlay] = []
+    for band in all_bands:
+        sub = band_trade_map.get(band)
+        if sub is None or sub.empty:
+            continue
+
+        meta = band_combo_meta[band]
+        n_trades = len(sub)
+        picks_rows = band_pick_rows[band]
+
+        best_path = _build_pick_path(
+            picks_rows["best"], path_df, max_minutes,
+            net_pnl_col="net_pnl_estimate_usd", scalar_col=None,
+        )
+        worst_path = _build_pick_path(
+            picks_rows["worst"], path_df, max_minutes,
+            net_pnl_col="net_pnl_estimate_usd", scalar_col=None,
+        )
+        best_max_path = _build_pick_path(
+            picks_rows["best_max_mtm"], path_df, max_minutes,
+            net_pnl_col="net_pnl_estimate_usd", scalar_col="max_mtm_usd",
+        )
+        worst_min_path = _build_pick_path(
+            picks_rows["worst_min_mtm"], path_df, max_minutes,
+            net_pnl_col="net_pnl_estimate_usd", scalar_col="min_mtm_usd",
+        )
+
+        avg_curve = _build_avg_curve(sub, path_df, max_minutes, min_n_trades_in_avg)
+
+        bands_out.append(_BandOverlay(
+            friday_band=band,
+            entry_hour_ist=meta["entry_hour_ist"],
+            expiry_bucket=meta["expiry_bucket"],
+            delta_target=meta["delta_target"],
+            n_trades=n_trades,
+            picks=_BandPicks(
+                best=best_path,
+                worst=worst_path,
+                best_max_mtm=best_max_path,
+                worst_min_mtm=worst_min_path,
+            ),
+            avg_curve=avg_curve,
+        ))
+
+    return FridayBandMtmOverlayResponse(band_mode=band_mode, bands=bands_out)
+
+
+@router.get("/friday_band_mtm_overlay", response_model=FridayBandMtmOverlayResponse)
+async def get_friday_band_mtm_overlay(
+    band_mode: str = Query("A1"),
+    d1_tiebreakers: Optional[str] = Query(None),
+    exit_rule: Optional[str] = None,
+    metric: str = "avg_net_pnl",
+    expiry_buckets: Optional[str] = Query(
+        _DEFAULT_EXPIRY_BUCKETS,
+        description="CSV of allowed expiry buckets. Default = 4 popular expiries."),
+    delta_target: Optional[str] = None,
+    is_straddle: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    expiry_bucket: Optional[str] = None,
+    friday_band: Optional[str] = None,
+    entry_hour_ist: Optional[str] = None,
+    dte_bucket: Optional[str] = None,
+    spot_bucket: Optional[str] = None,
+    ivp_bucket: Optional[str] = None,
+    ctx_pattern: Optional[str] = None,
+    ctx_gex_regime: Optional[str] = None,
+    friday_date_ist: Optional[str] = None,
+    iv_skew_bucket: Optional[str] = None,
+    delta_skew_bucket: Optional[str] = None,
+    premium_skew_bucket: Optional[str] = None,
+    leg_winner: Optional[str] = None,
+    loss_cause: Optional[str] = None,
+    max_minutes: int = Query(720, ge=1, le=1440),
+    min_n_trades_in_avg: int = Query(3, ge=1, le=50),
+):
+    """Per-band MTM overlay: average curve + 4 extreme trade paths per IV-band.
+
+    Returns columnar path data ({minutes: [...], pnl: [...]}) for:
+      - avg curve (carry-forward mean across all trades in band)
+      - best trade (max net_pnl_estimate_usd)
+      - worst trade (min net_pnl_estimate_usd)
+      - best_max_mtm (max max_mtm_usd)
+      - worst_min_mtm (min min_mtm_usd)
+
+    Bands with n_trades == 0 are omitted from the response.
+    avg_curve tail minutes with n_trades_alive < min_n_trades_in_avg are dropped.
+    """
+    cache_key = (
+        band_mode, d1_tiebreakers or "",
+        exit_rule or "", metric,
+        expiry_buckets or "", delta_target or "",
+        is_straddle or "", expiry_date or "",
+        expiry_bucket or "", friday_band or "",
+        entry_hour_ist or "", dte_bucket or "",
+        spot_bucket or "", ivp_bucket or "",
+        ctx_pattern or "", ctx_gex_regime or "",
+        friday_date_ist or "", iv_skew_bucket or "",
+        delta_skew_bucket or "", premium_skew_bucket or "",
+        leg_winner or "", loss_cause or "",
+        max_minutes, min_n_trades_in_avg,
+    )
+
+    cached = _OVERLAY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Resolve filters and derived frame (synchronous — these are fast pandas ops,
+    # no DuckDB scan; _derive_exits uses the in-memory exit cache).
+    fb_map = _resolve_friday_band_map(band_mode, d1_tiebreakers)
+    filters = m7r._query_filters(
+        delta_target, is_straddle, expiry_date,
+        None, entry_hour_ist, dte_bucket,
+        spot_bucket, ivp_bucket, ctx_pattern, ctx_gex_regime,
+        friday_date_ist, expiry_bucket,
+        iv_skew_bucket=iv_skew_bucket,
+        delta_skew_bucket=delta_skew_bucket,
+        premium_skew_bucket=premium_skew_bucket,
+        leg_winner=leg_winner,
+        loss_cause=loss_cause,
+    )
+    rule = m7r._parse_exit_rule(exit_rule)
+    derived = m7r._derive_exits(filters, rule)
+    derived = _annotate_friday_band(derived, fb_map)
+    derived = _apply_friday_band_filter(derived, friday_band)
+    derived = _apply_expiry_buckets_filter(derived, expiry_buckets)
+
+    if derived is None or derived.empty:
+        result = FridayBandMtmOverlayResponse(band_mode=band_mode, bands=[])
+        with _OVERLAY_CACHE_LOCK:
+            _OVERLAY_CACHE[cache_key] = result
+        return result
+
+    # Select the best (entry_hour_ist, expiry_bucket, delta_target) combo per band,
+    # exactly as get_friday_band_best_combo_markers does (lines 433–450 above).
+    # The overlay MUST operate on the same per-band trade universe as the markers endpoint.
+    dims = ["friday_band", "entry_hour_ist", "expiry_bucket", "delta_target"]
+    grp = derived.groupby(dims, dropna=False)
+    score = m7r._metric_score(grp, metric)
+    n_combo = grp.size()
+    df_combos = pd.DataFrame({"score": score, "n_trades": n_combo}).reset_index()
+
+    df_valid = df_combos.dropna(subset=["score"])
+    strict = df_valid[df_valid["n_trades"] >= 3]
+    strict_idx = (strict.groupby("friday_band", dropna=False)["score"].idxmax()
+                  if not strict.empty else pd.Index([]))
+    strict_best = strict.loc[strict_idx] if len(strict_idx) else strict.iloc[0:0]
+    covered = set(strict_best["friday_band"].dropna().tolist())
+    fallback = df_valid[~df_valid["friday_band"].isin(covered)]
+    if not fallback.empty:
+        fb_idx = fallback.groupby("friday_band", dropna=False)["score"].idxmax()
+        fallback_best = fallback.loc[fb_idx]
+        best = pd.concat([strict_best, fallback_best], ignore_index=True)
+    else:
+        best = strict_best.reset_index(drop=True)
+
+    if best.empty:
+        result = FridayBandMtmOverlayResponse(band_mode=band_mode, bands=[])
+        with _OVERLAY_CACHE_LOCK:
+            _OVERLAY_CACHE[cache_key] = result
+        return result
+
+    # Run the heavy DuckDB scan + compute in a thread so we don't block the
+    # event loop. The _run_overlay_query function acquires _EXIT_COMPUTE_LOCK
+    # (threading.Lock) inside the thread, serialising concurrent DuckDB path scans.
+    result = await asyncio.to_thread(
+        _compute_overlay_response,
+        derived, best, fb_map, band_mode, max_minutes, min_n_trades_in_avg,
+    )
+
+    with _OVERLAY_CACHE_LOCK:
+        _OVERLAY_CACHE[cache_key] = result
+
+    return result
