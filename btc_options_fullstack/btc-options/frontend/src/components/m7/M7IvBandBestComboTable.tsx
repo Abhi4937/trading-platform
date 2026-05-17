@@ -3,8 +3,8 @@
 // the user filter to within tolerance of the per-band primary best, then pick
 // by a secondary metric (e.g., lowest min MTM among cells with similar net P&L).
 //
-// Sweep: 96 rule variants — premium_sl ∈ {50, 75, 100} × {baseline, 10
-// max_profit, 10 margin_target, 11 fixed_hour} = 32 per SL × 3 = 96.
+// Sweep: 105 rule variants — premium_sl ∈ {50, 75, 100} × {baseline, 10
+// max_profit, 10 margin_target, 14 fixed_hour (05:00..17:00 + 17:29)} = 35 per SL × 3 = 105.
 //
 // Backend: GET /api/v1/m7/iv_band_best_combo
 //   ?ranking=<primary>           default avg_net_pnl
@@ -23,6 +23,7 @@ import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import {
   fetchM7IvBandBestCombo,
   type FetchBestComboArgs,
+  type M7Dataset,
   type M7IvBandBestComboResponse,
   type M7IvBandBestComboRow,
   type M7Ranking,
@@ -294,7 +295,20 @@ function LoadingBar({ visible }: { visible: boolean }) {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export function M7IvBandBestComboTable() {
+interface M7IvBandBestComboTableProps {
+  // Joint Δ+Price-match dataset toggle. Default = today's pure-Δ behavior.
+  dataset?: M7Dataset;
+  // Accepted but currently ignored at the table level — kept so the dashboard
+  // can forward it without a type error. The lifted-up selection wiring is
+  // pre-existing.
+  onSelectionsChange?: (rows: M7IvBandBestComboRow[]) => void;
+}
+
+export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) {
+  const { dataset } = props;
+  // onSelectionsChange is accepted but not wired up here yet — kept on Props
+  // so the dashboard can pass it without a type error.
+  void props.onSelectionsChange;
   const [primary, setPrimary] = useState<M7Ranking>(
     () => loadLS('primary', 'avg_net_pnl'));
   const [family, setFamily] = useState<M7RuleFamily>(
@@ -455,7 +469,7 @@ export function M7IvBandBestComboTable() {
       if (expiryFilter.length > 0) args.expiry_buckets = expiryFilter;
       if (deltaFilter.length > 0) args.delta_targets = deltaFilter;
       if (hourFilter.length > 0) args.entry_hours = hourFilter;
-      fetchM7IvBandBestCombo(args, ac.signal)
+      fetchM7IvBandBestCombo(args, ac.signal, undefined, undefined, undefined, dataset)
         .then(r => {
           if (!active) return;
           setResp(r);
@@ -485,7 +499,8 @@ export function M7IvBandBestComboTable() {
       sizingMode, fixedLots,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode,
-      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter)]);
+      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter),
+      dataset]);
 
   // Same args we send to /iv_band_best_combo so the missed-Fridays panel
   // below computes its picks against the user's exact filter/sizing state.
@@ -547,7 +562,7 @@ export function M7IvBandBestComboTable() {
           <span style={{
             fontSize: 11, fontWeight: 400, color: '#7a9bb5', marginLeft: 10,
           }}>
-            96 rule variants × 7 expiries × 8 deltas. Pick the (expiry · Δ ·
+            105 rule variants × 7 expiries × 8 deltas. Pick the (expiry · Δ ·
             exit rule) that wins per IV band on the chosen score.
           </span>
         </div>
@@ -919,7 +934,7 @@ export function M7IvBandBestComboTable() {
             Computing the full sweep ({resp?.rules_done ?? 0} / {resp?.rules_total ?? 96} rules done)
           </div>
           <div>
-            96 exit-rule variants × 10 IV bands × 7 expiries × 8 deltas.
+            105 exit-rule variants × 10 IV bands × 7 expiries × 8 deltas.
             <br />
             First load after backend restart takes ~45 minutes; subsequent loads are instant.
           </div>
@@ -1314,7 +1329,7 @@ export function M7IvBandBestComboTable() {
           )}
         </div>
       )}
-      <M7BestComboMissedFridaysTable args={missedFridaysArgs} />
+      <M7BestComboMissedFridaysTable args={missedFridaysArgs} dataset={dataset} />
       {drilldown && (
         <M7RuleComparisonModal
           band={drilldown.band}

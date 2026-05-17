@@ -60,9 +60,10 @@ _GRID_FALLBACK_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v4.parqu
 #   = 32 variants per SL × 3 SLs = 96 total rule variants.
 _PREMIUM_SL_PCTS = [50, 75, 100]
 _PCT_GRID = [10, 15, 20, 25, 30, 40, 50, 60, 75, 100]
-# Hourly Saturday exits 8 AM..5 PM IST + 5:29 PM (just before settlement).
+# Hourly Saturday exits 5 AM..5 PM IST + 5:29 PM (just before settlement).
 # 17.4833 = 17h + 29m / 60 — the engine accepts decimal hours.
-_FIXED_HOURS: list[float] = [8.0, 9.0, 10.0, 11.0, 12.0, 13.0,
+_FIXED_HOURS: list[float] = [5.0, 6.0, 7.0,
+                              8.0, 9.0, 10.0, 11.0, 12.0, 13.0,
                               14.0, 15.0, 16.0, 17.0, 17.4833]
 
 
