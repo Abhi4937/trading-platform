@@ -5,16 +5,21 @@ no grid build. Fast (~1s total).
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from app.api.m7_best_combo_hybrid import (
     _CAPITAL_SL_PCTS,
+    _checkpoint_path,
     _flatten_for_parquet,
     _label_to_category,
+    _load_checkpoint,
     _rule_variants_hybrid,
     _unflatten_after_load,
+    _write_checkpoint,
 )
 
 
@@ -260,3 +265,76 @@ def test_flatten_unflatten_preserves_1729_hour(tmp_path):
     loaded = _unflatten_after_load(pd.read_parquet(out_path))
     restored_rule = loaded.iloc[0]["rule"]
     assert restored_rule["fixed_exit_hour_ist"] == pytest.approx(17.4833, abs=1e-5)
+
+
+# ── Checkpoint round-trip ────────────────────────────────────────────────────
+
+def _sample_rows(rule_labels):
+    """Build a list of cell-row dicts for a set of rule labels."""
+    return [
+        {"rule_label": lbl,
+         "rule": {"premium_sl_pct": 50.0},
+         "rule_category": "single_baseline",
+         "iv_band": "30-40", "expiry_bucket": "current_sat",
+         "delta_target": 0.30, "entry_hour_ist": 23,
+         "avg_net_pnl": 1.5, "n_trades": 10}
+        for lbl in rule_labels
+    ]
+
+
+def test_checkpoint_path_is_partial_suffix(tmp_path):
+    """Default checkpoint path is the grid path with .partial appended."""
+    cp = _checkpoint_path("/foo/bar.parquet")
+    assert cp == "/foo/bar.parquet.partial"
+
+
+def test_write_then_load_checkpoint_roundtrip(tmp_path):
+    """Write 3 rules' rows, load — get back the same labels + payload."""
+    cp = str(tmp_path / "grid.parquet.partial")
+    rows = _sample_rows(["sl50_baseline", "sl75_baseline", "capital_sl_15"])
+    _write_checkpoint(rows, cp)
+    assert os.path.exists(cp)
+
+    completed, loaded_rows = _load_checkpoint(cp)
+    assert completed == {"sl50_baseline", "sl75_baseline", "capital_sl_15"}
+    assert len(loaded_rows) == 3
+    # Each loaded row has a `rule` dict reconstructed from flat columns
+    for r in loaded_rows:
+        assert isinstance(r["rule"], dict)
+        assert r["rule"].get("premium_sl_pct") == 50.0
+
+
+def test_load_checkpoint_missing_returns_empty(tmp_path):
+    """Loading a non-existent checkpoint returns empty set + list."""
+    cp = str(tmp_path / "nonexistent.partial")
+    completed, rows = _load_checkpoint(cp)
+    assert completed == set()
+    assert rows == []
+
+
+def test_load_checkpoint_empty_df_returns_empty(tmp_path):
+    """An empty .partial parquet should produce empty resume state."""
+    cp = str(tmp_path / "grid.parquet.partial")
+    pd.DataFrame().to_parquet(cp, index=False)
+    completed, rows = _load_checkpoint(cp)
+    assert completed == set()
+    assert rows == []
+
+
+def test_write_checkpoint_empty_rows_is_noop(tmp_path):
+    """Writing an empty row list doesn't create a partial file."""
+    cp = str(tmp_path / "grid.parquet.partial")
+    _write_checkpoint([], cp)
+    assert not os.path.exists(cp)
+
+
+def test_checkpoint_is_atomic(tmp_path):
+    """Second write fully replaces the first — no leftover .tmp file."""
+    cp = str(tmp_path / "grid.parquet.partial")
+    _write_checkpoint(_sample_rows(["sl50_baseline"]), cp)
+    _write_checkpoint(_sample_rows(["sl50_baseline", "sl75_baseline"]), cp)
+
+    completed, _rows = _load_checkpoint(cp)
+    assert completed == {"sl50_baseline", "sl75_baseline"}
+    # No stray .tmp left behind
+    assert not os.path.exists(cp + ".tmp")

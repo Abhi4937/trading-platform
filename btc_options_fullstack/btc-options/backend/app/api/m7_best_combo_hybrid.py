@@ -161,20 +161,75 @@ def _label_to_category(label: str) -> RuleCategory:
 _BUILD_LOCK = threading.Lock()
 
 
-def _build_grid_hybrid(progress_cb=None) -> pd.DataFrame:
+def _checkpoint_path(grid_path: str = GRID_PARQUET_PATH) -> str:
+    return grid_path + ".partial"
+
+
+def _write_checkpoint(rows: list[dict], checkpoint_path: str) -> None:
+    """Atomic flush of accumulated cell rows to the .partial parquet.
+    Safe to call repeatedly — each write overwrites the prior file."""
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    flat = _flatten_for_parquet(df)
+    tmp = checkpoint_path + ".tmp"
+    flat.to_parquet(tmp, compression="zstd", index=False)
+    os.replace(tmp, checkpoint_path)
+
+
+def _load_checkpoint(checkpoint_path: str) -> tuple[set[str], list[dict]]:
+    """Load a .partial parquet if present. Returns (completed_rule_labels,
+    accumulated_row_dicts). Empty set + empty list if no checkpoint."""
+    if not os.path.exists(checkpoint_path):
+        return set(), []
+    df = pd.read_parquet(checkpoint_path)
+    if df.empty or "rule_label" not in df.columns:
+        return set(), []
+    df = _unflatten_after_load(df)
+    completed = set(df["rule_label"].astype(str).unique())
+    rows = df.to_dict(orient="records")
+    return completed, rows
+
+
+def _build_grid_hybrid(progress_cb=None,
+                       checkpoint_every: int = 25,
+                       checkpoint_path: str | None = None) -> pd.DataFrame:
     """Build the 243-rule hybrid grid against the delta-match trade dataset.
 
     Each rule's exit results are derived via m7r._derive_exits (which
     already handles capital_sl_pct in its SQL builder). Per-rule cache
     eviction mirrors bc._build_grid to keep peak memory bounded.
 
-    `progress_cb(rules_done, rules_total)` is called after each rule.
+    Checkpointing: every `checkpoint_every` newly-completed rules, the
+    accumulated cells are flushed atomically to `checkpoint_path`
+    (default: `GRID_PARQUET_PATH + '.partial'`). On entry, if that
+    checkpoint exists, its `rule_label`s are skipped to resume an
+    interrupted build. Caller is responsible for removing the
+    checkpoint after the final atomic write (build script does so).
+
+    `progress_cb(rules_done, rules_total)` is called after each rule
+    (counting skipped-from-checkpoint rules too).
     """
-    rows: list[dict] = []
+    if checkpoint_path is None:
+        checkpoint_path = _checkpoint_path()
+
     variants = _rule_variants_hybrid()
     base_keys = list(bc._BASE_GROUP_KEYS)  # (iv_band, expiry, delta, hour)
 
+    completed_labels, rows = _load_checkpoint(checkpoint_path)
+    if completed_labels:
+        log.info("Resuming hybrid build from checkpoint: %d/%d rules "
+                 "already complete, %d cells accumulated",
+                 len(completed_labels), len(variants), len(rows))
+
+    n_done_this_run = 0
+
     for i, (rule_label, rule_dict, rule_category) in enumerate(variants):
+        if rule_label in completed_labels:
+            if progress_cb is not None:
+                progress_cb(i + 1, len(variants))
+            continue
+
         # Track whether the rule's exits were already cached before our
         # call — we want to evict only entries we populated ourselves.
         m7r._load_trades("delta_match")
@@ -221,6 +276,13 @@ def _build_grid_hybrid(progress_cb=None) -> pd.DataFrame:
         if not was_cached_before:
             m7r._EXIT_CACHE.pop(rule_key, None)
         del derived
+
+        n_done_this_run += 1
+        if checkpoint_every > 0 and n_done_this_run % checkpoint_every == 0:
+            _write_checkpoint(rows, checkpoint_path)
+            log.info("Hybrid checkpoint written at rule %d/%d "
+                     "(%d cells accumulated)",
+                     i + 1, len(variants), len(rows))
 
     if not rows:
         return pd.DataFrame()

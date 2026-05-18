@@ -75,6 +75,14 @@ def main() -> int:
     print(f"  Persisting to:  {m7bch.GRID_PARQUET_PATH}", flush=True)
     n_rows = m7bch.save_grid(grid)
 
+    # Final atomic write succeeded — remove the .partial checkpoint so the
+    # next build doesn't resume from stale state.
+    import os as _os
+    cp = m7bch._checkpoint_path()
+    if _os.path.exists(cp):
+        _os.remove(cp)
+        print(f"  Removed checkpoint: {cp}", flush=True)
+
     elapsed = time.time() - _START
     print(f"\n  Done in {elapsed/60:.1f} min. {n_rows:,} rows written.",
           flush=True)
