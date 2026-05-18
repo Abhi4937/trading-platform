@@ -5,5 +5,6 @@ router = APIRouter()
 
 
 @router.get("/health")
+@router.get("/healthz")
 async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}

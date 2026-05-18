@@ -51,7 +51,7 @@ async def chain_ws(websocket: WebSocket, expiry: str = Query(...)):
                     expiry, source, compute_ms, elapsed_since_last, push_count,
                 )
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         logger.info("WS DISCONNECT expiry=%s  total_pushes=%d", expiry, push_count)
     except Exception as e:

@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 WS_URL = "wss://socket.india.delta.exchange"
 
 async def _periodic_product_refresh(ws: websockets.WebSocketClientProtocol, symbols_set: set[str]) -> None:
-    """Background task to fetch full product list every 10 mins and subscribe to new symbols."""
+    """Background task to fetch full product list every 30 mins and subscribe to new symbols."""
     client = get_delta_client()
     while True:
         try:
-            # Wait 10 minutes between full refreshes
-            await asyncio.sleep(600)
+            # Wait 30 minutes between full refreshes
+            await asyncio.sleep(1800)
             
             logger.info("Starting background full product fetch...")
             full_products = await client.get_btc_option_products(max_pages=20)
