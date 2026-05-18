@@ -1,9 +1,240 @@
 # Handoff Log
 
 ## Last Session
-**Who:** Claude (Opus 4.7 orchestrator + Sonnet 4.6 sub-agents for coding/tests)
-**Date:** 2026-05-17 (Session 29 — M7 Friday-Band MTM Overlay panel)
+**Who:** Claude (Opus 4.7)
+**Date:** 2026-05-18 (Session 32 — 243-rule hybrid scaffolding committed; plans rewritten for strict separation)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 32 — Shipped (committed)
+
+**Commit `501699b`** — `feat(M7): 243-rule hybrid scaffolding — rule menu, builder, router, tests`. 4 NEW files + scoped main.py router registration. No canonical files modified.
+
+Files committed:
+- `backend/app/api/m7_best_combo_hybrid.py` — 243-rule menu, grid builder, parquet I/O. Uses 3-tuple cache key `(dataset, rule_json, mtime)` matching canonical `_EXIT_CACHE` shape.
+- `backend/app/api/m7_hybrid_results.py` — FastAPI router exposing `/api/v1/m7_hybrid/{status, iv_band_best_combo, rule_comparison, categories}`. Reuses canonical `bc._pick_best_per_band` / `bc._records`. Accepts `?categories=` CSV filter so the same 243-rule grid can serve as 105/108/117/231/243 views per toggle.
+- `backend/app/scripts/build_m7_best_combo_grid_hybrid.py` — one-shot grid builder (RULE #5 separate-container launch).
+- `backend/tests/test_m7_best_combo_hybrid.py` — 16 tests (rule count, category breakdown, no max_profit/margin_target with cap_sl, label→category roundtrip, 17:29 fractional-hour preservation, parquet flatten/unflatten roundtrip). 16/16 pass.
+- `backend/app/main.py` — only the hybrid router import + `include_router` line. Other working-tree hunks (joint_match router, chain-cache pre-warm) left unstaged for the session that owns them.
+
+**Bug fixed this turn (caught by code-audit sub-agent)**:
+- `_build_grid_hybrid` cache key was a 2-tuple but canonical `_EXIT_CACHE` shape changed to 3-tuple `(dataset, rule_json, mtime)`. Eviction was a no-op → would have caused unbounded memory growth across the ~7h serial build. Patched at `m7_best_combo_hybrid.py:181-186` before commit.
+
+**Plan files rewritten for strict separation** (`/home/abhis/.claude/plans/`):
+- `hybrid-build-current-session.md` — refocused as status-aware reference; §3/§5/§6 marked ✅ shipped; §7 (frontend filter chip) and grid build are remaining work.
+- `108-rule-build-next-session.md` — rewritten so the parallel session writes only new files: `m7_best_combo_108.py`, `m7_108_results.py`, `build_m7_best_combo_grid_108.py`, `test_m7_best_combo_108.py`, output `m7_best_combo_grid_v6_108.parquet`, mounted at `/api/v1/m7_108`. cap_sl SQL is already in canonical `_compute_all_exits:445-454`, so no SQL coding is needed by that session.
+
+**Endpoint smoke-tested** post-backend rebuild:
+- `/api/v1/m7_hybrid/status` → `{status: missing, …}` (grid not built yet — expected)
+- `/api/v1/m7_hybrid/categories` → 7 categories listed, counts=0, status=missing
+- `/api/v1/m7_hybrid/iv_band_best_combo` → 503 grid-missing (expected until build runs)
+
+**Remaining for this thread (or a follow-up session)**:
+1. Frontend: NEW `M7HybridRuleCategoryFilter.tsx` + `m7_hybrid_api.ts` + mount in dashboard.
+2. Grid build (~7h serial, RULE #5 container) — **gated** on `m7_trades.parquet` reaching 125 fridays. Currently 123 — blocked on btc-collector spot middle-gap fill (2026-05-02 → 05-15), owned by the parallel 108-rule session's Phase E2.
+
+### Session 31 — IN-FLIGHT (PARALLEL with Session 31b)
+
+### Session 31 — context that led into Session 32
+
+**TWO PARALLEL Claude sessions are running** as of 2026-05-17:
+
+- **Session 31a** (other window, "108-rule incremental"):
+  - Plan: `/home/abhis/.claude/plans/108-rule-build-next-session.md`
+  - Scope: add 3 standalone cap_sl rules (10/15/20%) → 108 rules × 125 fridays
+  - Owns: `m7_best_combo.py`, `m7_best_combo_grid_v6.parquet`,
+    `M7IvBandBestComboTable.tsx`, etc.
+
+- **Session 31b** (this window, "243-rule hybrid"):
+  - Plan: `/home/abhis/.claude/plans/hybrid-build-current-session.md`
+  - Scope: 243 rules = 105 existing + 3 standalone cap_sl +
+    9 cap_sl×premium_sl + 126 cap_sl×premium_sl×exit_hr.
+    NO max_profit / margin_target in hybrid combinations.
+  - Owns: NEW `m7_best_combo_hybrid.py`,
+    `m7_best_combo_grid_v6_hybrid.parquet`,
+    `build_m7_best_combo_grid_hybrid.py`,
+    `test_m7_best_combo_hybrid.py`,
+    `M7HybridRuleCategoryFilter.tsx`.
+
+**Shared coordination**:
+- Both need `m7_results.py:_compute_all_exits` to handle cap_sl SQL.
+  Path A (default): Session 31a lands it first; 31b pulls/rebases.
+- Both need `m7_trades.parquet` at 125 fridays. Session 31a runs Phase E2
+  (add 05-08 + 05-15) after user's btc-collector fills the spot middle-gap.
+  Session 31b waits.
+
+For broader context (state snapshot, all phases, what's deferred):
+`/home/abhis/.claude/plans/glowing-painting-raven-next-session-handoff.md`
+
+**This session shipped:**
+
+1. **B1 — `m7_batch_backtester.py` append/merge logic** (uncommitted):
+   - New `_write_trades_atomic(new_rows, out_path, *, append)` helper
+     with idempotent friday-replace merge
+   - CLI flags `--append` and `--rebuild` (refuses to overwrite without
+     explicit flag when target exists; `--rebuild` takes precedence)
+   - 14 new tests in `backend/tests/test_m7_batch_backtester_append.py`,
+     all passing; 27 pre-existing `test_m7_batch.py` tests still green
+
+2. **End-to-end plan** `/home/abhis/.claude/plans/glowing-painting-raven.md`
+   (supersedes `m7-hybrid-rules-end-to-end.md`):
+   - Phases A→G prerequisites (btc-collector, M1, M2, M3, snapshots,
+     trade refresh, IV-slope re-enrich, interim 105-rule rebuild)
+   - Phase H+ cross-references prior plan for hybrid coding/sweep
+   - User-decided: full enrichment chain (NOT skip), manual gate
+     after phases 1–3, interim 105-rule rebuild, MTF expansion deferred,
+     per-bar greeks pre-baking skipped
+
+3. **Scope simplified through 4 iterations** (Task #22, FINAL):
+   - Iteration 1: 5,445 rules (hybrid sweep, all triples)
+   - Iteration 2: 240 rules (hybrid: exit_hr × cap_sl only)
+   - Iteration 3: 114 rules (cap_sl combined with each premium_sl)
+   - **Iteration 4 (FINAL): 108 rules — incremental-only, no hybrids**
+   - Just adds 3 STANDALONE cap_sl rules:
+     - `capital_sl_10`, `capital_sl_15`, `capital_sl_20`
+     - Each has ONLY `capital_sl_pct` set; no premium_sl, no TP, no exit_hr
+   - Existing 105 rules unchanged
+   - Total grid: 125 fridays × 108 rules. Build ~3-3.2h.
+   - Any combination of cap_sl with premium_sl or with the 4 existing
+     family-variants (max_profit, margin_target, exit_hr, baseline) is
+     a HYBRID — explicitly DEFERRED to a future hybrid session.
+
+**Data work executed:**
+- ✅ btc-collector run by user — bar data extended through 2026-05-17 18:25 UTC
+- ✅ Phase B verified bar coverage (spot ≥ Sat 2026-05-16 12:00 UTC ✓)
+- ✅ Phase C.1 — M1 spot enrichment, `spot_enriched.parquet`
+  ts max = 2026-05-17 18:25 UTC
+- ✅ Phase D — snapshots already present at
+  `~/btc-data/snapshots/pre-hybrid-2026-05-17/` (49 MB, 3 parquets)
+- 🔄 Phase C.2 — M2 options enrichment **may still be running** at handoff
+  time. Container `m2-enrich-1779047312`. Pre-step wiped 17 stale
+  checkpoints (post-2026-04-21 expiries).
+- ⏳ Phases C.3 / E / F — not yet started (depend on M2)
+- ⏳ Phase G (interim 105-rule rebuild) — **DEFERRED to new session** per
+  user request
+
+**Open design question for new session:**
+- Capital-SL trigger evaluation: pre-compute at default $600 capital (simple,
+  fits existing pipeline) vs apply at picker time (capital-aware but needs
+  significant refactor). Recommend Option A for first cut.
+
+**Parallel container (separate from this work):**
+- `m7-joint-full-backfill-1779044018` — Session 30's joint Δ+price-matched
+  backtester, ~5-6h remaining as of handoff. Writes to a separate parquet
+  path; won't conflict.
+
+### Files changed this session (uncommitted)
+
+- `backend/app/analytics/m7_batch_backtester.py` — B1 (append/merge logic)
+- `backend/tests/test_m7_batch_backtester_append.py` — NEW (14 tests)
+- `HANDOFF.md` — this update
+
+### Plans + handoff docs
+
+- `/home/abhis/.claude/plans/glowing-painting-raven.md` — authoritative
+  end-to-end plan (revised scope captured in Task #22)
+- `/home/abhis/.claude/plans/glowing-painting-raven-next-session-handoff.md`
+  — start-here for the new session
+
+---
+
+## Previous: Session 30 — M7 joint Δ+price-matched strangle variant
+
+### Session 30 highlights — uncommitted
+
+1. **NEW STRIKE-PICKING DATASET**: alongside today's pure-delta-matched
+   M7 strangle sweep, a parallel "joint Δ+price-matched" variant exists.
+   For each (Friday × hour × expiry × delta_target), the joint picker
+   walks both CE and PE strike candidates inside a `±0.05Δ` window
+   (auto-widened for low-Δ targets via `max(0.05, 0.5×target)`) and
+   picks the (CE_strike, PE_strike) pair minimising
+   `|call_mark − put_mark|`. Accepted iff
+   `gap / mean(mark) ≤ 0.15`. When the joint match would land at
+   `mean_mark < $1` (deep wing dust) → forced fallback. Else fallback
+   to today's pure-delta pick. `match_mode` column distinguishes.
+
+2. **Files (NEW, uncommitted):**
+   - `backend/app/analytics/m7_strike_picker_joint.py`
+   - `backend/app/analytics/m7_batch_backtester_joint.py` (with
+     `--append`, `--joint-delta-tol`, `--joint-price-tol-pct`)
+   - `backend/app/api/m7_joint_match_stats.py` (`GET /api/v1/m7/joint_match_stats`)
+   - `backend/app/scripts/build_m7_best_combo_grid_price_matched.py`
+   - `backend/tests/test_m7_joint_match.py` — 9/9 passing
+   - `frontend/src/components/m7/M7JointMatchStats.tsx` (KPI cards
+     wrapped in a `JointStatsBoundary` error boundary)
+
+3. **Files (MODIFIED, uncommitted):**
+   - `backend/app/api/m7_results.py` — `_TRADES_BY_DATASET` dict;
+     `_EXIT_CACHE` keyed by `(dataset, rule_key, mtime)`; `dataset`
+     query param on `/heatmap`, `/missed_fridays`, `/iv_band_summary`,
+     `/best_combo_markers`, `/best_combo`, `/leg_attribution`,
+     `/leg_skew_heatmap`, `/cost_breakdown`, `/cell_winners_vs_losers`,
+     `/losses_distribution` (universe + cells + best-combo paths),
+     `/cell_worst_fridays`, `/trade_diagnostic`, `/trade_context_ohlc`,
+     `/path`, `/aggregate`, `/trades`, `/meta`, `/summary`. New
+     `match_mode`, `price_diff_usd`, `price_diff_pct`,
+     `delta_diff_call`, `delta_diff_put` cols added to
+     `keep_trade_cols` whitelist (gated by `if c in trades.columns`).
+   - `backend/app/api/m7_best_combo.py` — `_GRID_STATE_BY_DATASET`
+     dict; `_BUCKETED_GRIDS` keyed by `(dataset, tab)`;
+     `_COVERAGE_CACHE` prefix-keyed; `dataset` on `/iv_band_best_combo`,
+     `/status`, `/rule_comparison`, `/cross_band_check`,
+     `/single_combo_simulation`, `/missed_fridays`,
+     `/missed_fridays_force_fit`, `/coverage`.
+   - `backend/app/api/m7_full_coverage.py` — `dataset` on
+     `/iv_band_full_coverage`.
+   - `backend/app/main.py` — joint_match_stats router registered.
+   - `frontend/src/services/m7_api.ts` — `M7Dataset` type + flat-shape
+     `M7JointMatchStatsResponse`; `dataset?` param on every M7 fetch.
+   - `frontend/src/pages/M7SweepDashboard.tsx` — 2-button toggle
+     `◆ Δ-match / ◆ Δ+Price match`, persisted under `m7:dataset`
+     with defensive whitelist validation. `JointStatsBoundary`
+     wraps the stats panel.
+   - 5 child M7 components accept `dataset` prop: `M7IvBandBestComboTable`,
+     `M7BestComboCoverageTable`, `M7BestComboPathMarkers`,
+     `M7LossesExplorer`, `M7BestComboMissedFridaysTable`.
+
+4. **Data on disk:**
+   - `~/btc-data/derived/m7/m7_trades_price_matched.parquet` — populated
+     by the full backfill kicked off in detached container
+     `m7-joint-full-backfill-1779044018` (log
+     `/home/abhis/btc-data/logs/m7_joint_full_1779044018.log`). 121
+     Fridays × 7 hours × ~5 expiries × 8 deltas. Expected runtime
+     ~25-30 min based on first-Friday timing (~13s/friday).
+   - `~/btc-data/derived/m7/m7_paths_price_matched/friday_date=YYYY-MM-DD/part.parquet` —
+     Hive-partitioned. Append-safe out of the box.
+   - `~/btc-data/derived/m7/m7_best_combo_grid_v6_price_matched.parquet` —
+     **NOT yet built**. Run
+     `python -m app.scripts.build_m7_best_combo_grid_price_matched`
+     in a detached `docker compose run -d --rm` container (~4-5h).
+     Until then, `dataset=price_match` on `/iv_band_best_combo` returns
+     `status:no_data`.
+
+5. **Defaults preserved**: every `dataset` query param defaults to
+   `"delta_match"`. Existing API callers without the param behave
+   exactly as today. Frontend toggle defaults to Δ-match on first
+   mount, validated against `["delta_match","price_match"]` to ignore
+   stale localStorage values.
+
+6. **Verification trail (all passing as of this writing)**:
+   - 9/9 unit tests in `test_m7_joint_match.py`
+   - Smoke import: `from app.api import m7_results, m7_best_combo,
+     m7_full_coverage, m7_joint_match_stats; from app.main import app`
+   - Stats endpoint flat shape verified, ascending sort confirmed
+   - Frontend TS build clean (no NEW errors beyond the pre-existing
+     baseline of BacktestForm.tsx + 5 unrelated M7 tables)
+   - Playwright toggle round-trip — Δ-match (34,166 trades) ↔
+     Δ+Price match (216 trades on the test backfill, 206 joint / 10
+     fallback) — no crash, panel renders with correct counts.
+
+### ⚠️ Pre-existing RULE #3 invariant violation (NOT from this feature)
+
+`scripts/margin_engine.py:124` and `frontend/src/utils/marginEngine.ts:152`
+have `SAFETY_BUFFER_PCT` lowered from `0.20 → 0.10` in the working tree.
+CLAUDE.md RULE #3 explicitly forbids reducing this buffer without
+fresh UI re-verification. These changes are **uncommitted, predate
+Session 30**, and were left untouched throughout this session.
+**Do NOT co-commit with the joint-match feature** until empirically
+re-verified against multiple lot sizes in the Delta UI, OR reverted.
 
 ### Session 29 highlights — uncommitted
 

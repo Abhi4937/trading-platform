@@ -1,5 +1,120 @@
 # Claude's Work Log
 
+## Session 32 (2026-05-18) — 243-rule hybrid scaffolding committed (501699b)
+
+### What and why
+
+Continued the 243-rule hybrid work from Session 31. Goal was to land the
+hybrid scaffolding (rule menu + grid builder + router + tests) on the
+canonical branch without modifying any canonical files, so the parallel
+108-rule session can ship independently.
+
+User explicitly requested **strict file separation**: the two parallel
+sessions must share NO mutable files. Both write entirely new files;
+both treat `m7_best_combo.py` and `m7_results.py` as read-only imports.
+
+### What landed
+
+**Commit `501699b`** — 4 new files + scoped `main.py` router include:
+- `backend/app/api/m7_best_combo_hybrid.py` (311 lines) — `_rule_variants_hybrid()` returning 243 (label, rule_dict, category) tuples across 7 categories, `_build_grid_hybrid()` mirroring canonical builder, parquet flatten/unflatten with float-safe `fixed_exit_hour_ist=17.4833` round-trip.
+- `backend/app/api/m7_hybrid_results.py` — router at `/api/v1/m7_hybrid/*` with `?categories=` CSV filter applied before picker selection. Reuses canonical `bc._pick_best_per_band` / `bc._records`.
+- `backend/app/scripts/build_m7_best_combo_grid_hybrid.py` — one-shot builder with per-rule progress callback.
+- `backend/tests/test_m7_best_combo_hybrid.py` — 16 tests, all green. Validates 243-rule count, 7-category breakdown (3/30/30/42/3/9/126), no max_profit/margin_target with cap_sl, label→category roundtrip, 17:29 fractional-hour preservation, parquet roundtrip.
+- `backend/app/main.py` — only the hybrid router import + include line. Working tree's other hunks (joint_match router, chain-cache pre-warm) left unstaged via crafted patch + `git apply --cached`.
+
+### Bug caught + fixed by audit sub-agent
+
+A Sonnet sub-agent ran static review + endpoint smoke tests in parallel with the backend rebuild and surfaced one real bug:
+
+`_build_grid_hybrid` constructed a 2-tuple cache key `(rule_json, mtime)`, but canonical `_EXIT_CACHE` shape changed (this session) to a 3-tuple `(dataset, rule_json, mtime)`. The eviction at `m7_best_combo_hybrid.py:220` was therefore a no-op — entries added during the build would never be evicted, causing unbounded memory growth across the ~7h serial run.
+
+Fixed at `m7_best_combo_hybrid.py:181-186`: now constructs the proper 3-tuple keyed on `"delta_match"` + the dataset-scoped mtime from `_TRADES_BY_DATASET`. 16/16 tests still pass.
+
+### Plans rewritten for strict separation
+
+Both plan files in `/home/abhis/.claude/plans/`:
+- `hybrid-build-current-session.md` — refocused as a status-aware reference; §3 (rule menu) / §5 (build script) / §6 (router) marked ✅ shipped. §4 updated to note cap_sl SQL is already in canonical `_compute_all_exits:445-454` — no coordination needed.
+- `108-rule-build-next-session.md` — rewritten so the parallel session writes only new files (no canonical edits). Owns: `m7_best_combo_108.py`, `m7_108_results.py`, `build_m7_best_combo_grid_108.py`, `test_m7_best_combo_108.py`, output `m7_best_combo_grid_v6_108.parquet`, mounted at `/api/v1/m7_108`. Explicitly calls out the 3-tuple cache-key shape so that session doesn't repeat the bug this session just fixed.
+
+### What's still pending
+
+- Frontend: NEW `M7HybridRuleCategoryFilter.tsx` + `m7_hybrid_api.ts` + mount in M7 dashboard.
+- Grid build (~7h serial) — gated on trades parquet reaching 125 fridays. Currently 123. The 2 missing fridays (05-08, 05-15) are blocked on the parallel 108-rule session's Phase E2, which itself is blocked on btc-collector filling the spot 1m middle-gap (2026-05-02 → 05-15).
+
+## Session 30 (2026-05-17) — M7 joint Δ+price-matched strangle variant (uncommitted)
+
+### What and why
+
+User asked: "currently we have strangle were we match delta but i want the
+setup also where we match price so match based on delta and price total
+trades we have 34K around trades combo and total 105 other combinations".
+Clarified: goal is a single strangle per cell where both legs jointly
+minimise premium asymmetry while keeping `|delta|` near target. Example:
+at 0.50Δ if ATM gives CE 0.48Δ@$650 and PE 0.52Δ@$730, the picker should
+walk PE OTM to ~0.46Δ where the mark drops to $630–670 so both legs
+collect comparable credit. "105 other combinations" turned out to be the
+105 rule-variants × 7 expiries × 8 deltas grid the Best Combo dashboard
+ranks against — the new dataset feeds that same machinery for direct A/B
+comparison.
+
+### Workflow
+
+Used a strict agent pipeline per CLAUDE.md per-phase model assignment:
+- **Plan-review (Opus 4.7, fresh ctx)** — APPROVE WITH FIXES; bumped
+  tolerance 10% → 15% to catch the user's worked example, called out
+  cache-singleton thrash on toggle, 13 silently-leaking endpoints,
+  missing side-by-side compare mode, RULE #5 grid-build invocation form.
+- **Coding-A (Opus 4.7)** — strike picker + backtester + tests; stream
+  timed out after core algorithm landed.
+- **Coding-B (Opus 4.7)** — stats endpoint, dataset toggle on
+  m7_results / m7_best_combo / m7_full_coverage, cache key refactor.
+  8/8 new tests green.
+- **Coding-frontend (Opus 4.7)** — `m7_api.ts` dataset param,
+  M7SweepDashboard 2-button toggle, `M7JointMatchStats` KPI panel,
+  threaded `dataset` prop into 5 child components.
+- **Testing (Sonnet 4.6)** — pytest 8/8; small backfill (1 friday × 2
+  expiries = 106 trades); fallback-identity check against existing
+  parquet (4/4 fallback rows match strikes + marks exactly);
+  `--append` idempotence check; Playwright. Caught TWO BLOCKERs:
+  1. `delta_target` returned as string → `.toFixed()` blanks dashboard.
+  2. `_compute_all_exits` keep-list dropped `match_mode` etc. → stats
+     endpoint mis-classified all 216 trades as joint.
+- **Direct fixes (in main session)** — `isinstance` widening to accept
+  `float, int`; added the 5 joint columns to `keep_trade_cols`; wrapped
+  stats panel in a `JointStatsBoundary` error boundary.
+- **Code review (Opus 4.7, fresh ctx)** — REJECT. Caught 3 NEW BLOCKERs:
+  payload shape mismatch with frontend types, `_GRID_STATE` not
+  per-dataset, cells-mode `_EXIT_CACHE` key 2-tuple vs 3-tuple. Plus 13
+  endpoints with `dataset`-accepting helpers but no route-level param.
+  Plus the missing grid-build script. Plus flagged the pre-existing
+  RULE #3 violation in `scripts/margin_engine.py` and
+  `frontend/src/utils/marginEngine.ts` where `SAFETY_BUFFER_PCT` was
+  lowered 0.20 → 0.10 (unrelated to this feature — must NOT be
+  co-committed).
+- **Fix-it (Opus 4.7)** — flattened stats payload, partitioned
+  `_GRID_STATE_BY_DATASET` / `_BUCKETED_GRIDS` / `_COVERAGE_CACHE` by
+  dataset, fixed cells cache key, threaded 13 endpoints, added $1
+  mean-mark floor + new picker test, sorted stats rows ascending,
+  wrote the price-matched grid build script (236 LOC). 9/9 tests green.
+
+### Files
+
+See HANDOFF.md "Session 30 highlights" for the full file list. Headline:
+joint-match dataset machinery is wired end-to-end, 2-button toggle works
+in the Playwright-driven UI, all backend caches correctly per-dataset.
+Grid build script exists but has NOT been run yet. Full backfill of 121
+Fridays running in detached container `m7-joint-full-backfill-1779044018`
+as of session end.
+
+### Pre-existing concerns flagged for user
+
+- **RULE #3**: `SAFETY_BUFFER_PCT` halved in BOTH margin engines from
+  a prior session. Must be reverted OR empirically re-verified against
+  Delta UI at multiple lot sizes before any commit touching those files.
+- **Compare side-by-side mode**: planned, deferred to v1.5.
+- **M7FridayBandDashboard toggle**: planned, deferred — Friday-Band
+  reads same trades parquet so threading is straightforward later.
+
 ## Session 29 (2026-05-17) — M7 Friday-Band MTM Overlay panel (uncommitted)
 
 ### What and why

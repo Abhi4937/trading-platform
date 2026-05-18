@@ -2,6 +2,88 @@
 
 ## Active Projects
 
+- **M7 243-rule hybrid scaffolding (Session 32, 2026-05-18, COMMITTED `501699b`):**
+  - 4 new files + scoped `main.py` router include. 243 rules =
+    105 existing singles + 3 standalone cap_sl + 9 cap_sl×premium_sl
+    2-way + 126 cap_sl×premium_sl×exit_hr 3-way. `rule_category` tag
+    on each cell so the same grid serves as 105/108/117/231/243 views
+    via the `?categories=` CSV filter on
+    `/api/v1/m7_hybrid/iv_band_best_combo`.
+  - **Backend**: `backend/app/api/m7_best_combo_hybrid.py` (rule menu +
+    grid builder + parquet I/O, 3-tuple cache key matching canonical
+    `_EXIT_CACHE` shape) + `m7_hybrid_results.py` (router) +
+    `build_m7_best_combo_grid_hybrid.py` (one-shot script per RULE #5)
+    + 16 tests, all green. Reuses canonical `_pick_best_per_band` /
+    `_compute_all_exits` (cap_sl SQL already in canonical at
+    `m7_results.py:445-454`). No canonical files modified.
+  - **Frontend pending**: NEW `M7HybridRuleCategoryFilter.tsx` +
+    `m7_hybrid_api.ts` + mount in M7 dashboard.
+  - **Grid build pending** (~7h serial): gated on `m7_trades.parquet`
+    reaching 125 fridays. Currently 123. The 2 missing fridays
+    (05-08, 05-15) blocked on parallel 108-rule session's Phase E2,
+    which is blocked on btc-collector spot 1m middle-gap fill
+    (2026-05-02 → 05-15).
+  - **Parallel session contract**: 108-rule session writes only NEW
+    files: `m7_best_combo_108.py`, `m7_108_results.py`,
+    `build_m7_best_combo_grid_108.py`, `test_m7_best_combo_108.py`,
+    output `m7_best_combo_grid_v6_108.parquet`, mounted at
+    `/api/v1/m7_108`. No canonical edits. Both grids will coexist.
+  - **Plans**: `/home/abhis/.claude/plans/hybrid-build-current-session.md`
+    + `/home/abhis/.claude/plans/108-rule-build-next-session.md`,
+    both rewritten for strict separation this session.
+
+- **M7 joint Δ+price-matched strangle variant (Session 30, 2026-05-17, UNCOMMITTED):**
+  - Parallel strangle-construction policy alongside today's pure-delta
+    sweep. For each (Friday × hour × expiry × delta_target), the joint
+    picker walks both CE and PE strike candidates inside a `±0.05Δ`
+    window (auto-widened to `max(0.05, 0.5×target)` when target ≤ 0.10
+    for the sparse OTM tail) and picks the (CE_strike, PE_strike) pair
+    minimising `|call_mark − put_mark|`. Accepted iff
+    `gap / mean(mark) ≤ 0.15` AND `mean_mark ≥ $1` (deep-wing-dust
+    guard). Else fall back to today's pure-delta closest-from-below
+    picker. `match_mode` column distinguishes joint vs delta_fallback.
+  - **Code**: `m7_strike_picker_joint.py` + `m7_batch_backtester_joint.py`
+    (with `--append` / `--joint-delta-tol` / `--joint-price-tol-pct`) +
+    `m7_joint_match_stats.py` + `build_m7_best_combo_grid_price_matched.py`
+    + 9-test pytest module. `dataset: Literal["delta_match","price_match"]
+    = "delta_match"` query param threaded through every M7 endpoint.
+    All caches (`_TRADES_BY_DATASET`, `_EXIT_CACHE`, `_COVERAGE_CACHE`,
+    `_GRID_STATE_BY_DATASET`, `_BUCKETED_GRIDS`) keyed by dataset.
+  - **Frontend**: 2-button toggle `◆ Δ-match / ◆ Δ+Price match` at top
+    of M7SweepDashboard. `M7JointMatchStats` KPI panel + 3 expandable
+    breakdowns (per-Δ, per-IV-band, per-Δ×band) wrapped in a
+    `JointStatsBoundary` error boundary. `dataset` prop threaded into
+    `M7IvBandBestComboTable`, `M7BestComboCoverageTable`,
+    `M7BestComboPathMarkers`, `M7LossesExplorer`,
+    `M7BestComboMissedFridaysTable`.
+  - **Data on disk**:
+    - `~/btc-data/derived/m7/m7_trades_price_matched.parquet` — populated
+      by detached container `m7-joint-full-backfill-1779044018` running
+      at session end (log
+      `/home/abhis/btc-data/logs/m7_joint_full_1779044018.log`).
+      Expected ~25-30 min for 121 Fridays.
+    - `~/btc-data/derived/m7/m7_paths_price_matched/friday_date=YYYY-MM-DD/part.parquet`
+      Hive-partitioned, append-safe.
+    - `~/btc-data/derived/m7/m7_best_combo_grid_v6_price_matched.parquet`
+      NOT yet built — run via detached
+      `docker compose run -d --rm` per RULE #5 (~4-5h). Until then,
+      `dataset=price_match` on `/iv_band_best_combo` returns
+      `status:no_data`.
+  - **Verified live**: 9/9 pytest passing; Playwright toggle round-trip
+    (Δ-match 34,166 trades ↔ Δ+Price match 216 trades on test backfill,
+    206 joint / 10 fallback, no crash); stats endpoint shape verified
+    flat; frontend TS build clean (no new errors).
+  - **Deferred**: compare side-by-side mode, M7FridayBandDashboard
+    toggle, M7 modal `dataset` propagation
+    (`M7RuleComparisonModal`, `M7CellAnalysisModal`,
+    `M7TradeDiagnosticModal`).
+  - **⚠️ Pre-existing RULE #3 concern** in working tree (NOT from this
+    feature): `scripts/margin_engine.py:124` and
+    `frontend/src/utils/marginEngine.ts:152` both reduce
+    `SAFETY_BUFFER_PCT` 0.20 → 0.10. Uncommitted. Must be reverted OR
+    empirically re-verified against Delta UI before any commit touches
+    those files.
+
 - **M7 Friday-Band MTM Overlay panel (Session 29, 2026-05-17, UNCOMMITTED):**
   - New `GET /api/v1/m7/friday_band_mtm_overlay` endpoint at
     `backend/app/api/m7_friday_band_results.py:1187` (+512 LoC). Operates
