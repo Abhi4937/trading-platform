@@ -25,6 +25,12 @@ import pandas as pd
 # so the analytics is portable to environments without tzdata installed.
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
+# The M7 batch backtester sizes every trade at QTY_LOTS = 100. The
+# gross_pnl_usd values in m7_paths/ are therefore per-100-lot. To express a
+# trade's MTM at the user-chosen per-band lot count (as displayed in the
+# Best Combo "Lots" column), we scale by `cell.lots / BACKTESTER_BASELINE_LOTS`.
+BACKTESTER_BASELINE_LOTS = 100
+
 # Segment boundaries on the IST clock. 5 segments → 6 boundaries (the first
 # boundary is the trade's actual entry time; the last is 17:30 IST Sat).
 IST_SEGMENT_BOUNDS: tuple[time, ...] = (
@@ -49,8 +55,14 @@ class SegmentPivot:
     trough_mtm: float
     trough_minute_offset: int
     trough_ts_ist_minute_of_day: int
-    dd_usd: float                  # peak − trough (≥ 0 by definition)
-    dd_pct_from_peak: Optional[float]  # (peak-trough)/peak*100, None if peak<=0
+    dd_usd: float                  # dd_ref − trough (≥ 0)
+    dd_ref_mtm: float              # the peak this DD was measured FROM (current
+                                    # segment's peak if it came first, else the
+                                    # most recent prior segment's peak; 0 when no
+                                    # peak has been seen yet)
+    dd_pct_from_peak: Optional[float]  # per-trade dd/dd_ref*100, None if dd_ref<=0
+                                       # (band aggregate uses ratio-of-means, NOT
+                                       # mean of these per-trade ratios)
 
 
 def _utc_unix_to_ist_datetime(ts: int) -> datetime:
@@ -161,6 +173,13 @@ def segment_pivots(
         prev_bound = b
 
     out: list[Optional[SegmentPivot]] = []
+    # DD is measured from the most recent peak in chronological order across
+    # the merged 5-segment timeline — NOT from the same-segment peak. If a
+    # segment goes trough-first, its DD references the previous segment's
+    # peak (the last_peak seen on the time-ordered walk). When the segment's
+    # own peak comes before its trough, last_peak gets updated first and the
+    # DD naturally uses the current segment's peak (the old behaviour).
+    last_peak_mtm: Optional[float] = None
     for seg_idx in range(5):
         bar_mask = seg_of_bar == seg_idx
         n_bars = int(bar_mask.sum())
@@ -170,9 +189,7 @@ def segment_pivots(
         seg_mtm = mtm_usd[bar_mask]
         seg_mod = bars_mod[bar_mask]
         seg_ist = bars_ist_arr[bar_mask]
-        # Drop NaN bars before locating extrema (a few raw parquet rows can
-        # have NaN gross_pnl when a leg's mark was missing for one bar; we
-        # don't want one bad bar to nuke the entire trade-segment).
+        # Drop NaN bars before locating extrema.
         finite_mask = np.isfinite(seg_mtm)
         if not finite_mask.any():
             out.append(None)
@@ -187,23 +204,44 @@ def segment_pivots(
         trough_idx_local = int(np.argmin(seg_mtm))
         peak_mtm = float(seg_mtm[peak_idx_local])
         trough_mtm = float(seg_mtm[trough_idx_local])
-        dd_usd = peak_mtm - trough_mtm
-        dd_pct: Optional[float]
-        if peak_mtm > 0:
-            dd_pct = (dd_usd / peak_mtm) * 100.0
+        peak_offset = int(seg_mod[peak_idx_local])
+        trough_offset = int(seg_mod[trough_idx_local])
+
+        # Chronological DD reference: the most recent peak BEFORE this
+        # segment's trough. If the segment's own peak came first (peak
+        # offset ≤ trough offset), it counts as that reference. Otherwise
+        # fall back to last_peak from prior segments. If no peak has been
+        # seen yet (trade dipped before any rally), reference the entry
+        # baseline ($0) and report dd_pct as None.
+        peak_first_in_seg = peak_offset <= trough_offset
+        if peak_first_in_seg:
+            # The segment's own peak is the latest peak before the trough.
+            dd_ref = peak_mtm
+            # Update last_peak so subsequent segments see this peak.
+            last_peak_mtm = peak_mtm
         else:
-            dd_pct = None
+            # Trough fires before peak — reference is the prior peak.
+            dd_ref = last_peak_mtm if last_peak_mtm is not None else 0.0
+            # After the trough is recorded, the segment's later peak becomes
+            # the new running peak for downstream troughs.
+            last_peak_mtm = peak_mtm
+
+        dd_usd = dd_ref - trough_mtm
+        dd_pct_per_trade = ((dd_usd / dd_ref) * 100.0
+                             if dd_ref > 0 else None)
+
         out.append(SegmentPivot(
             seg=SEG_NAMES[seg_idx],
             n_minutes=n_bars,
             peak_mtm=peak_mtm,
-            peak_minute_offset=int(seg_mod[peak_idx_local]),
+            peak_minute_offset=peak_offset,
             peak_ts_ist_minute_of_day=int(seg_ist[peak_idx_local]),
             trough_mtm=trough_mtm,
-            trough_minute_offset=int(seg_mod[trough_idx_local]),
+            trough_minute_offset=trough_offset,
             trough_ts_ist_minute_of_day=int(seg_ist[trough_idx_local]),
             dd_usd=dd_usd,
-            dd_pct_from_peak=dd_pct,
+            dd_ref_mtm=float(dd_ref),
+            dd_pct_from_peak=dd_pct_per_trade,
         ))
     return out
 
@@ -266,30 +304,86 @@ def _agg_segment(pivots: list[SegmentPivot]) -> dict:
     arr_trough_offset = np.array([p.trough_minute_offset for p in pivots],
                                  dtype=np.float64)
     arr_dd = np.array([p.dd_usd for p in pivots], dtype=np.float64)
-    dd_pcts = [p.dd_pct_from_peak for p in pivots
-               if p.dd_pct_from_peak is not None]
-    arr_ddpct = np.array(dd_pcts, dtype=np.float64) if dd_pcts else None
+    arr_dd_ref = np.array([p.dd_ref_mtm for p in pivots], dtype=np.float64)
+    # DD% is computed as RATIO OF MEANS:
+    #   avg_dd / avg_prev_peak * 100
+    # We only average dd_ref for trades whose ref was a real peak (> 0). The
+    # n_trades_for_dd_pct count reports how many trades contributed.
+    pos_ref_mask = arr_dd_ref > 0
+    n_pos_ref = int(pos_ref_mask.sum())
+    if n_pos_ref >= 1:
+        avg_dd_for_pct = float(np.nanmean(arr_dd[pos_ref_mask]))
+        avg_ref_for_pct = float(np.nanmean(arr_dd_ref[pos_ref_mask]))
+        avg_dd_pct_from_peak = ((avg_dd_for_pct / avg_ref_for_pct) * 100.0
+                                  if avg_ref_for_pct > 0 else None)
+        # Median DD% uses ratio of medians for the same reason.
+        median_dd_for_pct = float(np.nanmedian(arr_dd[pos_ref_mask]))
+        median_ref_for_pct = float(np.nanmedian(arr_dd_ref[pos_ref_mask]))
+        median_dd_pct_from_peak = ((median_dd_for_pct / median_ref_for_pct)
+                                     * 100.0
+                                     if median_ref_for_pct > 0 else None)
+    else:
+        avg_dd_pct_from_peak = None
+        median_dd_pct_from_peak = None
+    # Std + count-within-1σ + above/below-avg counts.
+    #   within ±1σ → how concentrated the cluster is around the mean
+    #   above/below → distribution skew (e.g. 18↑ / 6↓ means most trades
+    #                  beat the mean — average pulled down by a few outliers).
+    def _stats(arr: np.ndarray) -> tuple[Optional[float], int, int, int]:
+        arr_clean = arr[np.isfinite(arr)]
+        if arr_clean.size == 0:
+            return None, 0, 0, 0
+        mean = float(np.nanmean(arr_clean))
+        if arr_clean.size < 2:
+            sd = 0.0
+            within = int(arr_clean.size)
+        else:
+            sd = float(np.nanstd(arr_clean, ddof=0))
+            within = int(np.sum(
+                (arr_clean >= mean - sd) & (arr_clean <= mean + sd)))
+        # Treat values exactly equal to the mean as neither above nor below
+        # — they'll show as `n_trades − above − below`.
+        n_above = int(np.sum(arr_clean > mean))
+        n_below = int(np.sum(arr_clean < mean))
+        return sd, within, n_above, n_below
+
+    std_peak, n_within_peak, n_above_peak, n_below_peak = _stats(arr_peak)
+    std_trough, n_within_trough, n_above_trough, n_below_trough = _stats(arr_trough)
+    std_dd, n_within_dd, n_above_dd, n_below_dd = _stats(arr_dd)
+
     return {
         "n_trades": len(pivots),
-        "n_trades_for_dd_pct": len(dd_pcts),
+        "n_trades_for_dd_pct": n_pos_ref,
         "avg_peak_ts_ist": _fmt_minute_of_day(_nan_to_none(_circular_mean_mod(arr_peak_mod))),
         "avg_peak_minute_offset": _nan_to_none(np.nanmean(arr_peak_offset)),
         "avg_peak_mtm_usd": _nan_to_none(np.nanmean(arr_peak)),
         "median_peak_mtm_usd": _nan_to_none(np.nanmedian(arr_peak)),
         "p25_peak_mtm_usd": _nan_to_none(np.nanpercentile(arr_peak, 25)),
         "p75_peak_mtm_usd": _nan_to_none(np.nanpercentile(arr_peak, 75)),
+        "std_peak_mtm_usd": std_peak,
+        "n_within_1sd_peak": n_within_peak,
+        "n_above_avg_peak": n_above_peak,
+        "n_below_avg_peak": n_below_peak,
         "avg_trough_ts_ist": _fmt_minute_of_day(_nan_to_none(_circular_mean_mod(arr_trough_mod))),
         "avg_trough_minute_offset": _nan_to_none(np.nanmean(arr_trough_offset)),
         "avg_trough_mtm_usd": _nan_to_none(np.nanmean(arr_trough)),
         "median_trough_mtm_usd": _nan_to_none(np.nanmedian(arr_trough)),
         "p25_trough_mtm_usd": _nan_to_none(np.nanpercentile(arr_trough, 25)),
         "p75_trough_mtm_usd": _nan_to_none(np.nanpercentile(arr_trough, 75)),
+        "std_trough_mtm_usd": std_trough,
+        "n_within_1sd_trough": n_within_trough,
+        "n_above_avg_trough": n_above_trough,
+        "n_below_avg_trough": n_below_trough,
         "avg_dd_usd": _nan_to_none(np.nanmean(arr_dd)),
         "median_dd_usd": _nan_to_none(np.nanmedian(arr_dd)),
-        "avg_dd_pct_from_peak": (
-            _nan_to_none(np.nanmean(arr_ddpct)) if arr_ddpct is not None else None),
-        "median_dd_pct_from_peak": (
-            _nan_to_none(np.nanmedian(arr_ddpct)) if arr_ddpct is not None else None),
+        "std_dd_usd": std_dd,
+        "n_within_1sd_dd": n_within_dd,
+        "n_above_avg_dd": n_above_dd,
+        "n_below_avg_dd": n_below_dd,
+        "avg_dd_pct_from_peak": _nan_to_none(avg_dd_pct_from_peak),
+        "median_dd_pct_from_peak": _nan_to_none(median_dd_pct_from_peak),
+        "avg_dd_ref_mtm": _nan_to_none(np.nanmean(arr_dd_ref))
+            if arr_dd_ref.size else None,
     }
 
 
@@ -309,6 +403,8 @@ def aggregate_pivot_profile(
     paths_glob: str,
     entry_hours: Iterable[int],
     cells: Optional[list[dict]] = None,
+    winner_tids: Optional[set[str]] = None,
+    loser_tids: Optional[set[str]] = None,
     progress_cb=None,
 ) -> dict:
     """Walk every trade in `trades_df` (filtered by entry_hours OR cells),
@@ -319,6 +415,11 @@ def aggregate_pivot_profile(
     with at least {entry_atm_iv_band, entry_hour_ist}, and a trade is
     included only if it matches some cell on BOTH band AND entry_hour. This
     scopes each band's pivot profile to its own selected best-combo cell.
+
+    If `winner_tids` / `loser_tids` are provided (sets of trade_id strings),
+    the response also includes `by_band_winners` and `by_band_losers` blocks
+    so the frontend can render an "All / Winners / Losers" toggle without a
+    re-fetch.
 
     Returns the JSON dict the FastAPI route serves.
 
@@ -332,6 +433,8 @@ def aggregate_pivot_profile(
     if trades_df is None or trades_df.empty:
         return {
             "by_band": {},
+            "by_band_winners": None,
+            "by_band_losers": None,
             "params": {
                 "entry_hours": sorted(hours_set),
                 "cells": cells or [],
@@ -342,7 +445,9 @@ def aggregate_pivot_profile(
 
     # Filter trades on the full (band, hour, expiry_bucket, delta_target)
     # cell tuple when cells is provided; otherwise fall back to the bare
-    # entry-hour filter.
+    # entry-hour filter. We also build a {cell_key -> lot_scale} map so each
+    # trade's MTM can be rescaled away from the 100-lot backtester baseline.
+    cell_scale_map: dict[str, float] = {}
     if cells:
         cell_keys: set[tuple[str, str, str, str]] = set()
         for c in cells:
@@ -350,15 +455,26 @@ def aggregate_pivot_profile(
             hour = c.get("entry_hour_ist")
             expiry = c.get("expiry_bucket")
             delta = c.get("delta_target")
+            lots = c.get("lots")
             if band is None or hour is None:
                 continue
             try:
-                cell_keys.add((
+                key_tuple = (
                     str(band),
                     str(int(hour)),
                     str(expiry) if expiry is not None else "",
                     f"{float(delta):.4f}" if delta is not None else "",
-                ))
+                )
+                cell_keys.add(key_tuple)
+                # Default 1.0 (i.e., 100-lot baseline) when lots is missing/0/<=0.
+                if lots is not None:
+                    try:
+                        n = int(lots)
+                        if n > 0:
+                            cell_scale_map["|".join(key_tuple)] = (
+                                n / float(BACKTESTER_BASELINE_LOTS))
+                    except (TypeError, ValueError):
+                        pass
             except (TypeError, ValueError):
                 continue
         if not cell_keys:
@@ -401,19 +517,52 @@ def aggregate_pivot_profile(
         sel["friday_date_ist"]).dt.strftime("%Y-%m-%d")
     sel["trade_id_str"] = sel["trade_id"].astype(str)
 
-    # Build a {trade_id_str -> (entry_ts_unix, band)} lookup for fast iteration.
+    # We need expiry_bucket and delta_target to build the per-trade composite
+    # key for cell-scale lookup. Pull them from the full trades_df rows that
+    # passed the mask, then merge onto `sel` on trade_id.
+    if cells and cell_scale_map:
+        meta_cols = ["trade_id", "expiry_bucket", "delta_target"]
+        meta = trades_df.loc[mask, [c for c in meta_cols
+                                     if c in trades_df.columns]].copy()
+        meta["trade_id_str"] = meta["trade_id"].astype(str)
+        sel = sel.merge(
+            meta[["trade_id_str", "expiry_bucket", "delta_target"]],
+            on="trade_id_str", how="left")
+
+    # Build a {trade_id_str -> (entry_ts_unix, band, scale)} lookup.
     sel["entry_ts_unix_int"] = pd.to_numeric(
         sel["entry_ts_utc"], errors="coerce").astype("Int64")
-    trade_lookup: dict[str, tuple[int, str]] = {}
-    for tid, ts, band in zip(sel["trade_id_str"], sel["entry_ts_unix_int"],
-                              sel["entry_atm_iv_band"]):
-        if pd.isna(ts) or band is None:
+    trade_lookup: dict[str, tuple[int, str, float]] = {}
+    for row in sel.itertuples(index=False):
+        ts = getattr(row, "entry_ts_unix_int", None)
+        tid = getattr(row, "trade_id_str", None)
+        band = getattr(row, "entry_atm_iv_band", None)
+        if ts is None or tid is None or band is None or pd.isna(ts):
             continue
-        trade_lookup[str(tid)] = (int(ts), str(band))
+        scale = 1.0
+        if cells and cell_scale_map:
+            try:
+                ebucket = getattr(row, "expiry_bucket", "") or ""
+                dtgt = getattr(row, "delta_target", None)
+                hr = int(getattr(row, "entry_hour_ist"))
+                key = "|".join([
+                    str(band), str(hr), str(ebucket),
+                    f"{float(dtgt):.4f}" if dtgt is not None else "",
+                ])
+                if key in cell_scale_map:
+                    scale = cell_scale_map[key]
+            except (TypeError, ValueError, AttributeError):
+                pass
+        trade_lookup[str(tid)] = (int(ts), str(band), float(scale))
 
-    # Accumulator: {iv_band -> [list_of_5_optional_pivots ...]}.
-    # Per band we keep a separate list per segment index (0..4).
+    # Accumulators: 3 parallel maps (all, winners-only, losers-only). Each
+    # is {iv_band -> [list_of_5_lists]} — one list per segment index (0..4).
     band_pivots: dict[str, list[list[SegmentPivot]]] = {}
+    band_pivots_winners: dict[str, list[list[SegmentPivot]]] = {}
+    band_pivots_losers: dict[str, list[list[SegmentPivot]]] = {}
+    have_outcome = bool(winner_tids) or bool(loser_tids)
+    winner_set = winner_tids or set()
+    loser_set = loser_tids or set()
 
     # Walk friday partitions present in the trade selection.
     partitions = sorted(sel["friday_date_ist_str"].unique())
@@ -444,14 +593,17 @@ def aggregate_pivot_profile(
         tids_here = (set(pdf["trade_id_str"].unique())
                      & set(trade_lookup.keys()))
         for tid in tids_here:
-            entry_ts_unix, band = trade_lookup[tid]
+            entry_ts_unix, band, scale = trade_lookup[tid]
             grp = pdf.loc[pdf["trade_id_str"] == tid,
                           ["ts", "gross_pnl_usd"]].sort_values("ts")
             if grp.empty:
                 continue
+            mtm = grp["gross_pnl_usd"].to_numpy(dtype=np.float64)
+            if scale != 1.0:
+                mtm = mtm * scale
             pivots = segment_pivots(
                 grp["ts"].to_numpy(dtype=np.int64),
-                grp["gross_pnl_usd"].to_numpy(dtype=np.float64),
+                mtm,
                 entry_ts_unix,
             )
             band_slots = band_pivots.setdefault(
@@ -459,6 +611,21 @@ def aggregate_pivot_profile(
             for i, p in enumerate(pivots):
                 if p is not None:
                     band_slots[i].append(p)
+            # Fork into winner/loser buckets when an outcome map exists.
+            if have_outcome:
+                tid_str = str(tid)
+                if tid_str in winner_set:
+                    slots_w = band_pivots_winners.setdefault(
+                        band, [list() for _ in range(5)])
+                    for i, p in enumerate(pivots):
+                        if p is not None:
+                            slots_w[i].append(p)
+                elif tid_str in loser_set:
+                    slots_l = band_pivots_losers.setdefault(
+                        band, [list() for _ in range(5)])
+                    for i, p in enumerate(pivots):
+                        if p is not None:
+                            slots_l[i].append(p)
             processed_trades += 1
             if progress_cb is not None and processed_trades % 50 == 0:
                 progress_cb(processed_trades, total_trades)
@@ -467,21 +634,27 @@ def aggregate_pivot_profile(
         progress_cb(processed_trades, total_trades)
 
     # Build the response.
-    by_band: dict[str, dict] = {}
-    for band, slot_lists in band_pivots.items():
-        seg_blob: dict[str, dict] = {}
-        for i, name in enumerate(SEG_NAMES):
-            seg_blob[name] = _agg_segment(slot_lists[i])
-        by_band[band] = seg_blob
+    def _build(by_band_pivots: dict[str, list[list[SegmentPivot]]]) -> dict:
+        out: dict[str, dict] = {}
+        for band, slot_lists in by_band_pivots.items():
+            seg_blob: dict[str, dict] = {}
+            for i, name in enumerate(SEG_NAMES):
+                seg_blob[name] = _agg_segment(slot_lists[i])
+            out[band] = seg_blob
+        return out
 
     return {
-        "by_band": by_band,
+        "by_band": _build(band_pivots),
+        "by_band_winners": _build(band_pivots_winners) if have_outcome else None,
+        "by_band_losers": _build(band_pivots_losers) if have_outcome else None,
         "params": {
             "entry_hours": sorted(hours_set),
             "cells": cells or [],
             "n_total_trades": int(len(trades_df)),
             "n_after_filter": int(n_after),
             "n_processed": int(processed_trades),
+            "n_winners": len(winner_set & {str(t) for t in trade_lookup.keys()}) if have_outcome else None,
+            "n_losers": len(loser_set & {str(t) for t in trade_lookup.keys()}) if have_outcome else None,
             "min_trades_per_band_cell": MIN_TRADES_PER_BAND_CELL,
         },
     }

@@ -148,6 +148,54 @@ def test_early_entry_at_03_ist():
     assert pivots[1].peak_mtm == pytest.approx(7.0)
 
 
+def test_dd_uses_prior_chronological_peak_when_trough_comes_first():
+    """If a segment goes trough-first (T before P), its DD must reference
+    the most recent peak from the prior segment's chronological walk, NOT
+    its own later peak. If the segment's own peak comes first, DD uses it
+    (same as before).
+    """
+    entry_ist = datetime(2024, 1, 5, 23, 0, tzinfo=IST)
+    # Seg1: peak at 60 (+$30), trough at 200 (-$5). Peak-first.
+    # Seg2: trough at 380 (+$8), then peak at 460 (+$22). Trough-first.
+    # Seg2's DD should be measured against Seg1's peak ($30), NOT Seg2's
+    # own peak ($22).
+    def mtm_at(min_off: int) -> float:
+        if min_off == 60:
+            return 30.0   # Seg1 peak
+        if min_off == 200:
+            return -5.0   # Seg1 trough
+        if min_off == 380:
+            return 8.0    # Seg2 trough (trade-local minute 380, IST 05:20)
+        if min_off == 460:
+            return 22.0   # Seg2 peak (IST 06:40)
+        # Hold-baselines so argmax/argmin pick the explicit peak/trough:
+        # Seg1 baseline = +$15 (sits between peak +30 and trough -5)
+        # Seg2 baseline = +$15 (sits between trough +8 and peak +22)
+        return 15.0
+    ts, mtm, entry_unix = _build_path_for_entry(entry_ist, 600, mtm_at)
+    pivots = segment_pivots(ts, mtm, entry_unix)
+
+    seg1 = pivots[0]
+    assert seg1 is not None
+    # Seg1 peak-first → DD = peak − trough = 30 − (−5) = 35
+    assert seg1.peak_mtm == pytest.approx(30.0)
+    assert seg1.trough_mtm == pytest.approx(-5.0)
+    assert seg1.dd_usd == pytest.approx(35.0)
+    assert seg1.dd_pct_from_peak == pytest.approx(35 / 30 * 100)
+
+    seg2 = pivots[1]
+    assert seg2 is not None
+    # Seg2 trough-first → DD must reference Seg1's peak ($30), giving
+    # DD = 30 − 8 = 22, NOT 22 − 8 = 14 (same-segment peak).
+    assert seg2.peak_mtm == pytest.approx(22.0)
+    assert seg2.trough_mtm == pytest.approx(8.0)
+    assert seg2.peak_minute_offset > seg2.trough_minute_offset, \
+        "test fixture must have trough-first ordering in Seg2"
+    assert seg2.dd_usd == pytest.approx(22.0), \
+        "Seg2 DD must use Seg1's peak ($30), not Seg2's own peak ($22)"
+    assert seg2.dd_pct_from_peak == pytest.approx(22 / 30 * 100)
+
+
 def test_dd_pct_handles_nonpositive_peak():
     """A segment whose peak is ≤ $0 must report dd_pct_from_peak as None."""
     entry_ist = datetime(2024, 1, 5, 23, 0, tzinfo=IST)
@@ -179,26 +227,43 @@ def test_aggregator_handles_none_segments():
                        peak_ts_ist_minute_of_day=120,
                        trough_mtm=-2.0, trough_minute_offset=200,
                        trough_ts_ist_minute_of_day=240,
-                       dd_usd=12.0, dd_pct_from_peak=120.0)
+                       dd_usd=12.0, dd_ref_mtm=10.0,
+                       dd_pct_from_peak=120.0)
     p2 = SegmentPivot(seg="Seg1", n_minutes=300,
                        peak_mtm=20.0, peak_minute_offset=80,
                        peak_ts_ist_minute_of_day=100,
                        trough_mtm=0.0, trough_minute_offset=250,
                        trough_ts_ist_minute_of_day=270,
-                       dd_usd=20.0, dd_pct_from_peak=100.0)
+                       dd_usd=20.0, dd_ref_mtm=20.0,
+                       dd_pct_from_peak=100.0)
     p3 = SegmentPivot(seg="Seg1", n_minutes=300,
                        peak_mtm=-1.0, peak_minute_offset=150,
                        peak_ts_ist_minute_of_day=170,
                        trough_mtm=-5.0, trough_minute_offset=210,
                        trough_ts_ist_minute_of_day=230,
-                       dd_usd=4.0, dd_pct_from_peak=None)
+                       dd_usd=4.0, dd_ref_mtm=-1.0,
+                       dd_pct_from_peak=None)
     agg = _agg_segment([p1, p2, p3])
     assert agg["n_trades"] == 3
+    # Only p1, p2 contribute to the DD% denominator (p3 had dd_ref ≤ 0)
     assert agg["n_trades_for_dd_pct"] == 2
     assert agg["avg_peak_mtm_usd"] == pytest.approx((10 + 20 - 1) / 3)
     assert agg["avg_dd_usd"] == pytest.approx((12 + 20 + 4) / 3)
-    # Only p1, p2 contribute to the % avg (p3 had peak ≤ 0)
-    assert agg["avg_dd_pct_from_peak"] == pytest.approx((120 + 100) / 2)
+    # DD% is now RATIO OF MEANS:
+    #   avg_dd over pos-ref trades = (12 + 20) / 2 = 16
+    #   avg_ref over pos-ref trades = (10 + 20) / 2 = 15
+    #   avg_dd_pct = 16 / 15 * 100 = 106.67
+    assert agg["avg_dd_pct_from_peak"] == pytest.approx((16 / 15) * 100)
+    # Std + 1σ-membership stats present and correct
+    import numpy as np
+    expected_peak_sd = float(np.std([10.0, 20.0, -1.0], ddof=0))
+    assert agg["std_peak_mtm_usd"] == pytest.approx(expected_peak_sd)
+    # Count how many peaks fall within [mean - sd, mean + sd]
+    mean_p = (10 + 20 - 1) / 3
+    expected_within = sum(
+        1 for v in (10.0, 20.0, -1.0)
+        if mean_p - expected_peak_sd <= v <= mean_p + expected_peak_sd)
+    assert agg["n_within_1sd_peak"] == expected_within
 
 
 def test_fmt_minute_of_day():

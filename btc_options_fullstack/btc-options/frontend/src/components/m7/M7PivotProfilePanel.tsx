@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { fetchM7PivotProfileCells, type M7Dataset, type M7LossesCell,
+         type M7PivotByBand,
          type M7PivotProfileResponse } from '../../services/m7_api';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { M7PivotProfileChart } from './M7PivotProfileChart';
@@ -10,14 +11,18 @@ interface Props {
   cells: M7LossesCell[];
 }
 
+type View = 'all' | 'winners' | 'losers';
+
 export function M7PivotProfilePanel({ dataset, cells }: Props) {
   const [data, setData] = useState<M7PivotProfileResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = usePersistedState<boolean>(
     'm7:pivotProfile:collapsed', false);
+  const [view, setView] = usePersistedState<View>(
+    'm7:pivotProfile:view', 'all');
 
-  // Derive the stable serialized scope so React only re-runs when the actual
-  // (band, hour, expiry, delta) set changes (not on every reference update).
+  // Derive stable serialized scope so React only re-runs when the actual
+  // (band, hour, expiry, delta, rule) set changes.
   const scopedCells = useMemo(() => {
     return cells
       .filter(c =>
@@ -28,12 +33,17 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
         entry_hour_ist: c.entry_hour_ist as number,
         expiry_bucket: c.expiry_bucket,
         delta_target: c.delta_target,
+        rule: c.rule as Record<string, number> | undefined,
+        lots: c.lots ?? null,
       }));
   }, [cells]);
   const cellsKey = useMemo(() => JSON.stringify(
-    scopedCells.map(c => [c.entry_atm_iv_band, c.entry_hour_ist,
-                          c.expiry_bucket, c.delta_target]).sort()),
-    [scopedCells]);
+    scopedCells.map(c => [
+      c.entry_atm_iv_band, c.entry_hour_ist,
+      c.expiry_bucket, c.delta_target,
+      JSON.stringify(c.rule || {}),
+      c.lots,
+    ]).sort()), [scopedCells]);
 
   useEffect(() => {
     if (collapsed) return;
@@ -67,13 +77,34 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cellsKey, dataset, collapsed]);
 
-  // Render a compact header summary of which (band, hour, expiry, delta)
-  // cells are driving the analysis. Truncates if > 6 cells.
   const cellSummary = scopedCells.length === 0
     ? null
-    : scopedCells.slice(0, 8).map(c =>
-        `${c.entry_atm_iv_band}@${String(c.entry_hour_ist).padStart(2, '0')}IST/${c.expiry_bucket}/Δ${c.delta_target}`,
-      );
+    : scopedCells.slice(0, 8).map(c => {
+        const lotsTag = c.lots != null && c.lots > 0
+          ? `·${c.lots}lots`
+          : '';
+        return `${c.entry_atm_iv_band}@${String(c.entry_hour_ist).padStart(2, '0')}IST/${c.expiry_bucket}/Δ${c.delta_target}${lotsTag}`;
+      });
+
+  const minN = data?.min_trades_per_band_cell ?? 5;
+  const result = data?.status === 'ready' ? data.result : null;
+
+  // Pick the visible by_band block based on the view toggle.
+  const visibleByBand: M7PivotByBand = useMemo(() => {
+    if (!result) return {};
+    if (view === 'winners' && result.by_band_winners) return result.by_band_winners;
+    if (view === 'losers' && result.by_band_losers) return result.by_band_losers;
+    return result.by_band;
+  }, [result, view]);
+
+  const nVisible = useMemo(() => {
+    let total = 0;
+    for (const segs of Object.values(visibleByBand)) {
+      const s = segs.Seg1;
+      if (s?.n_trades) total = Math.max(total, s.n_trades);
+    }
+    return total;
+  }, [visibleByBand]);
 
   return (
     <section style={{ marginTop: 18, background: '#0d1421',
@@ -88,6 +119,8 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
           {collapsed ? '▶' : '▼'} Pivot Profile by IV Band (5 IST segments)
         </button>
         <div style={{ flex: 1 }} />
+        <ViewToggle view={view} setView={setView}
+                     enabled={result != null && result.by_band_winners != null} />
         <span style={{ fontSize: 11, color: '#7a9bb5' }}>
           Scoped to Best Combo per IV Band selection above ·{' '}
           <strong style={{ color: '#cfd9e3' }}>
@@ -100,6 +133,13 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
                        fontFamily: 'monospace' }}>
           {cellSummary.join(' · ')}
           {scopedCells.length > 8 && ` · … (+${scopedCells.length - 8} more)`}
+        </div>
+      )}
+      {!collapsed && scopedCells.length > 0 && (
+        <div style={{ fontSize: 10, color: '#586e7e', marginBottom: 8 }}>
+          Values are <strong style={{ color: '#7a9bb5' }}>gross MTM</strong>{' '}
+          (no exit slippage/brokerage) from the 1m path parquet, scaled by{' '}
+          lots / 100 to match each band's Best-Combo lot count.
         </div>
       )}
       {collapsed && (
@@ -124,17 +164,63 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
           {data.progress != null && ` ${Math.round(data.progress * 100)}%`}
         </div>
       )}
-      {!collapsed && !err && data && data.status === 'ready' && data.result && (
+      {!collapsed && !err && result && (
         <>
           <div style={{ fontSize: 11, color: '#586e7e', marginBottom: 8 }}>
-            Aggregated over{' '}
-            {data.result.params.n_after_filter.toLocaleString()}{' '}
-            trades matching the {scopedCells.length} selected cells.
+            {view === 'all' && <>
+              Aggregated over{' '}
+              {result.params.n_after_filter.toLocaleString()}{' '}
+              trades matching the {scopedCells.length} selected cells.
+            </>}
+            {view === 'winners' && <>
+              <span style={{ color: '#3fb950' }}>Winners</span>{' '}
+              ({(result.params.n_winners ?? 0).toLocaleString()} trades net&nbsp;P&amp;L&nbsp;&gt;&nbsp;$0
+              ){' — '}same {scopedCells.length} cell scope.
+            </>}
+            {view === 'losers' && <>
+              <span style={{ color: '#f85149' }}>Losers</span>{' '}
+              ({(result.params.n_losers ?? 0).toLocaleString()} trades net&nbsp;P&amp;L&nbsp;≤&nbsp;$0
+              ){' — '}same {scopedCells.length} cell scope.
+            </>}
           </div>
-          <M7PivotProfileChart data={data} />
-          <M7PivotProfileTable data={data} />
+          <M7PivotProfileChart byBand={visibleByBand} minTrades={minN} />
+          <M7PivotProfileTable byBand={visibleByBand} minN={minN} />
         </>
       )}
     </section>
+  );
+}
+
+function ViewToggle({ view, setView, enabled }: {
+  view: View; setView: (v: View) => void; enabled: boolean;
+}) {
+  const btn = (active: boolean, color: string): React.CSSProperties => ({
+    padding: '4px 10px',
+    background: active ? color : '#0d1421',
+    color: active ? '#ffffff' : '#7a9bb5',
+    border: `1px solid ${active ? color : '#1a2d42'}`,
+    borderRadius: 4,
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    fontSize: 11, fontWeight: 600,
+    opacity: enabled ? 1 : 0.5,
+  });
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+      <button style={btn(view === 'all', '#1f6feb')}
+              disabled={!enabled}
+              onClick={() => setView('all')}>
+        All
+      </button>
+      <button style={btn(view === 'winners', '#1f8a47')}
+              disabled={!enabled}
+              onClick={() => setView('winners')}>
+        Winners
+      </button>
+      <button style={btn(view === 'losers', '#a32621')}
+              disabled={!enabled}
+              onClick={() => setView('losers')}>
+        Losers
+      </button>
+    </div>
   );
 }

@@ -1,5 +1,5 @@
 import React from 'react';
-import type { M7PivotProfileResponse, M7PivotProfileSegment } from '../../services/m7_api';
+import type { M7PivotByBand, M7PivotProfileSegment } from '../../services/m7_api';
 
 const SEG_NAMES = ['Seg1', 'Seg2', 'Seg3', 'Seg4', 'Seg5'] as const;
 const SEG_HEADERS = [
@@ -40,9 +40,86 @@ function fmtPct(v: number | null | undefined): string {
   return `${v >= 0 ? '-' : '+'}${Math.abs(v).toFixed(0)}%`;
 }
 
-function SegmentCell({ s, minN }: {
+function fmtDelta(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const sign = v >= 0 ? '+' : '';
+  return `${sign}${v.toFixed(0)}%`;
+}
+
+interface CellDeltas {
+  peakPctVsPrev: number | null;
+  peakUsdVsPrev: number | null;
+  troughPctVsPrev: number | null;
+  troughUsdVsPrev: number | null;
+  ddPctVsPrev: number | null;
+  ddUsdVsPrev: number | null;
+}
+
+function computeDeltas(
+  segs: Record<typeof SEG_NAMES[number], M7PivotProfileSegment>,
+): Record<typeof SEG_NAMES[number], CellDeltas> {
+  const out = {} as Record<typeof SEG_NAMES[number], CellDeltas>;
+  let prevPeak: number | null = null;
+  let prevTrough: number | null = null;
+  let prevDd: number | null = null;
+  for (const name of SEG_NAMES) {
+    const s = segs[name];
+    let peakPct: number | null = null;
+    let peakUsd: number | null = null;
+    let troughPct: number | null = null;
+    let troughUsd: number | null = null;
+    let ddPct: number | null = null;
+    let ddUsd: number | null = null;
+    if (s && s.avg_peak_mtm_usd != null && prevPeak != null) {
+      peakUsd = s.avg_peak_mtm_usd - prevPeak;
+      if (prevPeak !== 0) {
+        peakPct = (peakUsd / Math.abs(prevPeak)) * 100;
+      }
+    }
+    if (s && s.avg_trough_mtm_usd != null && prevTrough != null) {
+      troughUsd = s.avg_trough_mtm_usd - prevTrough;
+      if (prevTrough !== 0) {
+        troughPct = (troughUsd / Math.abs(prevTrough)) * 100;
+      }
+    }
+    if (s && s.avg_dd_usd != null && prevDd != null) {
+      ddUsd = s.avg_dd_usd - prevDd;
+      if (prevDd !== 0) {
+        ddPct = (ddUsd / Math.abs(prevDd)) * 100;
+      }
+    }
+    out[name] = {
+      peakPctVsPrev: peakPct, peakUsdVsPrev: peakUsd,
+      troughPctVsPrev: troughPct, troughUsdVsPrev: troughUsd,
+      ddPctVsPrev: ddPct, ddUsdVsPrev: ddUsd,
+    };
+    if (s?.avg_peak_mtm_usd != null) prevPeak = s.avg_peak_mtm_usd;
+    if (s?.avg_trough_mtm_usd != null) prevTrough = s.avg_trough_mtm_usd;
+    if (s?.avg_dd_usd != null) prevDd = s.avg_dd_usd;
+  }
+  return out;
+}
+
+function fmtDeltaDual(pct: number | null | undefined,
+                       usd: number | null | undefined): React.ReactNode {
+  if (pct == null && usd == null) return '—';
+  const pctNode = pct == null ? null : (
+    <span style={{ color: pct >= 0 ? '#3fb950' : '#f85149' }}>
+      {fmtDelta(pct)}
+    </span>
+  );
+  const usdNode = usd == null ? null : (
+    <span style={{ color: '#586e7e' }}>
+      {' '}({usd >= 0 ? '+' : '-'}{fmtMoneyAbs(usd)})
+    </span>
+  );
+  return <>{pctNode}{usdNode}</>;
+}
+
+function SegmentCell({ s, minN, deltas }: {
   s: M7PivotProfileSegment | undefined;
   minN: number;
+  deltas: CellDeltas;
 }) {
   if (!s || s.n_trades === 0) {
     return (
@@ -54,6 +131,18 @@ function SegmentCell({ s, minN }: {
   const lowN = s.n_trades < minN;
   const lowDdN = s.n_trades_for_dd_pct < minN;
   const muted = lowN ? { opacity: 0.45 } : {};
+  const peakSd = s.std_peak_mtm_usd ?? null;
+  const troughSd = s.std_trough_mtm_usd ?? null;
+  const ddSd = s.std_dd_usd ?? null;
+  // ±1σ explicit range strings: e.g. "[+$103, +$131]" for peak.
+  const peakLo = (s.avg_peak_mtm_usd != null && peakSd != null)
+    ? s.avg_peak_mtm_usd - peakSd : null;
+  const peakHi = (s.avg_peak_mtm_usd != null && peakSd != null)
+    ? s.avg_peak_mtm_usd + peakSd : null;
+  const troughLo = (s.avg_trough_mtm_usd != null && troughSd != null)
+    ? s.avg_trough_mtm_usd - troughSd : null;
+  const troughHi = (s.avg_trough_mtm_usd != null && troughSd != null)
+    ? s.avg_trough_mtm_usd + troughSd : null;
   return (
     <div style={muted}
          title={`median peak ${fmtMoney(s.median_peak_mtm_usd)}, ` +
@@ -63,19 +152,57 @@ function SegmentCell({ s, minN }: {
       <div>
         <span style={{ color: '#3fb950' }}>Peak  </span>
         {s.avg_peak_ts_ist}  {fmtMoney(s.avg_peak_mtm_usd)}
+        {peakSd != null && (
+          <span style={{ color: '#586e7e' }}> ± {fmtMoneyAbs(peakSd)}</span>
+        )}
+        {' '}<span style={{ color: '#7a9bb5' }}>
+          {s.n_above_avg_peak}↑/{s.n_below_avg_peak}↓
+        </span>
       </div>
-      <div>
+      {peakLo != null && peakHi != null && (
+        <div style={{ color: '#586e7e', fontSize: 10, paddingLeft: 14 }}>
+          ±1σ [{fmtMoney(peakLo)}, {fmtMoney(peakHi)}] · {s.n_within_1sd_peak}/{s.n_trades} in
+        </div>
+      )}
+      <div style={{ color: '#586e7e', fontSize: 10, paddingLeft: 14 }}>
+        Δ vs prev P: {fmtDeltaDual(deltas.peakPctVsPrev, deltas.peakUsdVsPrev)}
+      </div>
+      <div style={{ marginTop: 4 }}>
         <span style={{ color: '#f85149' }}>Trough</span>
         {' '}{s.avg_trough_ts_ist}  {fmtMoney(s.avg_trough_mtm_usd)}
+        {troughSd != null && (
+          <span style={{ color: '#586e7e' }}> ± {fmtMoneyAbs(troughSd)}</span>
+        )}
+        {' '}<span style={{ color: '#7a9bb5' }}>
+          {s.n_above_avg_trough}↑/{s.n_below_avg_trough}↓
+        </span>
       </div>
-      <div>
+      {troughLo != null && troughHi != null && (
+        <div style={{ color: '#586e7e', fontSize: 10, paddingLeft: 14 }}>
+          ±1σ [{fmtMoney(troughLo)}, {fmtMoney(troughHi)}] · {s.n_within_1sd_trough}/{s.n_trades} in
+        </div>
+      )}
+      <div style={{ color: '#586e7e', fontSize: 10, paddingLeft: 14 }}>
+        Δ vs prev T: {fmtDeltaDual(deltas.troughPctVsPrev, deltas.troughUsdVsPrev)}
+      </div>
+      <div style={{ marginTop: 4 }}>
         <span style={{ color: '#d29922' }}>DD    </span>
-        {fmtMoneyAbs(s.avg_dd_usd)}{' '}
+        {fmtMoneyAbs(s.avg_dd_usd)}
+        {ddSd != null && (
+          <span style={{ color: '#586e7e' }}> ± {fmtMoneyAbs(ddSd)}</span>
+        )}{' '}
         <span style={{ color: lowDdN ? '#586e7e' : '#d29922' }}>
           ({lowDdN ? '—' : fmtPct(s.avg_dd_pct_from_peak)})
         </span>
+        {' '}<span style={{ color: '#7a9bb5' }}>
+          {s.n_above_avg_dd}↑/{s.n_below_avg_dd}↓
+        </span>
       </div>
-      <div style={{ color: '#586e7e', fontSize: 10 }}>
+      <div style={{ color: '#586e7e', fontSize: 10, paddingLeft: 14 }}>
+        Δ vs prev DD: {fmtDeltaDual(deltas.ddPctVsPrev, deltas.ddUsdVsPrev)}
+        {' · '}{s.n_within_1sd_dd}/{s.n_trades} in
+      </div>
+      <div style={{ color: '#586e7e', fontSize: 10, marginTop: 2 }}>
         n={s.n_trades}{' '}
         {lowDdN ? `(% from <${minN})` : `(% from ${s.n_trades_for_dd_pct})`}
       </div>
@@ -83,13 +210,11 @@ function SegmentCell({ s, minN }: {
   );
 }
 
-export function M7PivotProfileTable({ data }: { data: M7PivotProfileResponse }) {
-  const result = data.result;
-  const minN = data.min_trades_per_band_cell ?? 5;
-  if (!result) {
-    return <div style={{ color: '#7a9bb5', fontSize: 12 }}>No data yet.</div>;
-  }
-  const bands = Object.keys(result.by_band).sort((a, b) => {
+export function M7PivotProfileTable(
+  { byBand, minN = 5 }:
+  { byBand: M7PivotByBand; minN?: number },
+) {
+  const bands = Object.keys(byBand).sort((a, b) => {
     const av = parseInt(a, 10) || 0;
     const bv = parseInt(b, 10) || 0;
     return av - bv;
@@ -97,7 +222,7 @@ export function M7PivotProfileTable({ data }: { data: M7PivotProfileResponse }) 
   if (bands.length === 0) {
     return (
       <div style={{ color: '#7a9bb5', fontSize: 12 }}>
-        No IV bands populated for the selected entry hours.
+        No IV bands populated for the current filter.
       </div>
     );
   }
@@ -105,12 +230,12 @@ export function M7PivotProfileTable({ data }: { data: M7PivotProfileResponse }) 
     <div style={{ overflowX: 'auto', border: '1px solid #1a2d42',
                    borderRadius: 4, marginTop: 10 }}>
       <table style={{ borderCollapse: 'collapse', width: '100%',
-                      minWidth: 1100 }}>
+                      minWidth: 1500 }}>
         <thead>
           <tr>
             <th style={{ ...TH, minWidth: 75 }}>IV Band</th>
             {SEG_HEADERS.map(h => (
-              <th key={h.name} style={{ ...TH, minWidth: 180 }}>
+              <th key={h.name} style={{ ...TH, minWidth: 240 }}>
                 <div>{h.name}</div>
                 <div style={{ color: '#586e7e', fontWeight: 400 }}>
                   {h.label}
@@ -120,16 +245,21 @@ export function M7PivotProfileTable({ data }: { data: M7PivotProfileResponse }) 
           </tr>
         </thead>
         <tbody>
-          {bands.map(band => (
-            <tr key={band}>
-              <td style={{ ...TD, fontWeight: 600 }}>{band}</td>
-              {SEG_NAMES.map(seg => (
-                <td key={seg} style={TD}>
-                  <SegmentCell s={result.by_band[band][seg]} minN={minN} />
-                </td>
-              ))}
-            </tr>
-          ))}
+          {bands.map(band => {
+            const deltas = computeDeltas(byBand[band]);
+            return (
+              <tr key={band}>
+                <td style={{ ...TD, fontWeight: 600 }}>{band}</td>
+                {SEG_NAMES.map(seg => (
+                  <td key={seg} style={TD}>
+                    <SegmentCell s={byBand[band][seg]}
+                                  minN={minN}
+                                  deltas={deltas[seg]} />
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
