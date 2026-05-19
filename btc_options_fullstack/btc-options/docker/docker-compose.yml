@@ -17,10 +17,10 @@ services:
     volumes:
       # `data` is writable now so the nightly merge can fold data_live/ → data/.
       # Live recorder writes to data_live/; merge consolidates into data/.
-      - /home/abhis/btc-data/data:/home/abhis/btc-data/data
-      - /home/abhis/btc-data/data_live:/home/abhis/btc-data/data_live
-      - /home/abhis/btc-data/derived:/home/abhis/btc-data/derived
-      - /home/abhis/btc-data/logs:/home/abhis/btc-data/logs
+      - C:/Users/Abhis/btc-data/data:/home/abhis/btc-data/data
+      - C:/Users/Abhis/btc-data/data_live:/home/abhis/btc-data/data_live
+      - C:/Users/Abhis/btc-data/derived:/home/abhis/btc-data/derived
+      - C:/Users/Abhis/btc-data/logs:/home/abhis/btc-data/logs
       - ../backend/tests:/app/tests:ro
       - ../backend/app:/app/app:ro
 
