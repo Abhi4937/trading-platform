@@ -23,9 +23,11 @@ process lifetime; backend restart re-warms.
 from __future__ import annotations
 
 from typing import Optional
+import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 
@@ -51,13 +53,41 @@ GRID_PARQUET_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v6.parquet
 # v4 fallback — load v4 while v6 is still rebuilding so the UI keeps
 # working; new v6 columns will simply be None for those cells.
 _GRID_FALLBACK_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v4.parquet")
+# Joint delta+price-matched grid — built by build_m7_best_combo_grid_price_matched.py
+# (separate script, not part of this refactor). When dataset=price_match is
+# requested and this file is absent, every endpoint returns a clear no_data
+# response rather than 500-ing.
+GRID_PARQUET_PATH_PRICE_MATCHED = os.path.join(
+    m7r.M7_BASE_DIR, "m7_best_combo_grid_v6_price_matched.parquet",
+)
+
+
+def _grid_path_for_dataset(dataset: str) -> str:
+    return (GRID_PARQUET_PATH_PRICE_MATCHED if dataset == "price_match"
+            else GRID_PARQUET_PATH)
+
+
+def _price_match_no_data_payload(extra: Optional[dict] = None) -> dict:
+    """Standard response shape when dataset=price_match is requested but the
+    price-matched grid hasn't been built. Frontend consumes `status` and
+    `message`; the rest of the keys match the regular endpoint shape so the
+    UI doesn't crash on missing fields."""
+    base = {
+        "status": "no_data",
+        "message": (f"price-matched grid not built. "
+                    f"Run the price-matched backtester + grid builder first."),
+        "rows": [], "n_rules": 0, "n_cells": 0,
+    }
+    if extra:
+        base.update(extra)
+    return base
 
 
 # ── Sweep dimensions ──────────────────────────────────────────────────────────
 
 # Three premium SL levels × four take-profit families per SL:
-#   1 baseline (SL only) + 10 max_profit + 10 margin_target + 11 fixed-hour
-#   = 32 variants per SL × 3 SLs = 96 total rule variants.
+#   1 baseline (SL only) + 10 max_profit + 10 margin_target + 14 fixed-hour
+#   = 35 variants per SL × 3 SLs = 105 total rule variants.
 _PREMIUM_SL_PCTS = [50, 75, 100]
 _PCT_GRID = [10, 15, 20, 25, 30, 40, 50, 60, 75, 100]
 # Hourly Saturday exits 5 AM..5 PM IST + 5:29 PM (just before settlement).
@@ -65,6 +95,12 @@ _PCT_GRID = [10, 15, 20, 25, 30, 40, 50, 60, 75, 100]
 _FIXED_HOURS: list[float] = [5.0, 6.0, 7.0,
                               8.0, 9.0, 10.0, 11.0, 12.0, 13.0,
                               14.0, 15.0, 16.0, 17.0, 17.4833]
+
+# Capital-based SL (LOSS-side): fires when -pnl_after_slip ≥ margin × pct/100.
+# Symmetric to margin_target_pct (which is profit-side). Only added to the
+# price_match grid for now — keeps the existing 105-rule delta-match v6
+# grid valid (no rebuild needed).
+_CAPITAL_SL_PCTS = [10, 15, 20]
 
 
 def _hour_label(h: float) -> str:
@@ -76,8 +112,20 @@ def _hour_label(h: float) -> str:
     return f"{int(h)}{minutes:02d}"
 
 
-def _rule_variants() -> list[tuple[str, dict]]:
-    """96 (label, rule_dict) tuples. Each dict goes to _derive_exits."""
+def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
+    """Rule label → rule_dict tuples for the grid sweep.
+
+    delta_match (default, backwards-compatible): 105 variants
+      = 3 premium_sl × (1 baseline + 10 max_profit + 10 margin_target + 14 fixed_hour)
+    price_match: 243 variants (hybrid sweep)
+      = 105 existing
+      + 3   standalone cap_sl baselines              (capital_sl_pct ∈ {10,15,20})
+      + 9   2-way hybrids                            (cap_sl × premium_sl)
+      + 126 3-way hybrids                            (cap_sl × premium_sl × exit_hr)
+      = 243 total.
+    Hybrid combos EXCLUDE max_profit and margin_target per locked-in
+    user decision — adding those would blow up the search space.
+    """
     out: list[tuple[str, dict]] = []
     for sl in _PREMIUM_SL_PCTS:
         out.append((f"sl{sl}_baseline", {"premium_sl_pct": sl}))
@@ -90,7 +138,67 @@ def _rule_variants() -> list[tuple[str, dict]]:
         for h in _FIXED_HOURS:
             out.append((f"sl{sl}_exit_hr_{_hour_label(h)}",
                         {"premium_sl_pct": sl, "fixed_exit_hour_ist": h}))
+    if dataset == "price_match":
+        # Standalone cap_sl: 3 baselines
+        for csl in _CAPITAL_SL_PCTS:
+            out.append((f"cap{csl}_baseline", {"capital_sl_pct": csl}))
+        # 2-way hybrid: cap_sl × premium_sl (3 × 3 = 9)
+        for csl in _CAPITAL_SL_PCTS:
+            for sl in _PREMIUM_SL_PCTS:
+                out.append((
+                    f"sl{sl}_cap{csl}",
+                    {"premium_sl_pct": sl, "capital_sl_pct": csl},
+                ))
+        # 3-way hybrid: cap_sl × premium_sl × exit_hr (3 × 3 × 14 = 126)
+        for csl in _CAPITAL_SL_PCTS:
+            for sl in _PREMIUM_SL_PCTS:
+                for h in _FIXED_HOURS:
+                    out.append((
+                        f"sl{sl}_cap{csl}_exit_hr_{_hour_label(h)}",
+                        {"premium_sl_pct": sl,
+                         "capital_sl_pct": csl,
+                         "fixed_exit_hour_ist": h},
+                    ))
     return out
+
+
+def _label_to_rule(label: str, dataset: str = "delta_match") -> Optional[dict]:
+    """Resolve a rule label string back to its rule_dict, or None if unknown.
+    Iterates `_rule_variants(dataset)` once — variant lists are small (≤243).
+    """
+    for lbl, rule in _rule_variants(dataset):
+        if lbl == label:
+            return rule
+    return None
+
+
+def _rule_category(label: str) -> str:
+    """Tag a rule label with its category for the frontend filter chip.
+
+    Categories (mutually exclusive):
+      - single_baseline                — sl{X}_baseline
+      - single_max_profit              — sl{X}_max_profit_{P}
+      - single_margin_target           — sl{X}_margin_target_{P}
+      - single_exit_hr                 — sl{X}_exit_hr_{H}
+      - single_capital_sl_standalone   — cap{X}_baseline (no other constraint)
+      - hybrid_2way_sl                 — sl{X}_cap{Y}
+      - hybrid_3way                    — sl{X}_cap{Y}_exit_hr_{H}
+    """
+    if label.startswith("cap") and "_baseline" in label:
+        return "single_capital_sl_standalone"
+    if "_cap" in label and "_exit_hr_" in label:
+        return "hybrid_3way"
+    if "_cap" in label:
+        return "hybrid_2way_sl"
+    if "_max_profit_" in label:
+        return "single_max_profit"
+    if "_margin_target_" in label:
+        return "single_margin_target"
+    if "_exit_hr_" in label:
+        return "single_exit_hr"
+    if label.endswith("_baseline"):
+        return "single_baseline"
+    return "unknown"
 
 
 # ── Ranking metrics — name → natural-best direction ──────────────────────────
@@ -281,6 +389,7 @@ _BASE_GROUP_KEYS: tuple[str, ...] = (
 def _build_grid(
     progress_cb=None,
     extra_group_keys: tuple[str, ...] = (),
+    dataset: str = "delta_match",
 ) -> pd.DataFrame:
     """Compute the full (iv_band × expiry × delta × entry_hour × ext... × rule) grid.
 
@@ -301,7 +410,7 @@ def _build_grid(
     counter so 202 responses can show a useful "X/N" hint.
     """
     rows: list[dict] = []
-    variants = _rule_variants()
+    variants = _rule_variants(dataset)
     full_keys = list(_BASE_GROUP_KEYS) + list(extra_group_keys)
     for i, (rule_label, rule_dict) in enumerate(variants):
         # Track whether the cache existed before our call so we know whether
@@ -354,6 +463,7 @@ def _build_grid(
                         "delta_target": float(delta) if delta is not None else None,
                         "entry_hour_ist": int(hour) if hour is not None else None,
                         "rule_label": rule_label,
+                        "rule_category": _rule_category(rule_label),
                         "rule": rule_dict,
                         **extras,
                     })
@@ -414,20 +524,32 @@ def _grid_path_is_valid(path: str) -> bool:
     trades parquet AND has the expected rule-variant cardinality. The
     third check guards against stale grids from earlier `_rule_variants()`
     counts — without it, expanding the rule sweep (e.g. 21 → 96 variants)
-    silently kept serving old data."""
+    silently kept serving old data.
+
+    Cross-checks against the appropriate trades parquet — `price_match`
+    variants compare against the price-matched trades file, all others
+    against the delta-match trades file.
+    """
     if not os.path.exists(path):
         return False
     grid_mtime = os.path.getmtime(path)
-    trades_path = (m7r.TRADES_ENRICHED_PATH
-                   if os.path.exists(m7r.TRADES_ENRICHED_PATH)
-                   else m7r.TRADES_PATH)
+    # Heuristic: if the grid path name hints at price_match, validate against
+    # the price-matched trades parquet; otherwise the delta-match one.
+    if "price_matched" in os.path.basename(path):
+        trades_path = m7r.TRADES_PATH_PRICE_MATCHED
+        dataset_for_count = "price_match"
+    else:
+        trades_path = (m7r.TRADES_ENRICHED_PATH
+                       if os.path.exists(m7r.TRADES_ENRICHED_PATH)
+                       else m7r.TRADES_PATH)
+        dataset_for_count = "delta_match"
     if os.path.exists(trades_path) and grid_mtime < os.path.getmtime(trades_path):
         return False
     # Cardinality check — load only the rule_label column for speed.
     try:
         rule_labels = pd.read_parquet(path, columns=["rule_label"])
         cached_count = int(rule_labels["rule_label"].nunique())
-        expected = len(_rule_variants())
+        expected = len(_rule_variants(dataset_for_count))
         if cached_count != expected:
             log.warning(
                 "M7 best-combo grid at %s has %d unique rule_labels but current "
@@ -745,15 +867,23 @@ _ALLOWED_EXPIRIES = {
 }
 
 
-def _try_load_grid_from_disk() -> Optional[pd.DataFrame]:
-    """Load persisted grid if present and fresh; else None.
+def _try_load_grid_from_disk(dataset: str = "delta_match") -> Optional[pd.DataFrame]:
+    """Load persisted grid for `dataset` if present and fresh; else None.
 
-    Tries v6 first, then v4. v4 lacks path peak-trough-peak / risk-adjusted
-    columns — those flow through as None / NaN. After load we enrich with
-    overall (all-trades) MTM composites AND composite score, then drop
-    the longer-dated expiry buckets per `_ALLOWED_EXPIRIES`.
+    delta_match: tries v6 first, then v4 fallback. v4 lacks path
+    peak-trough-peak / risk-adjusted columns — those flow through as None /
+    NaN. After load we enrich with overall (all-trades) MTM composites AND
+    composite score, then drop the longer-dated expiry buckets per
+    `_ALLOWED_EXPIRIES`.
+
+    price_match: only the v6 price-matched grid is supported (no v4
+    fallback).
     """
-    for path in (GRID_PARQUET_PATH, _GRID_FALLBACK_PATH):
+    if dataset == "price_match":
+        candidate_paths = (GRID_PARQUET_PATH_PRICE_MATCHED,)
+    else:
+        candidate_paths = (GRID_PARQUET_PATH, _GRID_FALLBACK_PATH)
+    for path in candidate_paths:
         if not _grid_path_is_valid(path):
             continue
         try:
@@ -803,16 +933,50 @@ def _persist_grid_to_disk(df: pd.DataFrame) -> None:
 # Single-process state — fine for the single-uvicorn-worker deployment.
 # Resets on every backend restart (intentional; keeps things simple and the
 # grid is fully recomputable from disk parquets).
-_GRID_STATE: dict = {
-    "status": "pending",          # pending | warming | ready | error
-    "rules_done": 0,
-    "rules_total": len(_rule_variants()),
-    "grid": None,                 # pd.DataFrame once status == "ready"
-    "started_at": None,
-    "finished_at": None,
-    "error": None,
+#
+# Partitioned by dataset so delta_match and price_match warm independently.
+# Each entry retains the original {status, rules_done, rules_total, grid,
+# started_at, finished_at, error} shape. The `_GRID_STATE` global below
+# proxies the delta_match entry for back-compat with callers that haven't
+# been threaded yet.
+def _new_grid_state() -> dict:
+    return {
+        "status": "pending",
+        "rules_done": 0,
+        "rules_total": len(_rule_variants()),
+        "grid": None,
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+    }
+
+
+_GRID_STATE_BY_DATASET: dict[str, dict] = {
+    "delta_match": _new_grid_state(),
+    "price_match": _new_grid_state(),
 }
+
+# Back-compat alias — points at delta_match. Module-level reads still work
+# (no rebinding needed) because dicts are mutated in place. Endpoints that
+# need dataset-aware behavior must use `_get_grid_state(dataset)` instead.
+_GRID_STATE: dict = _GRID_STATE_BY_DATASET["delta_match"]
 _GRID_LOCK = threading.Lock()
+
+
+def _get_grid_state(dataset: str) -> dict:
+    """Return the per-dataset grid state dict, creating it lazily."""
+    if dataset not in _GRID_STATE_BY_DATASET:
+        _GRID_STATE_BY_DATASET[dataset] = _new_grid_state()
+    return _GRID_STATE_BY_DATASET[dataset]
+
+
+def _get_grid(dataset: str) -> Optional[pd.DataFrame]:
+    """Return the in-memory grid for `dataset`, attempting a disk-load on
+    first access. Returns None if not yet built / failed to load."""
+    state = _get_grid_state(dataset)
+    if state["status"] != "ready":
+        try_load_grid_only(dataset)
+    return state.get("grid")
 
 
 # ── Multi-dimensional bucketed grids (Phase B) ────────────────────────────────
@@ -829,17 +993,35 @@ _TAB_DEFS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _bucketed_grid_path(tab: str) -> str:
-    return os.path.join(m7r.M7_BASE_DIR, f"m7_best_combo_grid_v7_{tab}.parquet")
+def _bucketed_grid_path(tab: str, dataset: str = "delta_match") -> str:
+    suffix = "_price_matched" if dataset == "price_match" else ""
+    return os.path.join(
+        m7r.M7_BASE_DIR,
+        f"m7_best_combo_grid_v7_{tab}{suffix}.parquet",
+    )
 
 
-# Each entry: {"status": "pending"|"building"|"ready"|"error", "grid": df, "error": str}
-_BUCKETED_GRIDS: dict[str, dict] = {
-    name: {"status": "pending", "grid": None, "error": None}
+# Each entry keyed by (dataset, tab):
+#   {"status": "pending"|"building"|"ready"|"error", "grid": df, "error": str}
+def _new_bucket_state() -> dict:
+    return {"status": "pending", "grid": None, "error": None}
+
+
+_BUCKETED_GRIDS: dict[tuple[str, str], dict] = {
+    (ds, name): _new_bucket_state()
+    for ds in ("delta_match", "price_match")
     for name in _TAB_DEFS.keys()
     if name != "band"
 }
 _BUCKETED_LOCK = threading.Lock()
+
+
+def _get_bucket_state(dataset: str, tab: str) -> dict:
+    """Per (dataset, tab) bucket state, lazily created."""
+    key = (dataset, tab)
+    if key not in _BUCKETED_GRIDS:
+        _BUCKETED_GRIDS[key] = _new_bucket_state()
+    return _BUCKETED_GRIDS[key]
 
 
 def _post_load_enrich(df: pd.DataFrame, group_keys: tuple[str, ...]) -> pd.DataFrame:
@@ -858,7 +1040,7 @@ def _post_load_enrich(df: pd.DataFrame, group_keys: tuple[str, ...]) -> pd.DataF
     return df
 
 
-def _build_and_cache_bucketed_grid(tab: str) -> None:
+def _build_and_cache_bucketed_grid(tab: str, dataset: str = "delta_match") -> None:
     """Build the grid for `tab`, persist to disk, store in _BUCKETED_GRIDS.
     Called inside _BUCKETED_LOCK so concurrent requests don't double-build.
     Run synchronously in the request thread so the caller blocks until ready.
@@ -867,12 +1049,12 @@ def _build_and_cache_bucketed_grid(tab: str) -> None:
         raise ValueError(f"bad tab name: {tab}")
 
     extra = _TAB_DEFS[tab]
-    state = _BUCKETED_GRIDS[tab]
+    state = _get_bucket_state(dataset, tab)
     state["status"] = "building"
     state["error"] = None
     try:
         # Try disk first.
-        disk_path = _bucketed_grid_path(tab)
+        disk_path = _bucketed_grid_path(tab, dataset)
         if _grid_path_is_valid(disk_path):
             grid = pd.read_parquet(disk_path)
             grid = _unflatten_after_load(grid)
@@ -919,16 +1101,16 @@ def _build_and_cache_bucketed_grid(tab: str) -> None:
         log.exception("M7 bucketed grid '%s' build failed", tab)
 
 
-def get_grid_for_tab(tab: str) -> Optional[pd.DataFrame]:
-    """Return the grid for `tab`, lazy-building if needed. Returns None
-    when not yet ready (caller should return a 'building' status to the
-    client). Tab='band' returns the legacy _GRID_STATE['grid'] unchanged.
-    """
+def get_grid_for_tab(tab: str, dataset: str = "delta_match") -> Optional[pd.DataFrame]:
+    """Return the grid for `tab` + `dataset`, lazy-building if needed.
+    Returns None when not yet ready (caller should return a 'building'
+    status to the client). Tab='band' returns the per-dataset main grid
+    from `_GRID_STATE_BY_DATASET`."""
     if tab == "band":
-        return _GRID_STATE.get("grid")
+        return _get_grid_state(dataset).get("grid")
     if tab not in _TAB_DEFS:
         return None
-    state = _BUCKETED_GRIDS[tab]
+    state = _get_bucket_state(dataset, tab)
     if state["status"] == "ready":
         return state["grid"]
     with _BUCKETED_LOCK:
@@ -939,19 +1121,20 @@ def get_grid_for_tab(tab: str) -> Optional[pd.DataFrame]:
             return None
         # Build inline. Blocks the request thread (~5-30s on warm exit cache;
         # longer when cold). Subsequent requests hit the cache.
-        _build_and_cache_bucketed_grid(tab)
+        _build_and_cache_bucketed_grid(tab, dataset=dataset)
         return state.get("grid") if state["status"] == "ready" else None
 
 
-def bucketed_grid_status(tab: str) -> dict:
+def bucketed_grid_status(tab: str, dataset: str = "delta_match") -> dict:
     """Public status accessor for /iv_band_best_combo/status."""
     if tab == "band":
-        return {"status": _GRID_STATE.get("status"), "n_cells":
-                int(0 if _GRID_STATE.get("grid") is None
-                    else len(_GRID_STATE["grid"]))}
+        gs = _get_grid_state(dataset)
+        return {"status": gs.get("status"), "n_cells":
+                int(0 if gs.get("grid") is None
+                    else len(gs["grid"]))}
     if tab not in _TAB_DEFS:
         return {"status": "unknown_tab"}
-    state = _BUCKETED_GRIDS[tab]
+    state = _get_bucket_state(dataset, tab)
     return {
         "status": state["status"],
         "n_cells": int(0 if state["grid"] is None else len(state["grid"])),
@@ -991,34 +1174,36 @@ def _warmup_thread() -> None:
         _GRID_STATE["finished_at"] = time.time()
 
 
-def try_load_grid_only() -> bool:
-    """Load the grid from disk if a fresh cache exists. Never spawns a
-    background build — the build is run out-of-process by
-    `scripts/build_m7_best_combo_grid.py`. Returns True iff a cached grid
-    was loaded.
+def try_load_grid_only(dataset: str = "delta_match") -> bool:
+    """Load the grid from disk for `dataset` if a fresh cache exists. Never
+    spawns a background build — the build is run out-of-process by
+    `scripts/build_m7_best_combo_grid.py` (delta_match) or
+    `scripts/build_m7_best_combo_grid_price_matched.py` (price_match).
+    Returns True iff a cached grid was loaded.
     """
+    state = _get_grid_state(dataset)
     with _GRID_LOCK:
-        if _GRID_STATE["status"] == "ready":
+        if state["status"] == "ready":
             return True
-        cached = _try_load_grid_from_disk()
+        cached = _try_load_grid_from_disk(dataset)
         if cached is not None and not cached.empty:
-            _GRID_STATE["grid"] = cached
-            _GRID_STATE["status"] = "ready"
-            _GRID_STATE["rules_done"] = _GRID_STATE["rules_total"]
-            _GRID_STATE["started_at"] = time.time()
-            _GRID_STATE["finished_at"] = time.time()
-            log.info("M7 best-combo grid loaded from disk cache (%d cells)",
-                     len(cached))
+            state["grid"] = cached
+            state["status"] = "ready"
+            state["rules_done"] = state["rules_total"]
+            state["started_at"] = time.time()
+            state["finished_at"] = time.time()
+            log.info("M7 best-combo grid (%s) loaded from disk cache (%d cells)",
+                     dataset, len(cached))
             return True
     return False
 
 
-def kick_off_warmup() -> bool:
+def kick_off_warmup(dataset: str = "delta_match") -> bool:
     """DEPRECATED: kept for backwards compatibility. The build is now run
     out-of-process via `scripts/build_m7_best_combo_grid.py`. This function
     only loads from disk if present. Returns False (never spawns a thread).
     """
-    return try_load_grid_only() and False
+    return try_load_grid_only(dataset) and False
 
 
 def _resolve_metric(name: str) -> str:
@@ -1450,6 +1635,250 @@ def _pick_best_per_band(
     return best
 
 
+# ── v7 lazy zigzag (P2_mid / T2_mid) ─────────────────────────────────────────
+#
+# v7 introduces 4 cell-level metrics that describe the "middle" of the trade
+# path: P2_mid (intermediate post-trough peak) and T2_mid (the local trough
+# between P2_mid and P3_exit). Computing these for the entire 132K-cell grid
+# at build time was prohibitively slow (~5 min/rule × 96 rules ≈ 8 h). Since
+# the user only ever views ~10 picked cells per request, we compute them
+# lazily here, after the picker has chosen its cells.
+#
+# Per-request cost: one filtered DuckDB scan (trade_id IN ~500 list) → seconds.
+# Cache below memoises results across requests for identical (rule_label,
+# cell-key) tuples so re-querying with different sizing/filters is free.
+
+_ZIGZAG_V7_CACHE: dict[tuple, dict] = {}
+# Key: (rule_label, iv_band, expiry_bucket, delta_target, entry_hour_ist)
+# Value: {"avg_peak_2_mid": float, "avg_trough_2_mid": float,
+#         "avg_rel_time_peak_2_mid": float, "avg_rel_time_trough_2_mid": float,
+#         "n_used": int}
+
+
+def _attach_zigzag_v7_to_picks(picks: pd.DataFrame) -> pd.DataFrame:
+    """For each picked cell, compute & attach 4 v7 zigzag fields (mean across
+    the cell's trades). Returns the same picks frame with new columns:
+    avg_peak_2_mid, avg_trough_2_mid, avg_rel_time_peak_2_mid,
+    avg_rel_time_trough_2_mid. Failures are silent (cells get None values).
+
+    Non-blocking by design: if any picked rule isn't already in the per-trade
+    `_EXIT_CACHE`, we kick off a background warmup thread for those rules and
+    return picks immediately with v7=None. By the time the user's NEXT
+    request lands (filter change, refresh, etc.) the cache is warm and the
+    helper computes synchronously in seconds. This avoids the cold-cache
+    100s+ blocking call that was timing out the frontend.
+    """
+    if picks is None or picks.empty:
+        return picks
+
+    # ── 0) Detect cold-cache rules. Warm them SYNCHRONOUSLY with a hard
+    #     time budget — slower first response but every cell that fits in
+    #     the budget gets a real value. After the budget expires, remaining
+    #     cells render as None (frontend "—") and the warmup keeps running
+    #     in background so the next request finds them cached.
+    cold_rule_dicts: list[dict] = []
+    warm_rule_keys: set[tuple] = set()
+    seen_rule_keys: set[tuple] = set()
+    for _, p in picks.iterrows():
+        rd = p.get("rule") if "rule" in p.index else None
+        if not isinstance(rd, dict):
+            continue
+        rk = (json.dumps(rd, sort_keys=True), m7r._TRADES_MTIME)
+        if rk in seen_rule_keys:
+            continue
+        seen_rule_keys.add(rk)
+        if rk in m7r._EXIT_CACHE:
+            warm_rule_keys.add(rk)
+        else:
+            cold_rule_dicts.append(rd)
+
+    if cold_rule_dicts:
+        # 30s budget — most rules take ~10s of which the parquet scan dominates.
+        # Allows 2-3 cold rules to warm within the budget on a typical request.
+        budget_deadline = time.time() + 30.0
+        log.info("v7 zigzag: %d rules cold; warming synchronously (budget=30s); %d already warm",
+                 len(cold_rule_dicts), len(warm_rule_keys))
+        for rd in cold_rule_dicts:
+            if time.time() >= budget_deadline:
+                # Out of time — drop into background warmup for the rest so
+                # the next request finds them cached.
+                remaining = cold_rule_dicts[cold_rule_dicts.index(rd):]
+                def _bg_warmup(rules: list[dict]) -> None:
+                    for r in rules:
+                        try:
+                            m7r._derive_exits({}, r)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("v7 zigzag bg warmup failed: %s", exc)
+                threading.Thread(target=_bg_warmup, args=(remaining,),
+                                  name="v7-zigzag-bg-warmup", daemon=True).start()
+                log.info("v7 zigzag: budget exceeded; %d rules deferred to background",
+                         len(remaining))
+                break
+            try:
+                m7r._derive_exits({}, rd)
+                rk = (json.dumps(rd, sort_keys=True), m7r._TRADES_MTIME)
+                warm_rule_keys.add(rk)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("v7 zigzag inline warmup failed for rule=%s: %s",
+                            json.dumps(rd, sort_keys=True)[:80], exc)
+
+    if not warm_rule_keys:
+        out = picks.copy()
+        for col in ("avg_peak_2_mid", "avg_trough_2_mid",
+                    "avg_rel_time_peak_2_mid", "avg_rel_time_trough_2_mid"):
+            out[col] = None
+        return out
+
+    # ── 1) For each pick, gather its trades (using the existing _EXIT_CACHE
+    #     populated by _derive_exits during picker / grid build).
+    #     Skip picks whose rule is still cold — they get None values; warm
+    #     ones get computed inline.
+    pick_trade_lists: dict[int, pd.DataFrame] = {}  # row_idx → trade subset
+    cell_keys: dict[int, tuple] = {}                 # row_idx → cache key
+    work_trades: list[pd.DataFrame] = []             # to dedupe & query in bulk
+    for idx, p in picks.iterrows():
+        rule_dict = p.get("rule") if "rule" in p.index else None
+        rule_label = p.get("rule_label")
+        if not isinstance(rule_dict, dict) or rule_label is None:
+            continue
+        rk = (json.dumps(rule_dict, sort_keys=True), m7r._TRADES_MTIME)
+        if rk not in warm_rule_keys:
+            continue  # rule still being warmed in background — skip this row
+        ck = (str(rule_label), str(p.get("iv_band")),
+              str(p.get("expiry_bucket")),
+              float(p.get("delta_target")) if p.get("delta_target") is not None else None,
+              int(p.get("entry_hour_ist")) if p.get("entry_hour_ist") is not None else None)
+        cell_keys[idx] = ck
+        if ck in _ZIGZAG_V7_CACHE:
+            continue  # cache hit — no need to fetch
+        try:
+            derived = m7r._derive_exits({}, rule_dict)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("v7 zigzag: derive_exits failed for %s: %s", rule_label, exc)
+            continue
+        if derived is None or derived.empty:
+            continue
+        sub = derived[
+            (derived["entry_atm_iv_band"] == p["iv_band"])
+            & (derived["entry_hour_ist"] == p["entry_hour_ist"])
+            & (derived["expiry_bucket"] == p["expiry_bucket"])
+            & (np.isclose(derived["delta_target"].astype(float),
+                          float(p["delta_target"]), atol=0.001))
+        ]
+        if sub.empty or "ts_at_min_mtm" not in sub.columns or "ts_peak_after" not in sub.columns:
+            continue
+        # Need: trade_id, ts_at_min_mtm (= ts_trough), ts_peak_after,
+        # entry_ts_utc, exit_ts (the latter two for rel_time normalisation).
+        keep_cols = ["trade_id", "ts_at_min_mtm", "ts_peak_after",
+                     "entry_ts_utc", "exit_ts"]
+        keep_cols = [c for c in keep_cols if c in sub.columns]
+        td = sub[keep_cols].copy()
+        td = td.dropna(subset=["ts_at_min_mtm", "ts_peak_after",
+                               "entry_ts_utc", "exit_ts"])
+        if td.empty:
+            continue
+        td["_cell_key"] = [ck] * len(td)
+        pick_trade_lists[idx] = td
+        work_trades.append(td)
+
+    if not work_trades:
+        # Nothing to compute — still attach the columns as None for downstream
+        # consistency.
+        for col in ("avg_peak_2_mid", "avg_trough_2_mid",
+                    "avg_rel_time_peak_2_mid", "avg_rel_time_trough_2_mid"):
+            if col not in picks.columns:
+                picks[col] = None
+        return picks
+
+    # ── 2) Single SQL: for all trades across all uncached cells, find ts of
+    #     the intermediate peak (P2_mid) in the (ts_trough, ts_peak_after)
+    #     open window, then the intermediate trough (T2_mid) between P2_mid
+    #     and ts_peak_after. Queries the parquet ONCE filtered by trade_id —
+    #     the JOIN with our small `_zigzag_pick_trades` table prunes the scan.
+    all_trades = pd.concat(work_trades, ignore_index=True).drop_duplicates("trade_id")
+    # Cast for DuckDB compatibility — these are timestamps stored as int64 ns
+    # in the parquet (or as datetime; DuckDB handles both transparently).
+    conn = m7r._duckdb_conn()
+    conn.register("_zigzag_pick_trades",
+                  all_trades[["trade_id", "ts_at_min_mtm", "ts_peak_after"]]
+                  .rename(columns={"ts_at_min_mtm": "_ts_trough",
+                                   "ts_peak_after": "_ts_peak_after"}))
+    zig_sql = f"""
+    WITH peak_2_mids AS (
+        SELECT p.trade_id,
+               arg_max(p.ts,
+                       CASE WHEN p.ts > zt._ts_trough AND p.ts < zt._ts_peak_after
+                            THEN p.gross_pnl_usd END) AS ts_peak_2_mid,
+               MAX(CASE WHEN p.ts > zt._ts_trough AND p.ts < zt._ts_peak_after
+                        THEN p.gross_pnl_usd END) AS peak_2_mid_gross
+        FROM read_parquet('{m7r.PATHS_GLOB}', hive_partitioning=true) p
+        JOIN _zigzag_pick_trades zt ON p.trade_id = zt.trade_id
+        WHERE p.ts <= zt._ts_peak_after
+        GROUP BY p.trade_id
+    )
+    SELECT pm.trade_id, pm.ts_peak_2_mid, pm.peak_2_mid_gross,
+           MIN(CASE WHEN p.ts > pm.ts_peak_2_mid AND p.ts < zt._ts_peak_after
+                    THEN p.gross_pnl_usd END) AS trough_2_mid_gross,
+           arg_min(p.ts, CASE WHEN p.ts > pm.ts_peak_2_mid AND p.ts < zt._ts_peak_after
+                              THEN p.gross_pnl_usd END) AS ts_trough_2_mid
+    FROM read_parquet('{m7r.PATHS_GLOB}', hive_partitioning=true) p
+    JOIN _zigzag_pick_trades zt ON p.trade_id = zt.trade_id
+    JOIN peak_2_mids pm ON p.trade_id = pm.trade_id
+    WHERE p.ts <= zt._ts_peak_after
+    GROUP BY pm.trade_id, pm.ts_peak_2_mid, pm.peak_2_mid_gross
+    """
+    try:
+        zig_df = conn.execute(zig_sql).df()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("v7 zigzag SQL failed: %s", exc)
+        zig_df = pd.DataFrame(columns=["trade_id", "ts_peak_2_mid",
+                                        "peak_2_mid_gross",
+                                        "trough_2_mid_gross", "ts_trough_2_mid"])
+    finally:
+        try:
+            conn.unregister("_zigzag_pick_trades")
+        except Exception:  # noqa: BLE001
+            pass
+        conn.close()
+
+    # ── 3) Per-trade aggregation back to cell level. mtm convention = subtract
+    #     entry slippage; here we approximate as zero since the lazy compute
+    #     is for visualisation only and the cell-level mean is dominated by
+    #     gross magnitude. Same convention as v6 peak_after_trough_mtm uses
+    #     entry_slip; if precise alignment is needed, recover entry_slip per
+    #     trade via the mtm_df attached during _compute_all_exits.
+    per_trade = all_trades.merge(zig_df, on="trade_id", how="left")
+    duration = (per_trade["exit_ts"] - per_trade["entry_ts_utc"]).astype(float)
+    valid = duration > 0
+    per_trade["rel_time_peak_2_mid"] = (
+        (per_trade["ts_peak_2_mid"] - per_trade["entry_ts_utc"]) / duration
+    ).where(valid).clip(lower=0.0, upper=1.0)
+    per_trade["rel_time_trough_2_mid"] = (
+        (per_trade["ts_trough_2_mid"] - per_trade["entry_ts_utc"]) / duration
+    ).where(valid).clip(lower=0.0, upper=1.0)
+
+    # Aggregate per (rule_label, band, expiry, delta, hour) cell.
+    by_cell = per_trade.groupby("_cell_key", dropna=False)
+    for ck, sub in by_cell:
+        if not isinstance(ck, tuple):
+            continue
+        _ZIGZAG_V7_CACHE[ck] = {
+            "avg_peak_2_mid":             _safe_mean(sub["peak_2_mid_gross"]),
+            "avg_trough_2_mid":           _safe_mean(sub["trough_2_mid_gross"]),
+            "avg_rel_time_peak_2_mid":    _safe_mean(sub["rel_time_peak_2_mid"]),
+            "avg_rel_time_trough_2_mid":  _safe_mean(sub["rel_time_trough_2_mid"]),
+            "n_used":                     int(sub["peak_2_mid_gross"].notna().sum()),
+        }
+
+    # ── 4) Attach to picks frame (cache lookup; misses → None).
+    out = picks.copy()
+    for col in ("avg_peak_2_mid", "avg_trough_2_mid",
+                "avg_rel_time_peak_2_mid", "avg_rel_time_trough_2_mid"):
+        out[col] = [_ZIGZAG_V7_CACHE.get(cell_keys.get(idx, ()), {}).get(col)
+                    for idx in out.index]
+    return out
+
+
 def _records(df: pd.DataFrame) -> list[dict]:
     """JSON-safe records — NaN/NaT → None, numpy scalars → python primitives."""
     if df.empty:
@@ -1483,14 +1912,29 @@ def _apply_dimension_filters(
     expiry_buckets: Optional[str],
     delta_targets: Optional[str],
     entry_hours: Optional[str],
+    iv_bands: Optional[str] = None,
+    exit_hours: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Pre-filter the grid by expiry / delta / hour before per-band picking.
+    """Pre-filter the grid by IV band / expiry / delta / hour before per-band picking.
 
     Each param is a comma-separated CSV ('' or None disables that filter).
     Lets the user constrain the picker's search space (e.g. only Saturday
     expiry and Δ ≤ 0.20 — useful when the picker keeps choosing
     high-delta straddles you don't want to trade).
+
+    iv_bands lets you isolate one or a subset of bands (e.g. "30-40,40-50")
+    so the picker only emits picks for those bands — useful when comparing
+    per-band best-fits side-by-side without the noise of the other 8 bands.
+
+    exit_hours restricts to fixed-hour rule variants `sl{X}_exit_hr_{h}` whose
+    hour-suffix is in the CSV (suffix matches `_hour_label()`: '8'..'17' and
+    '1729' for 17:29). When set, non-fixed-hour rule families (baseline,
+    max_profit, margin_target) are excluded by construction.
     """
+    if iv_bands:
+        keep_b = {s.strip() for s in iv_bands.split(",") if s.strip()}
+        if keep_b and "iv_band" in grid.columns:
+            grid = grid[grid["iv_band"].astype(str).isin(keep_b)]
     if expiry_buckets:
         keep = {s.strip() for s in expiry_buckets.split(",") if s.strip()}
         if keep:
@@ -1511,6 +1955,12 @@ def _apply_dimension_filters(
             # Handle None (aggregate_hours mode) — pass through; else filter
             mask = grid["entry_hour_ist"].isna() | grid["entry_hour_ist"].astype("Int64").isin(keep_h)
             grid = grid[mask]
+    if exit_hours:
+        keep_eh = {s.strip() for s in exit_hours.split(",") if s.strip()}
+        if keep_eh and "rule_label" in grid.columns:
+            suffix_pat = "|".join(re.escape(s) for s in keep_eh)
+            grid = grid[grid["rule_label"].astype(str).str.contains(
+                rf"_exit_hr_({suffix_pat})$", regex=True, na=False)]
     return grid
 
 
@@ -1596,6 +2046,10 @@ def get_iv_band_best_combo(
         description="CSV whitelist of delta targets (e.g. '0.1,0.2,0.5'). Empty/absent = no filter."),
     entry_hours: Optional[str] = Query(None,
         description="CSV whitelist of entry hours IST (e.g. '21,22,23'). Empty/absent = no filter."),
+    iv_bands: Optional[str] = Query(None,
+        description="CSV whitelist of IV bands (e.g. '30-40,40-50'). Empty/absent = all 10 bands. Useful to focus the picker on one band for per-band best-fit testing."),
+    exit_hours: Optional[str] = Query(None,
+        description="CSV whitelist of fixed-exit hour suffixes (e.g. '14,15,1729'). Values match _hour_label() output. When set, the picker restricts to sl{X}_exit_hr_{h} rule variants whose hour matches — non-fixed-hour rule families (baseline, max_profit, margin_target) are dropped."),
     tab: str = Query("band",
         description="Multi-dim bucketing tab. 'band' (default — legacy single grid) | 'band_ivrv' | 'band_ivrv_slope_cn' | 'band_ivrv_slope_nn' | 'band_ivrv_slope_cnn' | 'band_ivrv_ts_legacy'. Bucketed tabs lazy-build their grid on first request (~5-30s, persisted on disk)."),
     ivrv_bucket: Optional[str] = Query(None,
@@ -1604,6 +2058,10 @@ def get_iv_band_best_combo(
         description="When using a slope tab, optional filter to a single slope bucket ('backwardation' | 'neutral' | 'contango'). Empty = no filter."),
     include_grid: bool = Query(False,
                                description="If true, also return the full grid"),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match' for joint "
+        "delta+price-matched parquet. When 'price_match' and the price-matched "
+        "grid isn't built yet, returns status='no_data'."),
 ):
     """For each of the 10 IV bands, the best (expiry, delta, exit_rule) combo
     by the chosen ranking metric.
@@ -1619,6 +2077,13 @@ def get_iv_band_best_combo(
     Returns 200 once the background grid is ready. Returns 202 with progress
     while warming. Either kicks off the warmup if it hasn't started yet.
     """
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({
+                "ranking": ranking, "secondary": secondary,
+                "tolerance_pct": tolerance_pct, "rule_family": rule_family,
+                "tab": tab, "dataset": dataset,
+            })
     if ranking not in _VALID_RANKINGS:
         raise HTTPException(status_code=400,
                             detail=f"ranking must be one of {sorted(_VALID_RANKINGS)}")
@@ -1636,9 +2101,10 @@ def get_iv_band_best_combo(
                             detail=f"tab must be one of {sorted(_TAB_DEFS.keys())}")
 
     # Try fast disk-load (idempotent — no-op if already ready).
-    try_load_grid_only()
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
 
-    if _GRID_STATE["status"] == "pending":
+    if grid_state["status"] == "pending":
         # Grid not built — instruct caller to run the CLI builder.
         return {
             "ranking": ranking,
@@ -1650,17 +2116,17 @@ def get_iv_band_best_combo(
                        "app.scripts.build_m7_best_combo_grid` to build.",
             "rows": [],
         }
-    if _GRID_STATE["status"] == "error":
+    if grid_state["status"] == "error":
         raise HTTPException(status_code=500,
-                            detail=f"warmup failed: {_GRID_STATE['error']}")
+                            detail=f"warmup failed: {grid_state['error']}")
 
     # Multi-tab dispatch — lazy-builds bucketed grids on first request.
     if tab == "band":
-        grid: pd.DataFrame = _GRID_STATE["grid"]
+        grid: pd.DataFrame = grid_state["grid"]
     else:
-        grid = get_grid_for_tab(tab)
+        grid = get_grid_for_tab(tab, dataset=dataset)
         if grid is None:
-            state = _BUCKETED_GRIDS.get(tab, {})
+            state = _get_bucket_state(dataset, tab)
             return {
                 "ranking": ranking, "tab": tab,
                 "status": state.get("status", "unknown"),
@@ -1680,6 +2146,7 @@ def get_iv_band_best_combo(
     # constrain the search space exactly the way the user expects.
     family_grid = _apply_dimension_filters(
         family_grid, expiry_buckets, delta_targets, entry_hours,
+        iv_bands=iv_bands, exit_hours=exit_hours,
     )
     # Bucketed-tab dimension filters — narrow to a specific IVRV / slope
     # bucket so the user can drill into "rich+contango" cells, etc.
@@ -1783,7 +2250,7 @@ def get_iv_band_best_combo(
         "max_losing_streak": max_losing_streak,
         "pick_mode": pick_mode,
         "status": "ready",
-        "rows": _records(best),
+        "rows": _records(_attach_zigzag_v7_to_picks(best)),
         "n_rules": len(_rule_variants()),
         "n_cells": int(len(family_grid)),
     }
@@ -1793,15 +2260,19 @@ def get_iv_band_best_combo(
 
 
 @router.get("/iv_band_best_combo/status")
-def get_iv_band_best_combo_status():
+def get_iv_band_best_combo_status(
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
+):
     """Lightweight progress probe for clients polling during warmup."""
+    state = _get_grid_state(dataset)
     return {
-        "status": _GRID_STATE["status"],
-        "rules_done": int(_GRID_STATE["rules_done"]),
-        "rules_total": int(_GRID_STATE["rules_total"]),
-        "started_at": _GRID_STATE["started_at"],
-        "finished_at": _GRID_STATE["finished_at"],
-        "error": _GRID_STATE["error"],
+        "status": state["status"],
+        "rules_done": int(state["rules_done"]),
+        "rules_total": int(state["rules_total"]),
+        "started_at": state["started_at"],
+        "finished_at": state["finished_at"],
+        "error": state["error"],
     }
 
 
@@ -1833,6 +2304,8 @@ def get_rule_comparison(
     min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0),
     rule_family: str = Query("all",
         description="Mirrors parent picker: 'all' (no family filter) | 'max_profit' (only sl{X}_max_profit_*) | 'margin_target' (only sl{X}_margin_target_*). Rules outside the family are tagged so the user sees why the picker ignored them."),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Return all rule variants for a fixed (band, expiry, delta, hour) cell.
 
@@ -1841,10 +2314,14 @@ def get_rule_comparison(
     what the picker optimises on. Without sizing, baseline per-100-lot
     columns are returned.
     """
-    try_load_grid_only()
-    if _GRID_STATE["status"] != "ready":
-        return {"rows": [], "status": _GRID_STATE["status"]}
-    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset})
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
+    if grid_state["status"] != "ready":
+        return {"rows": [], "status": grid_state["status"]}
+    grid: pd.DataFrame = grid_state["grid"]
     if grid is None or grid.empty:
         return {"rows": [], "status": "empty"}
     sub = grid[
@@ -1964,15 +2441,21 @@ def get_cross_band_check(
     delta_target: float = Query(..., ge=0.0, le=1.0),
     entry_hour_ist: int = Query(..., ge=0, le=23),
     rule_label: str = Query(..., description="Rule label of the picked cell, e.g. sl75_max_profit_25"),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """For the picked cell (rule + entry_hour + expiry + delta), compute
     its P&L decomposed by which IV band each Friday's actual entry IV landed
     in. Answers 'does this combo's rule generalise across IV regimes?'
     """
-    try_load_grid_only()
-    if _GRID_STATE["status"] != "ready":
-        return {"rows": [], "status": _GRID_STATE["status"]}
-    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset})
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
+    if grid_state["status"] != "ready":
+        return {"rows": [], "status": grid_state["status"]}
+    grid: pd.DataFrame = grid_state["grid"]
     if grid is None or grid.empty:
         return {"rows": [], "status": "empty"}
     # Same (expiry, delta, hour, rule) — all 10 bands' cells.
@@ -1996,6 +2479,203 @@ def get_cross_band_check(
     }
 
 
+# ── cell_friday_detail — Friday-level drilldown for one Best Combo cell ───────
+
+# Columns surfaced per trade row. Same shape across all four buckets (losers,
+# worst_winner, largest_win, winners_below_avg_min_mtm) so the frontend can
+# use a single renderer.
+_CELL_FRIDAY_DETAIL_COLS = [
+    "trade_id",
+    "friday_date_ist",
+    "net_pnl_estimate_usd",
+    "min_mtm_usd",
+    "max_mtm_usd",
+    "exit_reason",
+]
+
+
+def _friday_detail_row(r: pd.Series) -> dict:
+    """Coerce one per-trade row to the wire shape. Floats are rounded to 2dp
+    and NaN is mapped to None to keep the JSON payload clean."""
+    out: dict = {}
+    for c in _CELL_FRIDAY_DETAIL_COLS:
+        v = r.get(c)
+        if c == "trade_id":
+            out[c] = "" if v is None else str(v)
+        elif c == "friday_date_ist":
+            out[c] = "" if v is None else str(v)
+        elif c == "exit_reason":
+            out[c] = "" if v is None else str(v)
+        else:
+            try:
+                fv = float(v)
+                out[c] = None if math.isnan(fv) else round(fv, 2)
+            except (TypeError, ValueError):
+                out[c] = None
+    return out
+
+
+def _compute_cell_friday_detail(
+    *,
+    band: str,
+    expiry_bucket: str,
+    delta_target: float,
+    entry_hour_ist: int,
+    rule_label: str,
+    dataset: str = "delta_match",
+    friday_set: Optional[set[str]] = None,
+) -> dict:
+    """Shared implementation behind both IV-Band and Friday-Band cell_friday_detail
+    endpoints. When `friday_set` is set (Friday-Band mode), trades are
+    additionally filtered to those Fridays — the band assignment is then
+    Friday-locked, not per-trade-IV-locked.
+    """
+    rule_dict = _label_to_rule(rule_label, dataset)
+    if rule_dict is None:
+        return {
+            "status": "unknown_rule",
+            "message": f"rule_label '{rule_label}' not found for dataset '{dataset}'.",
+            "cell": None,
+            "losers": [],
+            "worst_winner": None,
+            "largest_win": None,
+            "winners_below_avg_min_mtm": [],
+        }
+
+    derived = m7r._derive_exits({}, rule_dict, dataset=dataset)
+    if derived is None or derived.empty:
+        return {
+            "status": "no_trades",
+            "cell": None,
+            "losers": [],
+            "worst_winner": None,
+            "largest_win": None,
+            "winners_below_avg_min_mtm": [],
+        }
+
+    # Per-cell slice — same shape used by `_compute_cell_metrics` during grid
+    # build. For Friday-Band mode the band classification is per-Friday rather
+    # than per-trade, so the `entry_atm_iv_band` filter is replaced by the
+    # explicit friday_set membership.
+    mask = (
+        (derived["expiry_bucket"] == expiry_bucket)
+        & (np.isclose(derived["delta_target"].astype(float), float(delta_target), atol=0.001))
+        & (derived["entry_hour_ist"] == int(entry_hour_ist))
+    )
+    if friday_set is None:
+        mask &= (derived["entry_atm_iv_band"] == band)
+    else:
+        mask &= derived["friday_date_ist"].astype(str).isin(friday_set)
+    sub = derived[mask].copy()
+    if sub.empty:
+        return {
+            "status": "no_trades",
+            "cell": {
+                "band": band,
+                "expiry_bucket": expiry_bucket,
+                "delta_target": float(delta_target),
+                "entry_hour_ist": int(entry_hour_ist),
+                "rule_label": rule_label,
+                "n_losses": 0,
+                "n_winners_below_avg_min_mtm": 0,
+                "max_win_usd": None,
+                "min_mtm_winners": None,
+                "avg_min_mtm_winners": None,
+            },
+            "losers": [],
+            "worst_winner": None,
+            "largest_win": None,
+            "winners_below_avg_min_mtm": [],
+        }
+
+    is_win = sub["is_win"].astype(bool)
+    winners = sub[is_win]
+    losers = sub[~is_win]
+
+    # Avg min MTM (winners) — same formula as _n_winners_below_avg_min_mtm.
+    if winners.empty:
+        avg_min_mtm_w: Optional[float] = None
+        min_mtm_winners: Optional[float] = None
+        max_win_usd: Optional[float] = None
+    else:
+        m = float(winners["min_mtm_usd"].mean())
+        avg_min_mtm_w = None if math.isnan(m) else m
+        mn = float(winners["min_mtm_usd"].min())
+        min_mtm_winners = None if math.isnan(mn) else mn
+        mx = float(winners["net_pnl_estimate_usd"].max())
+        max_win_usd = None if math.isnan(mx) else mx
+
+    losers_sorted = losers.sort_values("net_pnl_estimate_usd", ascending=True, kind="stable")
+    losers_out = [_friday_detail_row(r) for _, r in losers_sorted.iterrows()]
+
+    worst_winner_out: Optional[dict] = None
+    largest_win_out: Optional[dict] = None
+    if not winners.empty:
+        worst_idx = winners["min_mtm_usd"].astype(float).idxmin()
+        worst_winner_out = _friday_detail_row(winners.loc[worst_idx])
+        lw_idx = winners["net_pnl_estimate_usd"].astype(float).idxmax()
+        largest_win_out = _friday_detail_row(winners.loc[lw_idx])
+
+    if avg_min_mtm_w is not None:
+        below = winners[winners["min_mtm_usd"].astype(float) < avg_min_mtm_w]
+        below_sorted = below.sort_values("min_mtm_usd", ascending=True, kind="stable")
+        below_out = [_friday_detail_row(r) for _, r in below_sorted.iterrows()]
+    else:
+        below_out = []
+
+    return {
+        "status": "ok",
+        "cell": {
+            "band": band,
+            "expiry_bucket": expiry_bucket,
+            "delta_target": float(delta_target),
+            "entry_hour_ist": int(entry_hour_ist),
+            "rule_label": rule_label,
+            "n_trades": int(len(sub)),
+            "n_wins": int(len(winners)),
+            "n_losses": int(len(losers)),
+            "n_winners_below_avg_min_mtm": int(len(below_out)),
+            "max_win_usd": None if max_win_usd is None else round(max_win_usd, 2),
+            "min_mtm_winners": None if min_mtm_winners is None else round(min_mtm_winners, 2),
+            "avg_min_mtm_winners": None if avg_min_mtm_w is None else round(avg_min_mtm_w, 2),
+        },
+        "losers": losers_out,
+        "worst_winner": worst_winner_out,
+        "largest_win": largest_win_out,
+        "winners_below_avg_min_mtm": below_out,
+    }
+
+
+@router.get("/iv_band_best_combo/cell_friday_detail")
+def get_cell_friday_detail(
+    band: str = Query(..., description="The picked cell's IV band (e.g. '0-20')"),
+    expiry_bucket: str = Query(...),
+    delta_target: float = Query(..., ge=0.0, le=1.0),
+    entry_hour_ist: int = Query(..., ge=0, le=23),
+    rule_label: str = Query(..., description="Rule label of the picked cell, e.g. sl75_max_profit_25"),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
+):
+    """For one Best Combo cell, surface the Friday dates behind these four
+    aggregates: losing-trade fridays, the worst-MTM winner, the largest-win
+    trade, and the winners whose min_mtm dipped below the cell's avg.
+
+    Reuses the per-rule `_EXIT_CACHE` so cold call ≈ 5–15 s, warm call ≈ ms.
+    """
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset})
+    return _compute_cell_friday_detail(
+        band=band,
+        expiry_bucket=expiry_bucket,
+        delta_target=delta_target,
+        entry_hour_ist=entry_hour_ist,
+        rule_label=rule_label,
+        dataset=dataset,
+        friday_set=None,
+    )
+
+
 @router.get("/iv_band_best_combo/single_combo_simulation")
 def get_single_combo_simulation(
     expiry_bucket: str = Query(...),
@@ -2004,15 +2684,21 @@ def get_single_combo_simulation(
     rule_label: str = Query(...),
     total_capital_usd: Optional[float] = Query(None, ge=0.0),
     pct_deploy: float = Query(100.0, ge=0.0, le=100.0),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Counterfactual: what if every Friday traded this single combo regardless
     of IV regime? Aggregates the picked combo's cells across ALL bands and
     returns one combined headline.
     """
-    try_load_grid_only()
-    if _GRID_STATE["status"] != "ready":
-        return {"status": _GRID_STATE["status"]}
-    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset})
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
+    if grid_state["status"] != "ready":
+        return {"status": grid_state["status"]}
+    grid: pd.DataFrame = grid_state["grid"]
     if grid is None or grid.empty:
         return {"status": "empty"}
     sub = grid[
@@ -2084,13 +2770,14 @@ def get_single_combo_simulation(
     }
 
 
-def _compute_missed_fridays(picks: pd.DataFrame) -> dict:
+def _compute_missed_fridays(picks: pd.DataFrame,
+                              dataset: str = "delta_match") -> dict:
     """Shared body: given a picks frame (rule_label + (band, hour, expiry, Δ)
     per band), find Fridays not naturally covered by any pick and return
     per-Friday availability of each pick's (hour, expiry, Δ)."""
     if picks.empty:
         return {"rows": [], "status": "no_picks"}
-    trades = m7r._load_trades()
+    trades = m7r._load_trades(dataset)
     if trades.empty:
         return {"rows": [], "status": "no_trades"}
     if "expiry_bucket" not in trades.columns and "dte_days" in trades.columns:
@@ -2145,7 +2832,7 @@ def _compute_missed_fridays(picks: pd.DataFrame) -> dict:
             "delta_target": f"{p['delta_target']:.4g}",
         }
         try:
-            derived = m7r._derive_exits(flt, p["rule_dict"])
+            derived = m7r._derive_exits(flt, p["rule_dict"], dataset=dataset)
         except Exception as exc:  # noqa: BLE001
             log.warning("missed-Fridays rescue: derive_exits failed for pick %s: %s",
                         p["rule_label"], exc)
@@ -2269,6 +2956,8 @@ def get_missed_fridays_for_best_combo(
     expiry_buckets: Optional[str] = Query(None),
     delta_targets: Optional[str] = Query(None),
     entry_hours: Optional[str] = Query(None),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Missed Fridays tied to the Best Combo picker. Accepts ALL sizing + filter
     params from /iv_band_best_combo so the picks computed here exactly match
@@ -2280,10 +2969,14 @@ def get_missed_fridays_for_best_combo(
         raise HTTPException(status_code=400, detail=f"ranking must be one of {sorted(_VALID_RANKINGS)}")
     if rule_family not in _VALID_RULE_FAMILIES:
         raise HTTPException(status_code=400, detail=f"rule_family must be one of {sorted(_VALID_RULE_FAMILIES)}")
-    try_load_grid_only()
-    if _GRID_STATE["status"] != "ready":
-        return {"rows": [], "status": _GRID_STATE["status"]}
-    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset})
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
+    if grid_state["status"] != "ready":
+        return {"rows": [], "status": grid_state["status"]}
+    grid: pd.DataFrame = grid_state["grid"]
     if grid is None or grid.empty:
         return {"rows": [], "status": "empty"}
     family_grid = _filter_grid_by_family(grid, rule_family)
@@ -2309,11 +3002,14 @@ def get_missed_fridays_for_best_combo(
         min_win_rate=min_win_rate,
         max_losing_streak=max_losing_streak,
     )
-    return _compute_missed_fridays(picks)
+    return _compute_missed_fridays(picks, dataset=dataset)
 
 
 @router.get("/iv_band_best_combo/missed_fridays_force_fit")
-def get_missed_fridays_force_fit():
+def get_missed_fridays_force_fit(
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
+):
     """For each Friday NOT covered by the current 10 best-combo picks (under
     default conditions), report force-fit details: which of the 10 picks the
     Friday has a trade at, and (where the trade exists) the realized P&L for
@@ -2325,14 +3021,18 @@ def get_missed_fridays_force_fit():
     Returns: per-Friday list with {friday_date_ist, n_total_trades, bands_touched,
     pick_availability: [{pick_band, fits, net_pnl_if_fit, win_if_fit}]}.
     """
-    try_load_grid_only()
-    if _GRID_STATE["status"] != "ready":
-        return {"rows": [], "status": _GRID_STATE["status"]}
-    grid: pd.DataFrame = _GRID_STATE["grid"]
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset})
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
+    if grid_state["status"] != "ready":
+        return {"rows": [], "status": grid_state["status"]}
+    grid: pd.DataFrame = grid_state["grid"]
     if grid is None or grid.empty:
         return {"rows": [], "status": "empty"}
     picks = _pick_best_per_band(grid, "avg_net_pnl", min_hit_pct=50.0)
-    return _compute_missed_fridays(picks)
+    return _compute_missed_fridays(picks, dataset=dataset)
 
 
 # Tiny in-memory cache for coverage responses keyed by (query-args tuple,
@@ -2340,6 +3040,15 @@ def get_missed_fridays_force_fit():
 # first call. Invalidated whenever the underlying trades parquet changes.
 _COVERAGE_CACHE: dict[tuple, dict] = {}
 _COVERAGE_CACHE_MAX = 16
+
+# Per-cache-key async warmup state. Cold calls used to block ~18s (picker
+# + classifier) — long enough for the browser/proxy to time out, surfacing
+# as a 500. Now: on cache miss, kick off a daemon thread that computes the
+# payload and writes it into _COVERAGE_CACHE; the endpoint returns a
+# warming response immediately so the frontend can poll. Idempotent —
+# multiple requests for the same key share one thread.
+_COVERAGE_WARMUP_TASKS: dict[tuple, threading.Thread] = {}
+_COVERAGE_WARMUP_LOCK = threading.Lock()
 
 
 @router.get("/iv_band_best_combo/coverage")
@@ -2367,6 +3076,8 @@ def get_iv_band_best_combo_coverage(
     coverage_mode: str = Query(
         "force_fit",
         description="Friday-dedup mode: 'force_fit' (any (h,e,Δ) match across bands + closest-fallback) or 'touched_band' (only bands the Friday's IV touched; no closest-fallback)."),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Best Combo picker + Friday dedup overlay (sibling of /iv_band_best_combo).
 
@@ -2377,6 +3088,10 @@ def get_iv_band_best_combo_coverage(
     `n_touched_band`, `n_closest_fallback`) plus a top-level
     `coverage_summary` block.
     """
+    if dataset == "price_match":
+        if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
+            return _price_match_no_data_payload({"dataset": dataset,
+                                                  "coverage_mode": coverage_mode})
     if coverage_mode not in ("force_fit", "touched_band"):
         raise HTTPException(400, "coverage_mode must be 'force_fit' or 'touched_band'")
     if ranking not in _VALID_RANKINGS:
@@ -2386,26 +3101,34 @@ def get_iv_band_best_combo_coverage(
     if pick_mode not in ("by_hour", "aggregate_hours"):
         raise HTTPException(400, "pick_mode must be 'by_hour' or 'aggregate_hours'")
 
-    try_load_grid_only()
+    try_load_grid_only(dataset)
+    grid_state = _get_grid_state(dataset)
 
     # ── Response cache lookup ─────────────────────────────────────────────────
-    # Picker (~7s) + classifier (~9s) is too slow for an interactive mode
-    # toggle. Cache the response by (all query args) + trades mtime so the
-    # second call (and mode flip) is sub-second.
-    m7r._load_trades()  # ensure mtime is current
+    # Picker (~7s) + classifier (~9s) is too slow to block the request on a
+    # cold call — long enough to hit browser/proxy timeouts (the original
+    # "500 Internal Server Error" the UI showed). Two-layer strategy:
+    #   1. Hot cache → return immediately
+    #   2. Cold key → spawn a daemon thread that runs the heavy work and
+    #      writes the result into the cache; return a warming response so
+    #      the frontend can poll. Each individual request stays sub-second,
+    #      surviving backend restarts.
+    m7r._load_trades(dataset)  # ensure mtime is current for this dataset
+    _, ds_mtime = m7r._TRADES_BY_DATASET.get(dataset, (None, 0.0))
     cache_key = (
+        dataset,
         coverage_mode, ranking, secondary, tolerance_pct, rule_family,
         total_capital_usd, pct_deploy, dd_metric, dd_threshold,
         dd_metrics, dd_thresholds, min_hit_pct, max_loss_cap_pct,
         max_drop_peak_to_trough_pct, min_n_trades, min_win_rate,
         max_losing_streak, pick_mode,
         expiry_buckets, delta_targets, entry_hours,
-        m7r._TRADES_MTIME,
+        ds_mtime,
     )
     cached = _COVERAGE_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    if _GRID_STATE["status"] == "pending":
+    if grid_state["status"] == "pending":
         return {
             "ranking": ranking,
             "coverage_mode": coverage_mode,
@@ -2415,11 +3138,11 @@ def get_iv_band_best_combo_coverage(
                        "app.scripts.build_m7_best_combo_grid` to build.",
             "rows": [],
         }
-    if _GRID_STATE["status"] == "error":
+    if grid_state["status"] == "error":
         raise HTTPException(status_code=500,
-                            detail=f"warmup failed: {_GRID_STATE['error']}")
+                            detail=f"warmup failed: {grid_state['error']}")
 
-    grid: pd.DataFrame = _GRID_STATE["grid"]
+    grid: pd.DataFrame = grid_state["grid"]
     if grid is None or grid.empty:
         return {
             "ranking": ranking, "coverage_mode": coverage_mode,
@@ -2431,6 +3154,86 @@ def get_iv_band_best_combo_coverage(
             },
             "n_rules": 0, "n_cells": 0,
         }
+
+    # Cache miss with a ready grid → kick off async computation.
+    _kick_off_coverage_warmup(
+        cache_key,
+        ranking=ranking, secondary=secondary, tolerance_pct=tolerance_pct,
+        rule_family=rule_family, total_capital_usd=total_capital_usd,
+        pct_deploy=pct_deploy, dd_metric=dd_metric, dd_threshold=dd_threshold,
+        dd_metrics=dd_metrics, dd_thresholds=dd_thresholds,
+        min_hit_pct=min_hit_pct, max_loss_cap_pct=max_loss_cap_pct,
+        max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
+        min_n_trades=min_n_trades, min_win_rate=min_win_rate,
+        max_losing_streak=max_losing_streak, pick_mode=pick_mode,
+        expiry_buckets=expiry_buckets, delta_targets=delta_targets,
+        entry_hours=entry_hours, coverage_mode=coverage_mode,
+        dataset=dataset,
+    )
+    return {
+        "ranking": ranking,
+        "coverage_mode": coverage_mode,
+        "status": "warming",
+        "rows": [],
+        "coverage_summary": {
+            "total_fridays": 0, "n_assigned": 0, "n_uncovered": 0,
+            "n_rule": 0, "n_force_fit": 0,
+            "n_touched_band": 0, "n_closest_fallback": 0,
+        },
+        "n_rules": len(_rule_variants()),
+        "n_cells": 0,
+    }
+
+
+def _kick_off_coverage_warmup(cache_key: tuple, **payload_kwargs) -> None:
+    """Idempotent: spawn one daemon thread per cache_key that computes the
+    coverage payload and writes it into `_COVERAGE_CACHE`. If a thread is
+    already running for the same key, do nothing (callers can poll until
+    the cache fills)."""
+    with _COVERAGE_WARMUP_LOCK:
+        if _COVERAGE_CACHE.get(cache_key) is not None:
+            return
+        existing = _COVERAGE_WARMUP_TASKS.get(cache_key)
+        if existing is not None and existing.is_alive():
+            return
+
+        def _do_warmup() -> None:
+            try:
+                _compute_coverage_payload(cache_key=cache_key, **payload_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("coverage warmup failed for key=%s: %s",
+                            cache_key, exc)
+            finally:
+                with _COVERAGE_WARMUP_LOCK:
+                    _COVERAGE_WARMUP_TASKS.pop(cache_key, None)
+
+        t = threading.Thread(target=_do_warmup, daemon=True,
+                             name=f"coverage-warmup")
+        _COVERAGE_WARMUP_TASKS[cache_key] = t
+        t.start()
+
+
+def _compute_coverage_payload(
+    *, cache_key: tuple,
+    ranking: str, secondary: Optional[str], tolerance_pct: float,
+    rule_family: str, total_capital_usd: Optional[float],
+    pct_deploy: float, dd_metric: Optional[str],
+    dd_threshold: Optional[float], dd_metrics: Optional[str],
+    dd_thresholds: Optional[str], min_hit_pct: float,
+    max_loss_cap_pct: Optional[float],
+    max_drop_peak_to_trough_pct: Optional[float],
+    min_n_trades: int, min_win_rate: Optional[float],
+    max_losing_streak: Optional[int], pick_mode: str,
+    expiry_buckets: Optional[str], delta_targets: Optional[str],
+    entry_hours: Optional[str], coverage_mode: str,
+    dataset: str = "delta_match",
+) -> dict:
+    """The heavy lifting: picker + classifier + row assembly. Called from
+    a daemon thread on cache miss; result is stored in `_COVERAGE_CACHE`
+    so subsequent requests for the same args return instantly. The
+    endpoint itself never invokes this directly — it always returns the
+    cached payload or a warming response."""
+    grid: pd.DataFrame = _get_grid_state(dataset)["grid"]
 
     # 1. Run the same picker logic as /iv_band_best_combo
     family_grid = _filter_grid_by_family(grid, rule_family)
@@ -2500,7 +3303,7 @@ def get_iv_band_best_combo_coverage(
     from app.api.m7_full_coverage import _classify_fridays_to_cells  # avoid circular import at module load
 
     try:
-        derived = m7r._load_trades().copy()
+        derived = m7r._load_trades(dataset).copy()
     except Exception as exc:  # noqa: BLE001
         log.warning("coverage: _load_trades failed: %s", exc)
         derived = pd.DataFrame()

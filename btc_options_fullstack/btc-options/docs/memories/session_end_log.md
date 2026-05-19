@@ -955,3 +955,895 @@ dd26998 docs(M7): handoff + work log for Chunk 1 (per-leg attribution)
 ?? scripts/m7_iv_band_best_combo.xlsx
 ?? "../../new platform arch/"
 ```
+
+---
+## Snapshot — 2026-05-14 13:18 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+88f31e1 docs(M7): rule label vs realized return audit + session_end snapshot
+7e27539 feat(M7): Best Combo picker has its own Missed Fridays table
+cf2286f feat(M7): family-aware filter tagging + Best fallback exit column
+a928d78 fix(M7): rule-comparison modal shows per-rule lots + filter status
+958fb81 feat(M-Month): filter bar + lastfri_bimonthly @18:00 IST + Rule #5 (dedicated container)
+acde2fc fix(M7): derive sum_net_pnl at grid-load so 'Total net P&L' dropdown works
+4b6e78b fix(M7): scale modal $ values to the picked cell's actual lots
+d4ada07 feat(M7): aggregate-hours picker mode + win-rate filter
+baf6cf9 docs(M-Month): Session 24 handoff — Phase A+B+B+ + multi-agent verification
+864cd32 feat(M-Month): module for monthly + bimonthly + last-Fri-rolling strangles
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/backend/app/main.py                |  3 +-
+ .../src/components/m7/M7CellAnalysisModal.tsx      | 16 +++++++--
+ .../src/components/m7/M7RuleComparisonModal.tsx    |  8 ++++-
+ .../frontend/src/pages/M7SweepDashboard.tsx        | 37 +++++++++++++++++++-
+ .../btc-options/frontend/src/services/m7_api.ts    | 39 +++++++++++++++++++---
+ 5 files changed, 93 insertions(+), 10 deletions(-)
+```
+
+### Git Status
+```
+ M backend/app/main.py
+ M frontend/src/components/m7/M7CellAnalysisModal.tsx
+ M frontend/src/components/m7/M7RuleComparisonModal.tsx
+ M frontend/src/pages/M7SweepDashboard.tsx
+ M frontend/src/services/m7_api.ts
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? backend/app/api/m7_friday_band_best_combo.py
+?? backend/app/scripts/build_m7_friday_band_grid.py
+?? backend/app/scripts/build_m7_friday_band_mode_grids.py
+?? backend/app/scripts/build_m7_friday_sat_iv.py
+?? docs/m7_friday_band_explained.docx
+?? frontend/src/components/m7/M7FridayBandBestComboTable.tsx
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-friday-band-a1-final.png
+?? m7-friday-band-a1-initial.png
+?? m7-friday-band-b1.png
+?? m7-friday-band-cell-analysis-final.png
+?? m7-friday-band-d1-default.png
+?? m7-friday-band-d1-with-3-tiebreakers.png
+?? m7-friday-band-tab-a1.png
+?? m7-friday-band-tab-b1.png
+?? m7-friday-band-tab-d1.png
+?? m7-sweep-after-restart.png
+?? m7_after_restart.md
+?? m7_aggregate_hours_mode.png
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_modal_scaled_to_lots.png
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_rule_comparison_per_rule_lots_filters.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_lfb_final.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? scripts/audit_rule_label_vs_realized.py
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-14 15:59 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+3274f08 fix(M7): auto-retry transient 500s during backend restart
+226eb89 feat(M7): Friday-locked-band parallel dashboard
+e5041fe feat(M7): restrict picker to short-dated expiries only
+2f03a45 ux(M7): add ✓ All quick-select for Expiry/Δ/Hour filters
+0461f83 ux(M7): make Expiry/Δ/Hour filters' empty=all state explicit
+55c3d34 feat(M7): expiry / Δ / entry-hour whitelist filters on Best Combo picker
+88f31e1 docs(M7): rule label vs realized return audit + session_end snapshot
+7e27539 feat(M7): Best Combo picker has its own Missed Fridays table
+cf2286f feat(M7): family-aware filter tagging + Best fallback exit column
+a928d78 fix(M7): rule-comparison modal shows per-rule lots + filter status
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ .../btc-options/docs/memories/session_end_log.md   | 92 ++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+```
+
+### Git Status
+```
+ M docs/memories/session_end_log.md
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? backend/app/analytics/m9_friday_weekly_backtester.py
+?? backend/app/api/m9_friday_weekly_best_combo.py
+?? backend/app/api/m9_friday_weekly_results.py
+?? frontend/src/pages/M9FridayWeeklyDashboard.tsx
+?? frontend/src/services/m9_api.ts
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-fb-final-banner-v2.png
+?? m7-fb-final-banner.png
+?? m7-fb-final-with-iv-banner.png
+?? m7-fb-iv-banner.png
+?? m7-fb-scroll1.png
+?? m7-fb-scroll2.png
+?? m7-fb-scroll3.png
+?? m7-friday-band-a1-final.png
+?? m7-friday-band-a1-initial.png
+?? m7-friday-band-b1.png
+?? m7-friday-band-cell-analysis-final.png
+?? m7-friday-band-d1-default.png
+?? m7-friday-band-d1-with-3-tiebreakers.png
+?? m7-friday-band-dashboard-step2.png
+?? m7-friday-band-tab-a1.png
+?? m7-friday-band-tab-b1.png
+?? m7-friday-band-tab-d1.png
+?? m7-sweep-after-restart.png
+?? m7_after_restart.md
+?? m7_aggregate_hours_mode.png
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_friday_band_after_d1.png
+?? m7_friday_band_final.png
+?? m7_friday_band_initial.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_modal_scaled_to_lots.png
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_rule_comparison_per_rule_lots_filters.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m9_biweekly_5d_snap.yml
+?? m9_stage1_biweekly.png
+?? m9_stage1_biweekly_3d.png
+?? m9_stage1_biweekly_5d.png
+?? m9_stage1_biweekly_composite_rule.png
+?? m9_stage1_weekly_default.png
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_lfb_final.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? phaseC_m7sweep.png
+?? phaseC_m7sweep_regression.png
+?? scripts/audit_rule_label_vs_realized.py
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-14 19:51 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+3274f08 fix(M7): auto-retry transient 500s during backend restart
+226eb89 feat(M7): Friday-locked-band parallel dashboard
+e5041fe feat(M7): restrict picker to short-dated expiries only
+2f03a45 ux(M7): add ✓ All quick-select for Expiry/Δ/Hour filters
+0461f83 ux(M7): make Expiry/Δ/Hour filters' empty=all state explicit
+55c3d34 feat(M7): expiry / Δ / entry-hour whitelist filters on Best Combo picker
+88f31e1 docs(M7): rule label vs realized return audit + session_end snapshot
+7e27539 feat(M7): Best Combo picker has its own Missed Fridays table
+cf2286f feat(M7): family-aware filter tagging + Best fallback exit column
+a928d78 fix(M7): rule-comparison modal shows per-rule lots + filter status
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/HANDOFF.md       |  65 +++-
+ .../btc-options/backend/app/api/m7_best_combo.py   | 384 +++++++++++++++++++--
+ .../backend/app/api/m7_friday_band_best_combo.py   | 198 ++++++++++-
+ .../backend/app/api/m7_friday_band_results.py      |  48 ++-
+ .../btc-options/backend/app/api/m7_results.py      | 124 ++++++-
+ .../btc-options/backend/app/main.py                |  16 +-
+ .../btc-options/docs/memories/session_end_log.md   | 194 +++++++++++
+ .../m7/M7BestComboMissedFridaysTable.tsx           |  38 +-
+ .../components/m7/M7FridayBandBestComboTable.tsx   |  82 ++++-
+ .../src/components/m7/M7IvBandBestComboTable.tsx   |  76 +++-
+ .../frontend/src/pages/M7FridayBandDashboard.tsx   |  12 +-
+ .../frontend/src/pages/M7SweepDashboard.tsx        | 216 ++----------
+ .../btc-options/frontend/src/services/m7_api.ts    | 125 ++++++-
+ .../btc-options/frontend/vite.config.ts            |  10 +-
+ 14 files changed, 1329 insertions(+), 259 deletions(-)
+```
+
+### Git Status
+```
+ M HANDOFF.md
+ M backend/app/api/m7_best_combo.py
+ M backend/app/api/m7_friday_band_best_combo.py
+ M backend/app/api/m7_friday_band_results.py
+ M backend/app/api/m7_results.py
+ M backend/app/main.py
+ M docs/memories/session_end_log.md
+ M frontend/src/components/m7/M7BestComboMissedFridaysTable.tsx
+ M frontend/src/components/m7/M7FridayBandBestComboTable.tsx
+ M frontend/src/components/m7/M7IvBandBestComboTable.tsx
+ M frontend/src/pages/M7FridayBandDashboard.tsx
+ M frontend/src/pages/M7SweepDashboard.tsx
+ M frontend/src/services/m7_api.ts
+ M frontend/vite.config.ts
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? backend/app/analytics/m9_friday_weekly_backtester.py
+?? backend/app/api/m7_ranking_config.py
+?? backend/app/api/m9_friday_weekly_best_combo.py
+?? backend/app/api/m9_friday_weekly_results.py
+?? frontend/src/pages/M9FridayWeeklyDashboard.tsx
+?? frontend/src/services/m9_api.ts
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-fb-after-throttle.png
+?? m7-fb-best-combo-loaded.png
+?? m7-fb-final-banner-v2.png
+?? m7-fb-final-banner.png
+?? m7-fb-final-with-iv-banner.png
+?? m7-fb-fixed.png
+?? m7-fb-iv-banner.png
+?? m7-fb-leg-attr.png
+?? m7-fb-progress-after-build.png
+?? m7-fb-progress-bar-v2.png
+?? m7-fb-progress-bar-v3.png
+?? m7-fb-progress-bar.png
+?? m7-fb-progress-mid-build.png
+?? m7-fb-progress-v4.png
+?? m7-fb-scroll1.png
+?? m7-fb-scroll2.png
+?? m7-fb-scroll3.png
+?? m7-fb-section-bestcombo.png
+?? m7-fb-section-bottom.png
+?? m7-fb-self-healed.png
+?? m7-fb-throttled.png
+?? m7-friday-band-a1-final.png
+?? m7-friday-band-a1-initial.png
+?? m7-friday-band-b1.png
+?? m7-friday-band-cell-analysis-final.png
+?? m7-friday-band-d1-default.png
+?? m7-friday-band-d1-with-3-tiebreakers.png
+?? m7-friday-band-dashboard-step2.png
+?? m7-friday-band-tab-a1.png
+?? m7-friday-band-tab-b1.png
+?? m7-friday-band-tab-d1.png
+?? m7-rescue-2.png
+?? m7-rescue.png
+?? m7-sweep-after-restart.png
+?? m7-sweep-streak-filter-and-no-friday-tab.png
+?? m7-sweep-total-win-loss-and-pro-dd-cap.png
+?? m7-sweep-trimmed.png
+?? m7_after_restart.md
+?? m7_aggregate_hours_mode.png
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_friday_band_after_d1.png
+?? m7_friday_band_final.png
+?? m7_friday_band_initial.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_modal_scaled_to_lots.png
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_rule_comparison_per_rule_lots_filters.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m9_biweekly_5d_snap.yml
+?? m9_stage1_biweekly.png
+?? m9_stage1_biweekly_3d.png
+?? m9_stage1_biweekly_5d.png
+?? m9_stage1_biweekly_composite_rule.png
+?? m9_stage1_weekly_default.png
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_lfb_final.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? phaseC_m7sweep.png
+?? phaseC_m7sweep_regression.png
+?? scripts/audit_rule_label_vs_realized.py
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? v2-live.png
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-14 20:04 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+3274f08 fix(M7): auto-retry transient 500s during backend restart
+226eb89 feat(M7): Friday-locked-band parallel dashboard
+e5041fe feat(M7): restrict picker to short-dated expiries only
+2f03a45 ux(M7): add ✓ All quick-select for Expiry/Δ/Hour filters
+0461f83 ux(M7): make Expiry/Δ/Hour filters' empty=all state explicit
+55c3d34 feat(M7): expiry / Δ / entry-hour whitelist filters on Best Combo picker
+88f31e1 docs(M7): rule label vs realized return audit + session_end snapshot
+7e27539 feat(M7): Best Combo picker has its own Missed Fridays table
+cf2286f feat(M7): family-aware filter tagging + Best fallback exit column
+a928d78 fix(M7): rule-comparison modal shows per-rule lots + filter status
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/HANDOFF.md       |  65 ++-
+ .../btc-options/backend/app/api/m7_best_combo.py   | 446 +++++++++++++++++++--
+ .../backend/app/api/m7_friday_band_best_combo.py   | 198 ++++++++-
+ .../backend/app/api/m7_friday_band_results.py      |  48 ++-
+ .../btc-options/backend/app/api/m7_results.py      | 165 +++++++-
+ .../btc-options/backend/app/main.py                |  16 +-
+ .../tests/test_m7_losses_distribution_scope.py     |  93 +++++
+ .../backend/tests/test_m7_trade_diagnostic.py      |   4 +-
+ .../btc-options/docs/memories/session_end_log.md   | 343 ++++++++++++++++
+ .../m7/M7BestComboMissedFridaysTable.tsx           |  38 +-
+ .../components/m7/M7FridayBandBestComboTable.tsx   |  82 +++-
+ .../src/components/m7/M7IvBandBestComboTable.tsx   | 165 +++++++-
+ .../src/components/m7/M7LossesExplorer.tsx         |  95 +++--
+ .../src/components/m7/M7RuleComparisonModal.tsx    |   7 +-
+ .../src/components/m7/M7TradeDiagnosticModal.tsx   |  95 ++++-
+ .../frontend/src/pages/M7FridayBandDashboard.tsx   |  12 +-
+ .../frontend/src/pages/M7SweepDashboard.tsx        | 244 +++--------
+ .../btc-options/frontend/src/services/m7_api.ts    | 181 ++++++++-
+ .../btc-options/frontend/vite.config.ts            |  10 +-
+ 19 files changed, 2001 insertions(+), 306 deletions(-)
+```
+
+### Git Status
+```
+ M HANDOFF.md
+ M backend/app/api/m7_best_combo.py
+ M backend/app/api/m7_friday_band_best_combo.py
+ M backend/app/api/m7_friday_band_results.py
+ M backend/app/api/m7_results.py
+ M backend/app/main.py
+ M backend/tests/test_m7_losses_distribution_scope.py
+ M backend/tests/test_m7_trade_diagnostic.py
+ M docs/memories/session_end_log.md
+ M frontend/src/components/m7/M7BestComboMissedFridaysTable.tsx
+ M frontend/src/components/m7/M7FridayBandBestComboTable.tsx
+ M frontend/src/components/m7/M7IvBandBestComboTable.tsx
+ M frontend/src/components/m7/M7LossesExplorer.tsx
+ M frontend/src/components/m7/M7RuleComparisonModal.tsx
+ M frontend/src/components/m7/M7TradeDiagnosticModal.tsx
+ M frontend/src/pages/M7FridayBandDashboard.tsx
+ M frontend/src/pages/M7SweepDashboard.tsx
+ M frontend/src/services/m7_api.ts
+ M frontend/vite.config.ts
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? backend/app/analytics/m9_friday_weekly_backtester.py
+?? backend/app/api/m7_ranking_config.py
+?? backend/app/api/m9_friday_weekly_best_combo.py
+?? backend/app/api/m9_friday_weekly_results.py
+?? frontend/src/pages/M9FridayWeeklyDashboard.tsx
+?? frontend/src/services/m9_api.ts
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-fb-after-throttle.png
+?? m7-fb-best-combo-loaded.png
+?? m7-fb-final-banner-v2.png
+?? m7-fb-final-banner.png
+?? m7-fb-final-with-iv-banner.png
+?? m7-fb-fixed.png
+?? m7-fb-iv-banner.png
+?? m7-fb-leg-attr.png
+?? m7-fb-progress-after-build.png
+?? m7-fb-progress-bar-v2.png
+?? m7-fb-progress-bar-v3.png
+?? m7-fb-progress-bar.png
+?? m7-fb-progress-mid-build.png
+?? m7-fb-progress-v4.png
+?? m7-fb-scroll1.png
+?? m7-fb-scroll2.png
+?? m7-fb-scroll3.png
+?? m7-fb-section-bestcombo.png
+?? m7-fb-section-bottom.png
+?? m7-fb-self-healed.png
+?? m7-fb-throttled.png
+?? m7-friday-band-a1-final.png
+?? m7-friday-band-a1-initial.png
+?? m7-friday-band-b1.png
+?? m7-friday-band-cell-analysis-final.png
+?? m7-friday-band-d1-default.png
+?? m7-friday-band-d1-with-3-tiebreakers.png
+?? m7-friday-band-dashboard-step2.png
+?? m7-friday-band-tab-a1.png
+?? m7-friday-band-tab-b1.png
+?? m7-friday-band-tab-d1.png
+?? m7-rescue-2.png
+?? m7-rescue.png
+?? m7-sweep-after-restart.png
+?? m7-sweep-streak-filter-and-no-friday-tab.png
+?? m7-sweep-total-win-loss-and-pro-dd-cap.png
+?? m7-sweep-trimmed.png
+?? m7_after_restart.md
+?? m7_aggregate_hours_mode.png
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_friday_band_after_d1.png
+?? m7_friday_band_final.png
+?? m7_friday_band_initial.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_modal_scaled_to_lots.png
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_rule_comparison_per_rule_lots_filters.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m9_biweekly_5d_snap.yml
+?? m9_stage1_biweekly.png
+?? m9_stage1_biweekly_3d.png
+?? m9_stage1_biweekly_5d.png
+?? m9_stage1_biweekly_composite_rule.png
+?? m9_stage1_weekly_default.png
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_lfb_final.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? phaseC_m7sweep.png
+?? phaseC_m7sweep_regression.png
+?? scripts/audit_rule_label_vs_realized.py
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? v2-live.png
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-15 14:33 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+88a4110 feat(M7): Best Combo + Full Coverage table — deduped Friday attribution
+3274f08 fix(M7): auto-retry transient 500s during backend restart
+226eb89 feat(M7): Friday-locked-band parallel dashboard
+e5041fe feat(M7): restrict picker to short-dated expiries only
+2f03a45 ux(M7): add ✓ All quick-select for Expiry/Δ/Hour filters
+0461f83 ux(M7): make Expiry/Δ/Hour filters' empty=all state explicit
+55c3d34 feat(M7): expiry / Δ / entry-hour whitelist filters on Best Combo picker
+88f31e1 docs(M7): rule label vs realized return audit + session_end snapshot
+7e27539 feat(M7): Best Combo picker has its own Missed Fridays table
+cf2286f feat(M7): family-aware filter tagging + Best fallback exit column
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/HANDOFF.md       | 219 ++++++++-
+ .../btc-options/backend/app/api/m7_best_combo.py   | 359 ++++++++++++++-
+ .../backend/app/api/m7_friday_band_best_combo.py   | 200 +++++++-
+ .../backend/app/api/m7_friday_band_results.py      |  48 +-
+ .../btc-options/backend/app/api/m7_results.py      | 286 +++++++++++-
+ .../btc-options/backend/app/main.py                |  16 +-
+ .../backend/tests/test_m7_best_combo.py            |  17 +-
+ .../backend/tests/test_m7_best_combo_coverage.py   | 162 +++++++
+ .../backend/tests/test_m7_full_coverage.py         |   5 +
+ .../tests/test_m7_losses_distribution_scope.py     | 155 ++++++-
+ .../backend/tests/test_m7_trade_diagnostic.py      |   4 +-
+ .../btc-options/docs/memories/session_end_log.md   | 502 +++++++++++++++++++++
+ .../btc-options/docs/memories/work_log_claude.md   |  25 +
+ .../src/components/m7/M7BestComboCoverageTable.tsx |  25 +-
+ .../m7/M7BestComboMissedFridaysTable.tsx           |  38 +-
+ .../components/m7/M7FridayBandBestComboTable.tsx   |  82 +++-
+ .../src/components/m7/M7IvBandBestComboTable.tsx   | 344 +++++++++++++-
+ .../src/components/m7/M7LossesExplorer.tsx         | 134 ++++--
+ .../src/components/m7/M7RuleComparisonModal.tsx    |   7 +-
+ .../src/components/m7/M7TradeDiagnosticModal.tsx   | 109 ++++-
+ .../frontend/src/pages/M7FridayBandDashboard.tsx   |  12 +-
+ .../btc-options/frontend/src/services/m7_api.ts    |   4 +
+ .../btc-options/frontend/vite.config.ts            |  10 +-
+ 23 files changed, 2658 insertions(+), 105 deletions(-)
+```
+
+### Git Status
+```
+ M HANDOFF.md
+ M backend/app/api/m7_best_combo.py
+ M backend/app/api/m7_friday_band_best_combo.py
+ M backend/app/api/m7_friday_band_results.py
+ M backend/app/api/m7_results.py
+ M backend/app/main.py
+ M backend/tests/test_m7_best_combo.py
+ M backend/tests/test_m7_best_combo_coverage.py
+ M backend/tests/test_m7_full_coverage.py
+ M backend/tests/test_m7_losses_distribution_scope.py
+ M backend/tests/test_m7_trade_diagnostic.py
+ M docs/memories/session_end_log.md
+ M docs/memories/work_log_claude.md
+ M frontend/src/components/m7/M7BestComboCoverageTable.tsx
+ M frontend/src/components/m7/M7BestComboMissedFridaysTable.tsx
+ M frontend/src/components/m7/M7FridayBandBestComboTable.tsx
+ M frontend/src/components/m7/M7IvBandBestComboTable.tsx
+ M frontend/src/components/m7/M7LossesExplorer.tsx
+ M frontend/src/components/m7/M7RuleComparisonModal.tsx
+ M frontend/src/components/m7/M7TradeDiagnosticModal.tsx
+ M frontend/src/pages/M7FridayBandDashboard.tsx
+ M frontend/src/services/m7_api.ts
+ M frontend/vite.config.ts
+?? "../../backtest result for best expiry and delta/"
+?? .claude/
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? backend/app/analytics/m9_friday_weekly_backtester.py
+?? backend/app/api/m7_ranking_config.py
+?? backend/app/api/m9_friday_weekly_best_combo.py
+?? backend/app/api/m9_friday_weekly_results.py
+?? backend/app/scripts/build_m7_bucketed_grids.py
+?? backend/app/scripts/calibrate_m7_slope_cutoffs.py
+?? backend/app/scripts/enrich_m7_trades_with_iv_slopes.py
+?? backend/app/scripts/m7_composite_score_calibration.py
+?? frontend/src/pages/M9FridayWeeklyDashboard.tsx
+?? frontend/src/services/m9_api.ts
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-coverage-table.png
+?? m7-fb-after-throttle.png
+?? m7-fb-best-combo-loaded.png
+?? m7-fb-final-banner-v2.png
+?? m7-fb-final-banner.png
+?? m7-fb-final-with-iv-banner.png
+?? m7-fb-fixed.png
+?? m7-fb-iv-banner.png
+?? m7-fb-leg-attr.png
+?? m7-fb-progress-after-build.png
+?? m7-fb-progress-bar-v2.png
+?? m7-fb-progress-bar-v3.png
+?? m7-fb-progress-bar.png
+?? m7-fb-progress-mid-build.png
+?? m7-fb-progress-v4.png
+?? m7-fb-scroll1.png
+?? m7-fb-scroll2.png
+?? m7-fb-scroll3.png
+?? m7-fb-section-bestcombo.png
+?? m7-fb-section-bottom.png
+?? m7-fb-self-healed.png
+?? m7-fb-throttled.png
+?? m7-friday-band-a1-final.png
+?? m7-friday-band-a1-initial.png
+?? m7-friday-band-b1.png
+?? m7-friday-band-cell-analysis-final.png
+?? m7-friday-band-d1-default.png
+?? m7-friday-band-d1-with-3-tiebreakers.png
+?? m7-friday-band-dashboard-step2.png
+?? m7-friday-band-tab-a1.png
+?? m7-friday-band-tab-b1.png
+?? m7-friday-band-tab-d1.png
+?? m7-fullcov-table.png
+?? m7-fullcov-touched.png
+?? m7-multi-dd-cap.png
+?? m7-rescue-2.png
+?? m7-rescue.png
+?? m7-sweep-after-restart.png
+?? m7-sweep-streak-filter-and-no-friday-tab.png
+?? m7-sweep-total-win-loss-and-pro-dd-cap.png
+?? m7-sweep-trimmed.png
+?? m7-sweep-v7-zigzag-cols-pre-rebuild.png
+?? m7-sweep-v7-zigzag-lazy-live.png
+?? m7-sweep-v7-zigzag-populated.png
+?? m7_after_restart.md
+?? m7_aggregate_hours_mode.png
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_friday_band_after_d1.png
+?? m7_friday_band_final.png
+?? m7_friday_band_initial.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_modal_scaled_to_lots.png
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_rule_comparison_per_rule_lots_filters.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m9_biweekly_5d_snap.yml
+?? m9_stage1_biweekly.png
+?? m9_stage1_biweekly_3d.png
+?? m9_stage1_biweekly_5d.png
+?? m9_stage1_biweekly_composite_rule.png
+?? m9_stage1_weekly_default.png
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_lfb_final.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? phaseB-tabs.png
+?? phaseC_m7sweep.png
+?? phaseC_m7sweep_regression.png
+?? scripts/audit_rule_label_vs_realized.py
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? v2-live.png
+?? "../../new platform arch/"
+```
+
+---
+## Snapshot — 2026-05-17 22:30 (branch: mainbranch-gemini_claude)
+
+### Recent Commits (last 10)
+```
+8109c08 feat(M7): add Sat 05/06/07 IST exit hours + partial-grid rebuild script
+da68fce feat(M7): Friday-Band MTM Overlay panel — avg + extremes per band
+88a4110 feat(M7): Best Combo + Full Coverage table — deduped Friday attribution
+3274f08 fix(M7): auto-retry transient 500s during backend restart
+226eb89 feat(M7): Friday-locked-band parallel dashboard
+e5041fe feat(M7): restrict picker to short-dated expiries only
+2f03a45 ux(M7): add ✓ All quick-select for Expiry/Δ/Hour filters
+0461f83 ux(M7): make Expiry/Δ/Hour filters' empty=all state explicit
+55c3d34 feat(M7): expiry / Δ / entry-hour whitelist filters on Best Combo picker
+88f31e1 docs(M7): rule label vs realized return audit + session_end snapshot
+```
+
+### Uncommitted Changes (git diff --stat)
+```
+ btc_options_fullstack/btc-options/HANDOFF.md       | 206 +++++-
+ .../backend/app/analytics/m7_batch_backtester.py   |  94 ++-
+ .../btc-options/backend/app/api/m7_best_combo.py   | 772 ++++++++++++++++++---
+ .../backend/app/api/m7_friday_band_best_combo.py   | 200 +++++-
+ .../backend/app/api/m7_full_coverage.py            |   6 +-
+ .../btc-options/backend/app/api/m7_results.py      | 575 ++++++++++++---
+ .../btc-options/backend/app/main.py                |  19 +-
+ .../backend/tests/test_m7_best_combo.py            |  17 +-
+ .../backend/tests/test_m7_best_combo_coverage.py   | 162 +++++
+ .../backend/tests/test_m7_full_coverage.py         |   5 +
+ .../tests/test_m7_losses_distribution_scope.py     | 155 ++++-
+ .../backend/tests/test_m7_trade_diagnostic.py      |   4 +-
+ .../btc-options/docs/memories/current_state.md     |  52 ++
+ .../btc-options/docs/memories/session_end_log.md   | 682 ++++++++++++++++++
+ .../btc-options/docs/memories/work_log_claude.md   |  74 ++
+ .../src/components/m7/M7BestComboCoverageTable.tsx |  29 +-
+ .../m7/M7BestComboMissedFridaysTable.tsx           |  45 +-
+ .../src/components/m7/M7BestComboPathMarkers.tsx   |  10 +-
+ .../components/m7/M7FridayBandBestComboTable.tsx   |  82 ++-
+ .../src/components/m7/M7IvBandBestComboTable.tsx   | 406 ++++++++++-
+ .../src/components/m7/M7LossesExplorer.tsx         | 140 +++-
+ .../src/components/m7/M7RuleComparisonModal.tsx    |   7 +-
+ .../src/components/m7/M7TradeDiagnosticModal.tsx   | 109 ++-
+ .../frontend/src/pages/M7SweepDashboard.tsx        | 100 ++-
+ .../btc-options/frontend/src/services/m7_api.ts    | 178 ++++-
+ .../btc-options/frontend/src/utils/marginEngine.ts |   8 +-
+ .../btc-options/frontend/vite.config.ts            |  10 +-
+ .../btc-options/scripts/margin_engine.py           |   8 +-
+ 28 files changed, 3791 insertions(+), 364 deletions(-)
+```
+
+### Git Status
+```
+ M HANDOFF.md
+ M backend/app/analytics/m7_batch_backtester.py
+ M backend/app/api/m7_best_combo.py
+ M backend/app/api/m7_friday_band_best_combo.py
+ M backend/app/api/m7_full_coverage.py
+ M backend/app/api/m7_results.py
+ M backend/app/main.py
+ M backend/tests/test_m7_best_combo.py
+ M backend/tests/test_m7_best_combo_coverage.py
+ M backend/tests/test_m7_full_coverage.py
+ M backend/tests/test_m7_losses_distribution_scope.py
+ M backend/tests/test_m7_trade_diagnostic.py
+ M docs/memories/current_state.md
+ M docs/memories/session_end_log.md
+ M docs/memories/work_log_claude.md
+ M frontend/src/components/m7/M7BestComboCoverageTable.tsx
+ M frontend/src/components/m7/M7BestComboMissedFridaysTable.tsx
+ M frontend/src/components/m7/M7BestComboPathMarkers.tsx
+ M frontend/src/components/m7/M7FridayBandBestComboTable.tsx
+ M frontend/src/components/m7/M7IvBandBestComboTable.tsx
+ M frontend/src/components/m7/M7LossesExplorer.tsx
+ M frontend/src/components/m7/M7RuleComparisonModal.tsx
+ M frontend/src/components/m7/M7TradeDiagnosticModal.tsx
+ M frontend/src/pages/M7SweepDashboard.tsx
+ M frontend/src/services/m7_api.ts
+ M frontend/src/utils/marginEngine.ts
+ M frontend/vite.config.ts
+ M scripts/margin_engine.py
+?? "../../backtest result for best expiry and delta/"
+?? .playwright-mcp/
+?? "Slipage calculation SS/"
+?? "UI ss/feb 6 2026 iv more than 130.jpeg"
+?? backend/app/analytics/m7_batch_backtester_joint.py
+?? backend/app/analytics/m7_strike_picker_joint.py
+?? backend/app/analytics/m9_friday_weekly_backtester.py
+?? backend/app/api/m7_best_combo_hybrid.py
+?? backend/app/api/m7_hybrid_results.py
+?? backend/app/api/m7_joint_match_stats.py
+?? backend/app/api/m7_ranking_config.py
+?? backend/app/api/m9_friday_weekly_best_combo.py
+?? backend/app/api/m9_friday_weekly_results.py
+?? backend/app/scripts/build_m7_best_combo_grid_hybrid.py
+?? backend/app/scripts/build_m7_best_combo_grid_price_matched.py
+?? backend/app/scripts/build_m7_bucketed_grids.py
+?? backend/app/scripts/calibrate_m7_slope_cutoffs.py
+?? backend/app/scripts/enrich_m7_trades_with_iv_slopes.py
+?? backend/app/scripts/m7_composite_score_calibration.py
+?? backend/tests/test_m7_batch_backtester_append.py
+?? backend/tests/test_m7_best_combo_hybrid.py
+?? backend/tests/test_m7_joint_match.py
+?? frontend/src/components/m7/M7JointMatchStats.tsx
+?? frontend/src/pages/M9FridayWeeklyDashboard.tsx
+?? frontend/src/services/m9_api.ts
+?? m7-after-fixes-delta-match.png
+?? m7-after-fixes-initial.png
+?? m7-after-fixes-price-match-final.png
+?? m7-after-reload.png
+?? m7-bestcombo-tiebreak-controls.png
+?? m7-coverage-table.png
+?? m7-crash-on-load.png
+?? m7-fb-after-throttle.png
+?? m7-fb-best-combo-loaded.png
+?? m7-fb-final-banner-v2.png
+?? m7-fb-final-banner.png
+?? m7-fb-final-with-iv-banner.png
+?? m7-fb-fixed.png
+?? m7-fb-iv-banner.png
+?? m7-fb-leg-attr.png
+?? m7-fb-mtm-overlay-panel-mounted.png
+?? m7-fb-progress-after-build.png
+?? m7-fb-progress-bar-v2.png
+?? m7-fb-progress-bar-v3.png
+?? m7-fb-progress-bar.png
+?? m7-fb-progress-mid-build.png
+?? m7-fb-progress-v4.png
+?? m7-fb-scroll1.png
+?? m7-fb-scroll2.png
+?? m7-fb-scroll3.png
+?? m7-fb-section-bestcombo.png
+?? m7-fb-section-bottom.png
+?? m7-fb-self-healed.png
+?? m7-fb-throttled.png
+?? m7-friday-band-a1-final.png
+?? m7-friday-band-a1-initial.png
+?? m7-friday-band-b1.png
+?? m7-friday-band-cell-analysis-final.png
+?? m7-friday-band-d1-default.png
+?? m7-friday-band-d1-with-3-tiebreakers.png
+?? m7-friday-band-dashboard-step2.png
+?? m7-friday-band-tab-a1.png
+?? m7-friday-band-tab-b1.png
+?? m7-friday-band-tab-d1.png
+?? m7-fullcov-table.png
+?? m7-fullcov-touched.png
+?? m7-multi-dd-cap.png
+?? m7-rescue-2.png
+?? m7-rescue.png
+?? m7-sweep-after-restart.png
+?? m7-sweep-back-to-delta.png
+?? m7-sweep-initial.png
+?? m7-sweep-price-match.png
+?? m7-sweep-streak-filter-and-no-friday-tab.png
+?? m7-sweep-total-win-loss-and-pro-dd-cap.png
+?? m7-sweep-trimmed.png
+?? m7-sweep-v7-zigzag-cols-pre-rebuild.png
+?? m7-sweep-v7-zigzag-lazy-live.png
+?? m7-sweep-v7-zigzag-populated.png
+?? m7_after_restart.md
+?? m7_aggregate_hours_mode.png
+?? m7_back_to_force.md
+?? m7_best_combo_rule_hits_renamed.png
+?? m7_feature_A_missed_fridays_force_fit.png
+?? m7_feature_BC_single_combo_modal.png
+?? m7_friday_band_after_d1.png
+?? m7_friday_band_final.png
+?? m7_friday_band_initial.png
+?? m7_full_coverage_initial.png
+?? m7_full_coverage_touched_band.png
+?? m7_info_icon_popover.png
+?? m7_initial.md
+?? m7_modal_scaled_to_lots.png
+?? m7_phase01_header.png
+?? m7_phase01_hit_pct_column.png
+?? m7_phase01_rule_comparison_modal.png
+?? m7_pro_metrics_columns.png
+?? m7_rule_comparison_per_rule_lots_filters.png
+?? m7_sweep.md
+?? m7_sweep2.md
+?? m7_touched_band.md
+?? m7sweep-exit-time-filter.png
+?? m9_biweekly_5d_snap.yml
+?? m9_stage1_biweekly.png
+?? m9_stage1_biweekly_3d.png
+?? m9_stage1_biweekly_5d.png
+?? m9_stage1_biweekly_composite_rule.png
+?? m9_stage1_weekly_default.png
+?? m_month_all_cycles_full_grid.png
+?? m_month_dashboard_stage1.png
+?? m_month_lfb_final.png
+?? m_month_max_profit_25.png
+?? m_month_phase_b_partial.png
+?? phaseB-tabs.png
+?? phaseC_m7sweep.png
+?? phaseC_m7sweep_regression.png
+?? scripts/audit_rule_label_vs_realized.py
+?? scripts/calibration_history.csv
+?? scripts/calibration_report.xlsx
+?? scripts/calibration_v2_history.csv
+?? scripts/calibration_v2_report.xlsx
+?? scripts/compare_results.csv
+?? scripts/friday_overnight_pnl.xlsx
+?? scripts/m7_4setup_comparison.xlsx
+?? scripts/m7_exit_rule_sweep.xlsx
+?? scripts/m7_iv_band_best_combo.xlsx
+?? v2-live.png
+?? "../../new platform arch/"
+```

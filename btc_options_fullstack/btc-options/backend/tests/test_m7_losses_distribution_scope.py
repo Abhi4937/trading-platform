@@ -32,6 +32,7 @@ def _call(**kwargs):
         loss_cause=None,
         include_trades=False, trades_limit=50, trades_offset=0,
         trades_sort="pnl_asc", only_sl_hits=False,
+        cells=None,
     )
     defaults.update(kwargs)
     return m7_results.get_losses_distribution(**defaults)
@@ -54,6 +55,9 @@ def _trade(
         "is_win": is_win,
         "is_straddle": False,
         "net_pnl_estimate_usd": net_pnl,
+        # gross_pnl_usd is required by _best_cells_for_metric — it filters out
+        # NaN-gross trades. Use the same value as net_pnl for tests.
+        "gross_pnl_usd": net_pnl,
         "credit_usd": 200.0,
         "margin_usd": 800.0,
         "loss_cause": None if is_win else "directional",
@@ -99,7 +103,13 @@ def _make_universe() -> pd.DataFrame:
 def patched_derive(monkeypatch):
     """Replace `_derive_exits` with a synthetic universe + filter pass-through.
     The synthetic frame is filtered the same way `_apply_filters` would, so
-    filter-flow-through tests behave correctly."""
+    filter-flow-through tests behave correctly.
+
+    Also installs a sentinel `_EXIT_CACHE` whose `.get(...)` always returns a
+    non-None DataFrame so the cells-mode warmup precheck treats every rule as
+    cached. Without this, cells-mode tests would all return the warming
+    response (the stubbed `_derive_exits` never populates the real cache).
+    The cold-cache warming path has its own dedicated test below."""
     state = {"df": _make_universe()}
 
     def _stub(filters: dict, exit_rule: dict) -> pd.DataFrame:
@@ -124,7 +134,14 @@ def patched_derive(monkeypatch):
             df = df[df[col].isin(vals_c)]
         return df.reset_index(drop=True)
 
+    class _SentinelCache(dict):
+        def get(self, key, default=None):
+            v = super().get(key)
+            return v if v is not None else _SENTINEL_DF
+    _SENTINEL_DF = pd.DataFrame({"_sentinel": [True]})
+
     monkeypatch.setattr(m7_results, "_derive_exits", _stub)
+    monkeypatch.setattr(m7_results, "_EXIT_CACHE", _SentinelCache())
     return state
 
 
@@ -300,3 +317,139 @@ def test_scope_best_combo_warming_returns_empty_with_progress(monkeypatch,
     assert out["scope_summary"].get("warming") is True
     assert out["scope_summary"]["rules_done"] == 5
     assert out["scope_summary"]["rules_total"] == 21
+
+
+# ── Tests for `cells` mode (dashboard's Best Combo selections passed down) ────
+
+def test_cells_param_filters_to_listed_cells(patched_derive):
+    """When `cells` is provided, scope_summary.scope='cells'. Only the trades
+    matching the (band, hour, expiry, delta) tuples are kept."""
+    import json
+    # Pick only cell A's combo (band 30-40, hour 21, expiry current Sat, Δ 0.30).
+    # All 4 universe rows in cell A are winners → 0 losers.
+    cells_json = json.dumps([{
+        "entry_atm_iv_band": "30-40",
+        "entry_hour_ist": 21,
+        "expiry_bucket": "current (Sat)",
+        "delta_target": 0.30,
+        "rule": {"premium_sl_pct": 100},
+        "rule_label": "baseline_sl100",
+    }])
+    out = _call(cells=cells_json)
+    assert out["scope_summary"]["scope"] == "cells"
+    assert out["n_total"] == 4
+    assert out["n_losses"] == 0
+    assert out["scope_summary"]["exit_rule_overridden"] is True
+    rules = out["scope_summary"]["per_band_rules"]
+    assert len(rules) == 1
+    assert rules[0]["band"] == "30-40"
+    assert rules[0]["n_trades"] == 4
+
+
+def test_cells_param_multi_band_concat(patched_derive):
+    """Two cells from different bands → trades concat without duplicates."""
+    import json
+    cells_json = json.dumps([
+        {"entry_atm_iv_band": "30-40", "entry_hour_ist": 21,
+         "expiry_bucket": "current (Sat)", "delta_target": 0.30,
+         "rule": {"premium_sl_pct": 100}, "rule_label": "baseline"},
+        {"entry_atm_iv_band": "30-40", "entry_hour_ist": 22,
+         "expiry_bucket": "next (Sun)", "delta_target": 0.50,
+         "rule": {"premium_sl_pct": 100}, "rule_label": "baseline"},
+    ])
+    out = _call(cells=cells_json)
+    # 4 (cell A) + 4 (cell B) = 8 trades. Cell B has 3 losers.
+    assert out["n_total"] == 8
+    assert out["n_losses"] == 3
+    assert len(out["scope_summary"]["per_band_rules"]) == 2
+
+
+def test_cells_param_malformed_json_returns_400(patched_derive):
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        _call(cells="not json")
+    assert exc.value.status_code == 400
+
+
+def test_cells_param_empty_list_returns_empty(patched_derive):
+    import json
+    out = _call(cells=json.dumps([]))
+    assert out["n_total"] == 0
+    assert out["n_losses"] == 0
+
+
+def test_cells_param_takes_priority_over_scope(patched_derive):
+    """When both `cells` and scope='full_coverage' are given, cells wins."""
+    import json
+    cells_json = json.dumps([{
+        "entry_atm_iv_band": "30-40", "entry_hour_ist": 21,
+        "expiry_bucket": "current (Sat)", "delta_target": 0.30,
+        "rule": {"premium_sl_pct": 100},
+    }])
+    out = _call(cells=cells_json, scope="full_coverage")
+    # cells path used: only cell A's 4 winners returned
+    assert out["scope_summary"]["scope"] == "cells"
+    assert out["n_total"] == 4
+
+
+def test_cells_param_include_trades_works(patched_derive):
+    """losers_sample respects the scoped cells set."""
+    import json
+    cells_json = json.dumps([{
+        "entry_atm_iv_band": "30-40", "entry_hour_ist": 22,
+        "expiry_bucket": "next (Sun)", "delta_target": 0.50,
+        "rule": {"premium_sl_pct": 100},
+    }])
+    out = _call(cells=cells_json, include_trades=True, trades_limit=10)
+    # Cell B has 3 losers among 4 trades
+    assert out["n_total"] == 4
+    assert out["n_losses"] == 3
+    assert out["losers_sample_total"] == 3
+    assert len(out["losers_sample"]) == 3
+
+
+def test_cells_param_cold_cache_returns_warming(monkeypatch):
+    """When the `_EXIT_CACHE` is cold for one or more requested rules, the
+    endpoint returns a warming response immediately and kicks off an async
+    `_warmup_rule_async` per unique rule. Frontend polls until the cache
+    fills. This avoids long-blocking requests that get killed by backend
+    restarts."""
+    import json
+    # Start with a fresh empty cache.
+    monkeypatch.setattr(m7_results, "_EXIT_CACHE", {})
+    # Record async warmup invocations so we can assert one fired per unique
+    # rule_dict without actually spawning threads in the test.
+    seen: list[dict] = []
+    monkeypatch.setattr(m7_results, "_warmup_rule_async",
+                        lambda rd: seen.append(dict(rd)))
+    # Stub `_derive_exits` defensively — should NOT be called on the cold
+    # path because the precheck short-circuits before the per-cell loop.
+    def _no_derive(*_a, **_k):
+        raise AssertionError("_derive_exits called despite cold-cache warming")
+    monkeypatch.setattr(m7_results, "_derive_exits", _no_derive)
+
+    cells_json = json.dumps([
+        {"entry_atm_iv_band": "30-40", "entry_hour_ist": 21,
+         "expiry_bucket": "current (Sat)", "delta_target": 0.30,
+         "rule": {"premium_sl_pct": 100}},
+        {"entry_atm_iv_band": "70-80", "entry_hour_ist": 23,
+         "expiry_bucket": "next (Sun)", "delta_target": 0.50,
+         "rule": {"premium_sl_pct": 50, "max_profit_pct": 30}},
+        # Duplicate rule — should NOT fire a second warmup.
+        {"entry_atm_iv_band": "0-20", "entry_hour_ist": 22,
+         "expiry_bucket": "current (Sat)", "delta_target": 0.30,
+         "rule": {"premium_sl_pct": 100}},
+    ])
+    out = _call(cells=cells_json)
+    assert out["scope_summary"]["warming"] is True
+    assert out["scope_summary"]["rules_done"] == 0
+    assert out["scope_summary"]["rules_total"] == 2  # 2 unique rules, dedup
+    assert out["n_total"] == 0
+    assert out["n_losses"] == 0
+    # One warmup call per unique rule_dict.
+    assert len(seen) == 2
+    rule_keys = {json.dumps(r, sort_keys=True) for r in seen}
+    assert rule_keys == {
+        json.dumps({"premium_sl_pct": 100}, sort_keys=True),
+        json.dumps({"premium_sl_pct": 50, "max_profit_pct": 30}, sort_keys=True),
+    }

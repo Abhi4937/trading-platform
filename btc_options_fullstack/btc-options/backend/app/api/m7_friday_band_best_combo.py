@@ -24,10 +24,12 @@ Endpoints mirror /iv_band_best_combo:
 from __future__ import annotations
 
 from typing import Optional
+import hashlib
 import logging
 import math
 import os
 import threading
+import time
 
 from fastapi import APIRouter, HTTPException, Query
 import numpy as np
@@ -42,6 +44,36 @@ log = logging.getLogger(__name__)
 GRID_PARQUET_PATH = "/home/abhis/btc-data/derived/m7/m7_friday_band_grid_v1.parquet"
 SAT_IV_PATH = "/home/abhis/btc-data/derived/m7/m7_friday_sat_iv_v1.parquet"
 PER_TRADE_DIR = "/home/abhis/btc-data/derived/m7/m7_friday_band_per_trade"
+# Auto-persist cache for D1 multi-tiebreaker chains that don't have a named
+# pre-built disk grid. First request for any chain pays ~20-30s build time;
+# subsequent requests (across restarts) hit this cache.
+CHAIN_CACHE_DIR = "/home/abhis/btc-data/derived/m7/m7_friday_band_grid_cache"
+
+
+# Module-level per-chain build-progress tracking. Read by the
+# /friday_band_best_combo/build_progress endpoint so the UI can show a bar
+# while a long in-process build runs. Keyed by the same `cache_key` used in
+# `_get_grid_for_mode` (e.g. "D1:best_avg_net_pnl,modal_band,earliest_hour_band").
+_BUILD_PROGRESS: dict[str, dict] = {}
+_BUILD_PROGRESS_LOCK = threading.Lock()
+
+
+def _track_progress(cache_key: str, phase: str, progress: float,
+                   message: Optional[str] = None) -> None:
+    with _BUILD_PROGRESS_LOCK:
+        _BUILD_PROGRESS[cache_key] = {
+            "phase": phase,
+            "progress": float(progress),
+            "message": message,
+            "ts": time.time(),
+        }
+
+
+def _read_progress(cache_key: str) -> dict:
+    with _BUILD_PROGRESS_LOCK:
+        return dict(_BUILD_PROGRESS.get(cache_key, {
+            "phase": "idle", "progress": 0.0, "message": None, "ts": None,
+        }))
 
 
 # ── Mode + tiebreaker spec ────────────────────────────────────────────────────
@@ -587,13 +619,90 @@ def _disk_mode_key(band_mode: str, d1_tiebreakers: list[str]) -> Optional[str]:
     return mapping.get(primary)
 
 
+def _chain_cache_path(band_mode: str, d1_tiebreakers: list[str]) -> Optional[str]:
+    """Persistent disk cache path for D1 multi-tiebreaker chains.
+
+    Returns None for B1 and D1-single-tb (those use named pre-built grids).
+    Hash-keyed so order matters (tiebreakers are applied in priority order).
+    Cached files survive backend restarts and are shared between sessions.
+    """
+    if band_mode != "D1":
+        return None
+    chain_without_fallback = [t for t in d1_tiebreakers if t != _D1_FALLBACK_DEFAULT]
+    if len(chain_without_fallback) <= 1:
+        return None  # named grid handles this
+    # Hash the chain (order-preserving) so e.g. [A,B] ≠ [B,A].
+    seed = f"D1|{','.join(d1_tiebreakers)}"
+    h = hashlib.md5(seed.encode()).hexdigest()[:12]
+    return os.path.join(CHAIN_CACHE_DIR, f"d1_chain_{h}.parquet")
+
+
+def _save_chain_cache(grid: pd.DataFrame, path: str, cache_key: str) -> None:
+    """Persist a freshly-built D1 chain grid to disk for next time.
+
+    Tolerates write failure (logs, doesn't raise) since the in-memory cache
+    still serves the current process.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Strip enrichment cols (recomputed on load) and the dict-typed `rule`
+        # column which doesn't survive parquet — they're re-added by
+        # `_load_chain_cache`.
+        slim = grid.copy()
+        if "rule" in slim.columns:
+            slim = slim.drop(columns=["rule"])
+        slim.to_parquet(path, index=False)
+        log.info("M7 Friday-band chain cache saved: %s (%d cells, key=%s)",
+                 os.path.basename(path), len(grid), cache_key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("M7 Friday-band chain cache save failed (%s): %s", path, exc)
+
+
+def _load_chain_cache(path: str) -> Optional[pd.DataFrame]:
+    """Load a previously-saved D1 chain grid from disk, run enrichers.
+
+    Validates freshness against the trades parquet — if trades were
+    re-derived since the cache was written, returns None so the build path
+    re-runs.
+    """
+    if not os.path.exists(path):
+        return None
+    if not _grid_is_fresh(path):
+        log.info("M7 Friday-band chain cache stale (older than trades), rebuilding: %s",
+                 os.path.basename(path))
+        return None
+    try:
+        grid = pd.read_parquet(path)
+        grid = m7bc._unflatten_after_load(grid)
+        # Backfill MTM cols the enrichers expect.
+        for col in [
+            "avg_min_mtm_winners", "avg_max_mtm_winners",
+            "avg_min_mtm_losers",  "avg_max_mtm_losers",
+            "min_mtm_winners", "max_mtm_winners",
+            "min_mtm_losers",  "max_mtm_losers",
+        ]:
+            if col not in grid.columns:
+                grid[col] = float("nan")
+        if "rule" not in grid.columns:
+            grid["rule"] = [{} for _ in range(len(grid))]
+        grid = m7bc._enrich_grid_with_overall_mtm(grid)
+        grid = m7bc._attach_composite_score(grid)
+        grid = m7bc._attach_risk_adjusted(grid)
+        return grid
+    except Exception as exc:  # noqa: BLE001
+        log.warning("M7 Friday-band chain cache load failed (%s): %s", path, exc)
+        return None
+
+
 def _get_grid_for_mode(band_mode: str, d1_tiebreakers: list[str]) -> pd.DataFrame:
     """Return the grid for the chosen mode.
 
     A1 — loaded from disk parquet (pre-built).
     B1/D1 (no-lookahead primary tiebreaker) — pre-built grid loaded from disk.
     D1 with lookahead primary tiebreaker — derived in-process from per-trade
-        archive + the chosen Friday-band assignment. Cached in _GRID_STATE.
+        archive + the chosen Friday-band assignment. Cached in _GRID_STATE,
+        and persisted to disk via `_chain_cache_path` so subsequent
+        requests (even after restart) skip the rebuild.
     """
     if band_mode == "A1":
         return _GRID_STATE["grid_a1"]
@@ -617,28 +726,61 @@ def _get_grid_for_mode(band_mode: str, d1_tiebreakers: list[str]) -> pd.DataFram
     with _MODE_GRID_LOCK:
         cached = _GRID_STATE["mode_grids"].get(cache_key)
         if cached is not None:
+            _track_progress(cache_key, "done", 1.0, "served from memory cache")
             return cached
+
+        # Try the persistent disk cache (D1 multi-tb chains only).
+        chain_path = _chain_cache_path(band_mode, d1_tiebreakers)
+        if chain_path is not None:
+            _track_progress(cache_key, "loading_disk_cache", 0.05,
+                           f"checking {os.path.basename(chain_path)}")
+            cached_disk = _load_chain_cache(chain_path)
+            if cached_disk is not None and not cached_disk.empty:
+                _GRID_STATE["mode_grids"][cache_key] = cached_disk
+                _track_progress(cache_key, "done", 1.0,
+                               f"loaded from disk cache ({len(cached_disk)} cells)")
+                log.info("M7 Friday-band chain cache hit: %s (%d cells, key=%s)",
+                         os.path.basename(chain_path), len(cached_disk), cache_key)
+                return cached_disk
 
         sat = _GRID_STATE["sat_iv"]
         if sat is None:
+            _track_progress(cache_key, "error", 0.0, "sat_iv map not loaded")
             return pd.DataFrame()
 
+        _track_progress(cache_key, "loading_per_trade_archive", 0.10,
+                       "loading 3.25M-row trade archive")
         per_trade = _load_per_trade_archive()
         if per_trade is None or per_trade.empty:
+            _track_progress(cache_key, "error", 0.0, "per-trade archive empty")
             return pd.DataFrame()
 
+        _track_progress(cache_key, "building_band_map", 0.30,
+                       "assigning each Friday to a band")
         if band_mode == "B1":
             fb_map = _friday_band_map_b1(sat)
         else:  # D1
             fb_map = _friday_band_map_d1(sat, per_trade, d1_tiebreakers)
 
         if not fb_map:
+            _track_progress(cache_key, "error", 0.0, "band assignment empty")
             return pd.DataFrame()
 
+        _track_progress(cache_key, "aggregating_grid", 0.55,
+                       "vectorized aggregation across cells")
         grid = _build_mode_grid(per_trade, fb_map)
         _GRID_STATE["mode_grids"][cache_key] = grid
         log.info("M7 Friday-band mode grid built in-process: %s → %d cells",
                  cache_key, len(grid))
+
+        # Persist to disk so the next session/restart skips this 20-30s build.
+        if chain_path is not None and not grid.empty:
+            _track_progress(cache_key, "saving_to_disk", 0.92,
+                           f"writing {os.path.basename(chain_path)}")
+            _save_chain_cache(grid, chain_path, cache_key)
+
+        _track_progress(cache_key, "done", 1.0,
+                       f"built {len(grid)} cells")
         return grid
 
 
@@ -694,6 +836,7 @@ def get_friday_band_best_combo(
     max_drop_peak_to_trough_pct: Optional[float] = Query(None, ge=0.0, le=100.0),
     min_n_trades: int = Query(5, ge=0),
     min_win_rate: Optional[float] = Query(None, ge=0.0, le=100.0),
+    max_losing_streak: Optional[int] = Query(None, ge=1),
     pick_mode: str = Query("by_hour"),
     expiry_buckets: Optional[str] = Query(
         "current (Sat),next (Sun),next_to_next (Mon),weekly (7d)",
@@ -771,6 +914,7 @@ def get_friday_band_best_combo(
         max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
         min_n_trades=min_n_trades,
         min_win_rate=min_win_rate,
+        max_losing_streak=max_losing_streak,
     )
 
     # Attach per-band Friday count (n_fridays_in_band) so the UI can show
@@ -797,10 +941,11 @@ def get_friday_band_best_combo(
         "max_drop_peak_to_trough_pct": max_drop_peak_to_trough_pct,
         "min_n_trades": min_n_trades,
         "min_win_rate": min_win_rate,
+        "max_losing_streak": max_losing_streak,
         "pick_mode": pick_mode,
         "expiry_buckets": expiry_buckets,
         "status": "ready",
-        "rows": m7bc._records(best),
+        "rows": m7bc._records(m7bc._attach_zigzag_v7_to_picks(best)),
         "n_rules": len(m7bc._rule_variants()),
         "n_cells": int(len(family_grid)),
     }
@@ -819,6 +964,57 @@ def get_friday_band_best_combo_status():
         "grid_a1_path": _GRID_STATE["grid_a1_path"],
         "grid_a1_exists": os.path.exists(GRID_PARQUET_PATH),
         "sat_iv_exists": os.path.exists(SAT_IV_PATH),
+    }
+
+
+@router.get("/friday_band_best_combo/build_progress")
+def get_friday_band_build_progress(
+    band_mode: str = Query("A1"),
+    d1_tiebreakers: Optional[str] = Query(None),
+):
+    """Progress probe for an in-flight D1 multi-tiebreaker grid build.
+
+    Returns the current build phase + progress for the (band_mode, tiebreakers)
+    chain. The frontend can poll this every 1-2s while the main fetch is
+    pending to render a "Building Friday-band grid…" progress bar.
+
+    Phases: idle | loading_disk_cache | loading_per_trade_archive |
+    building_band_map | aggregating_grid | saving_to_disk | done | error.
+
+    Also reports cache hits — A1 / B1 / D1-single-tb / D1-multi-tb-cached
+    return immediately with phase="done", progress=1.0.
+    """
+    if band_mode not in _VALID_BAND_MODES:
+        raise HTTPException(400, f"band_mode must be one of {sorted(_VALID_BAND_MODES)}")
+    tb = _parse_d1_tiebreakers(d1_tiebreakers) if band_mode == "D1" else []
+
+    # Fast-path responses for already-cached modes
+    if band_mode == "A1" and _GRID_STATE.get("grid_a1") is not None:
+        return {"phase": "done", "progress": 1.0, "ready": True,
+                "source": "a1_disk_grid", "message": "A1 grid in memory"}
+    disk_key = _disk_mode_key(band_mode, tb)
+    if disk_key is not None and disk_key in _GRID_STATE["mode_grids"]:
+        return {"phase": "done", "progress": 1.0, "ready": True,
+                "source": "named_disk_grid", "message": f"{disk_key} grid in memory"}
+
+    cache_key = "B1" if band_mode == "B1" else "D1:" + ",".join(tb)
+    if cache_key in _GRID_STATE["mode_grids"]:
+        return {"phase": "done", "progress": 1.0, "ready": True,
+                "source": "memory_cache", "message": "served from in-memory cache"}
+
+    # Otherwise return the build-tracker state. If a disk-cache file exists
+    # for the chain, the next request will load it in ~500ms — flag that so
+    # the UI shows "loading from disk" instead of "building".
+    chain_path = _chain_cache_path(band_mode, tb)
+    disk_cache_exists = bool(chain_path and os.path.exists(chain_path))
+
+    prog = _read_progress(cache_key)
+    return {
+        **prog,
+        "ready": prog.get("phase") == "done",
+        "cache_key": cache_key,
+        "disk_cache_path": (os.path.basename(chain_path) if chain_path else None),
+        "disk_cache_exists": disk_cache_exists,
     }
 
 
@@ -947,6 +1143,63 @@ def get_friday_band_cross_band_check(
         "d1_tiebreakers": tiebreakers,
         "n_bands": int(len(sub)),
     }
+
+
+@router.get("/friday_band_best_combo/cell_friday_detail")
+def get_friday_band_cell_friday_detail(
+    band: str = Query(..., description="The picked cell's Friday-locked band (e.g. '0-20')"),
+    expiry_bucket: str = Query(...),
+    delta_target: float = Query(..., ge=0.0, le=1.0),
+    entry_hour_ist: int = Query(..., ge=0, le=23),
+    rule_label: str = Query(...),
+    band_mode: str = Query("A1"),
+    d1_tiebreakers: Optional[str] = Query(None),
+):
+    """Friday-Band variant of /iv_band_best_combo/cell_friday_detail.
+
+    For the picked cell, surfaces the Friday dates behind the four aggregates
+    (losing fridays, worst-MTM winner, largest-win trade, winners < avg
+    MinMTM). Trades are restricted to Fridays assigned to `band` under the
+    chosen `band_mode` (+ optional D1 tiebreakers).
+    """
+    if band_mode not in _VALID_BAND_MODES:
+        raise HTTPException(400, f"band_mode must be one of {sorted(_VALID_BAND_MODES)}")
+    tiebreakers = _parse_d1_tiebreakers(d1_tiebreakers) if band_mode == "D1" else []
+
+    _load_grid_and_sat_iv()
+    sat = _GRID_STATE.get("sat_iv")
+    if sat is None or sat.empty:
+        return {
+            "status": "not_built",
+            "cell": None,
+            "losers": [],
+            "worst_winner": None,
+            "largest_win": None,
+            "winners_below_avg_min_mtm": [],
+        }
+    if band_mode == "A1":
+        fb_map = _friday_band_map_a1(sat)
+    elif band_mode == "B1":
+        fb_map = _friday_band_map_b1(sat)
+    else:
+        pt = _load_per_trade_archive() if any(
+            t in _D1_TIEBREAKERS_LOOKAHEAD for t in tiebreakers
+        ) else None
+        fb_map = _friday_band_map_d1(sat, pt, tiebreakers)
+    friday_set = {str(f) for f, b in fb_map.items() if b == band}
+
+    detail = m7bc._compute_cell_friday_detail(
+        band=band,
+        expiry_bucket=expiry_bucket,
+        delta_target=delta_target,
+        entry_hour_ist=entry_hour_ist,
+        rule_label=rule_label,
+        dataset="delta_match",
+        friday_set=friday_set,
+    )
+    detail["band_mode"] = band_mode
+    detail["d1_tiebreakers"] = tiebreakers
+    return detail
 
 
 @router.get("/friday_band_best_combo/single_combo_simulation")

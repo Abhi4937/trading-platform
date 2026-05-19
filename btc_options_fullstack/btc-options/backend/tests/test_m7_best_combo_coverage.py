@@ -168,3 +168,165 @@ def test_empty_cells():
     ])
     a = _classify_fridays_to_cells(trades, pd.DataFrame())
     assert a.empty
+
+
+# ── Endpoint-level warming behaviour ──────────────────────────────────────────
+
+def test_endpoint_warming_returns_immediately(monkeypatch):
+    """Cache miss with a ready grid → endpoint returns status='warming'
+    immediately and kicks off one async warmup thread per cache_key.
+    Subsequent identical requests reuse the in-flight thread (no double
+    work). The frontend polls until the cache fills."""
+    from app.api import m7_best_combo as bc
+    from app.api import m7_results as m7r
+
+    # Stub a ready grid so the endpoint doesn't short-circuit on
+    # status='pending' / empty grid.
+    bc._GRID_STATE["status"] = "ready"
+    bc._GRID_STATE["grid"] = pd.DataFrame([
+        {"iv_band": "30-40", "expiry_bucket": "current (Sat)", "delta_target": 0.3,
+         "entry_hour_ist": 23, "rule_label": "sl100_baseline",
+         "rule": {"premium_sl_pct": 100}, "avg_net_pnl": 50.0, "n_trades": 10},
+    ])
+    monkeypatch.setattr(bc, "_COVERAGE_CACHE", {})
+    monkeypatch.setattr(bc, "_COVERAGE_WARMUP_TASKS", {})
+    # Force trades-mtime stable across calls so cache_key matches.
+    monkeypatch.setattr(m7r, "_TRADES_MTIME", 1234.0)
+    monkeypatch.setattr(m7r, "_load_trades", lambda: pd.DataFrame())
+
+    # Record warmup calls without spawning real threads.
+    seen: list[tuple] = []
+    monkeypatch.setattr(bc, "_kick_off_coverage_warmup",
+                        lambda cache_key, **kw: seen.append((cache_key, dict(kw))))
+
+    out = bc.get_iv_band_best_combo_coverage(
+        ranking="avg_net_pnl", secondary=None, tolerance_pct=5.0,
+        rule_family="all", total_capital_usd=None, pct_deploy=100.0,
+        dd_metric=None, dd_threshold=None,
+        dd_metrics=None, dd_thresholds=None,
+        min_hit_pct=50.0, max_loss_cap_pct=None,
+        max_drop_peak_to_trough_pct=None,
+        min_n_trades=5, min_win_rate=None, max_losing_streak=None,
+        pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
+        entry_hours=None, coverage_mode="force_fit",
+    )
+    assert out["status"] == "warming"
+    assert out["rows"] == []
+    assert out["coverage_summary"]["total_fridays"] == 0
+    assert len(seen) == 1
+    cache_key, kw = seen[0]
+    assert kw["coverage_mode"] == "force_fit"
+    assert kw["ranking"] == "avg_net_pnl"
+
+    # Second call for same args → still warming (cache miss), but the
+    # kick-off helper is called again (idempotent: the helper itself
+    # short-circuits if a thread is already running). We just verify
+    # the endpoint stays non-blocking.
+    out2 = bc.get_iv_band_best_combo_coverage(
+        ranking="avg_net_pnl", secondary=None, tolerance_pct=5.0,
+        rule_family="all", total_capital_usd=None, pct_deploy=100.0,
+        dd_metric=None, dd_threshold=None,
+        dd_metrics=None, dd_thresholds=None,
+        min_hit_pct=50.0, max_loss_cap_pct=None,
+        max_drop_peak_to_trough_pct=None,
+        min_n_trades=5, min_win_rate=None, max_losing_streak=None,
+        pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
+        entry_hours=None, coverage_mode="force_fit",
+    )
+    assert out2["status"] == "warming"
+
+
+def test_endpoint_cache_hit_returns_cached_payload(monkeypatch):
+    """When a cached payload exists for the cache_key, the endpoint
+    returns it without spawning a warmup thread."""
+    from app.api import m7_best_combo as bc
+    from app.api import m7_results as m7r
+
+    bc._GRID_STATE["status"] = "ready"
+    bc._GRID_STATE["grid"] = pd.DataFrame([
+        {"iv_band": "30-40", "expiry_bucket": "current (Sat)", "delta_target": 0.3,
+         "entry_hour_ist": 23, "rule_label": "sl100_baseline",
+         "rule": {"premium_sl_pct": 100}, "avg_net_pnl": 50.0, "n_trades": 10},
+    ])
+    monkeypatch.setattr(m7r, "_TRADES_MTIME", 9999.0)
+    monkeypatch.setattr(m7r, "_load_trades", lambda: pd.DataFrame())
+
+    sentinel = {"status": "ready", "rows": [{"_cached": True}],
+                "coverage_mode": "force_fit"}
+    cache_key = (
+        "force_fit", "avg_net_pnl", None, 5.0, "all",
+        None, 100.0, None, None, None, None, 50.0, None, None, 5, None,
+        None, "by_hour", None, None, None, 9999.0,
+    )
+    monkeypatch.setattr(bc, "_COVERAGE_CACHE", {cache_key: sentinel})
+
+    spawned: list = []
+    monkeypatch.setattr(bc, "_kick_off_coverage_warmup",
+                        lambda *a, **k: spawned.append((a, k)))
+
+    out = bc.get_iv_band_best_combo_coverage(
+        ranking="avg_net_pnl", secondary=None, tolerance_pct=5.0,
+        rule_family="all", total_capital_usd=None, pct_deploy=100.0,
+        dd_metric=None, dd_threshold=None,
+        dd_metrics=None, dd_thresholds=None,
+        min_hit_pct=50.0, max_loss_cap_pct=None,
+        max_drop_peak_to_trough_pct=None,
+        min_n_trades=5, min_win_rate=None, max_losing_streak=None,
+        pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
+        entry_hours=None, coverage_mode="force_fit",
+    )
+    assert out is sentinel
+    assert spawned == []
+
+
+def test_kick_off_coverage_warmup_idempotent(monkeypatch):
+    """Two calls for the same cache_key while a thread is still running
+    must result in exactly one thread (the second call short-circuits)."""
+    from app.api import m7_best_combo as bc
+    import threading
+
+    monkeypatch.setattr(bc, "_COVERAGE_CACHE", {})
+    monkeypatch.setattr(bc, "_COVERAGE_WARMUP_TASKS", {})
+
+    # Block the thread on an event so we can fire two requests while it's
+    # still alive — exactly the race the lock guards against.
+    block = threading.Event()
+    started = threading.Event()
+    invocations = {"n": 0}
+
+    def _slow_compute(*, cache_key, **kw):
+        invocations["n"] += 1
+        started.set()
+        block.wait(timeout=5)
+        bc._COVERAGE_CACHE[cache_key] = {"status": "ready", "rows": []}
+
+    monkeypatch.setattr(bc, "_compute_coverage_payload", _slow_compute)
+
+    cache_key = ("k",)
+    bc._kick_off_coverage_warmup(cache_key, ranking="avg_net_pnl",
+        secondary=None, tolerance_pct=5.0, rule_family="all",
+        total_capital_usd=None, pct_deploy=100.0,
+        dd_metric=None, dd_threshold=None,
+        dd_metrics=None, dd_thresholds=None,
+        min_hit_pct=50.0, max_loss_cap_pct=None,
+        max_drop_peak_to_trough_pct=None,
+        min_n_trades=5, min_win_rate=None, max_losing_streak=None,
+        pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
+        entry_hours=None, coverage_mode="force_fit")
+    assert started.wait(timeout=2), "first thread never started"
+    bc._kick_off_coverage_warmup(cache_key, ranking="avg_net_pnl",
+        secondary=None, tolerance_pct=5.0, rule_family="all",
+        total_capital_usd=None, pct_deploy=100.0,
+        dd_metric=None, dd_threshold=None,
+        dd_metrics=None, dd_thresholds=None,
+        min_hit_pct=50.0, max_loss_cap_pct=None,
+        max_drop_peak_to_trough_pct=None,
+        min_n_trades=5, min_win_rate=None, max_losing_streak=None,
+        pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
+        entry_hours=None, coverage_mode="force_fit")
+    block.set()
+    # Wait for the running thread to finish so the cache fills.
+    t = bc._COVERAGE_WARMUP_TASKS.get(cache_key)
+    if t is not None:
+        t.join(timeout=5)
+    assert invocations["n"] == 1, "second call must reuse the in-flight thread"

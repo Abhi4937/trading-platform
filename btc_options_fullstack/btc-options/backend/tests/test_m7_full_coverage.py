@@ -39,11 +39,16 @@ def _make_derived(rows: list[dict]) -> pd.DataFrame:
 
 
 def _make_best_cells(rows: list[dict]) -> pd.DataFrame:
+    # `score` (cell's historical avg metric) is required by
+    # `_classify_fridays_to_cells` to break force-fit ties across cells.
+    # Tests that don't care about tie-breaking can leave `score` unset; it
+    # defaults to the row's pnl when present, otherwise 0.0.
     return pd.DataFrame([{
         "entry_atm_iv_band": r["band"],
         "entry_hour_ist": r["hour"],
         "expiry_bucket": r["expiry"],
         "delta_target": float(r["delta"]),
+        "score": float(r.get("score", r.get("pnl", 0.0))),
     } for r in rows])
 
 

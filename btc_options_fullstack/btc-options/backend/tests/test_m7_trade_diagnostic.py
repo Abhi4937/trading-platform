@@ -247,7 +247,7 @@ def test_losses_distribution_include_trades_returns_losers(patched_derive):
         ctx_pattern=None, ctx_gex_regime=None, friday_date_ist=None,
         loss_cause=None,
         include_trades=True, trades_limit=10, trades_offset=0,
-        trades_sort="pnl_asc", only_sl_hits=False,
+        trades_sort="pnl_asc", only_sl_hits=False, cells=None,
     )
     sample = out["losers_sample"]
     assert out["losers_sample_total"] == 2
@@ -275,7 +275,7 @@ def test_losses_distribution_only_sl_hits_filter(patched_derive):
         ctx_pattern=None, ctx_gex_regime=None, friday_date_ist=None,
         loss_cause=None,
         include_trades=True, trades_limit=10, trades_offset=0,
-        trades_sort="pnl_asc", only_sl_hits=True,
+        trades_sort="pnl_asc", only_sl_hits=True, cells=None,
     )
     sample = out["losers_sample"]
     assert all(r["exit_reason"] == "rule_trigger" for r in sample)

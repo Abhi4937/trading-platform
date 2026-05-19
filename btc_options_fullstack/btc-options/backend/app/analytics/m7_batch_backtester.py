@@ -22,9 +22,16 @@ Outputs (under /home/abhis/btc-data/derived/m7/):
   m7_paths/friday_date=YYYY-MM-DD/part.parquet — 1m path rows, Hive-partitioned
 
 Run:
-  python -m app.analytics.m7_batch_backtester                       # full
-  python -m app.analytics.m7_batch_backtester --since 2024-01-01    # subset
-  python -m app.analytics.m7_batch_backtester --max-fridays 1 --max-expiries 1
+  python -m app.analytics.m7_batch_backtester --rebuild               # full overwrite
+  python -m app.analytics.m7_batch_backtester --since 2024-01-01 --rebuild
+  python -m app.analytics.m7_batch_backtester --max-fridays 1 --max-expiries 1 --rebuild
+
+Incremental (append into existing parquet, idempotent on overlap):
+  python -m app.analytics.m7_batch_backtester --since 2026-04-24 --append
+
+When m7_trades.parquet already exists, --append or --rebuild is REQUIRED.
+The script refuses to silently clobber history. --rebuild takes precedence
+over --append if both are passed.
 """
 
 from __future__ import annotations
@@ -873,6 +880,46 @@ def _process_friday_expiry(friday: date, expiry: date,
     return trades, paths
 
 
+# ── Trades parquet write ──────────────────────────────────────────────────────
+
+def _write_trades_atomic(
+    new_rows: list[dict],
+    out_path: str,
+    *,
+    append: bool,
+) -> int:
+    """Atomic write of the trades parquet. Returns final row count.
+
+    append=True + target exists: read existing, drop rows whose
+    `friday_date_ist` overlaps with new_rows (idempotent re-runs), concat,
+    sort, atomic .tmp → rename.
+
+    append=False or target missing: write new_rows only.
+
+    Raises ValueError if new_rows is empty (callers should short-circuit
+    before reaching here).
+    """
+    if not new_rows:
+        raise ValueError("_write_trades_atomic: new_rows is empty")
+    new_df = pd.DataFrame(new_rows)
+    if append and os.path.exists(out_path):
+        existing = pd.read_parquet(out_path)
+        run_fridays = set(new_df["friday_date_ist"].unique())
+        existing = existing[~existing["friday_date_ist"].isin(run_fridays)]
+        merged = pd.concat([existing, new_df], ignore_index=True)
+    else:
+        merged = new_df
+    sort_cols = [c for c in
+                 ("friday_date_ist", "entry_hour_ist", "expiry_date", "delta_target")
+                 if c in merged.columns]
+    if sort_cols:
+        merged = merged.sort_values(sort_cols).reset_index(drop=True)
+    tmp = out_path + ".tmp"
+    merged.to_parquet(tmp, compression="zstd", index=False)
+    os.replace(tmp, out_path)
+    return len(merged)
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run(args: argparse.Namespace) -> None:
@@ -882,7 +929,21 @@ def run(args: argparse.Namespace) -> None:
     log.info(f"  target deltas   = {TARGET_DELTAS}")
     log.info(f"  qty lots        = {QTY_LOTS}")
     log.info(f"  entry hours IST = {ENTRY_HOURS_IST}")
+    # --rebuild takes precedence over --append (explicit destructive intent).
+    effective_append = bool(args.append and not args.rebuild)
+    log.info(f"  mode            = {'append' if effective_append else 'rebuild'}")
     log.info("─" * 60)
+
+    # Refuse to silently clobber an existing trades parquet — explicit
+    # --append or --rebuild required when target exists.
+    trades_out_path = os.path.join(args.out_dir, "m7_trades.parquet")
+    if (os.path.exists(trades_out_path)
+            and not args.append and not args.rebuild):
+        raise RuntimeError(
+            f"{trades_out_path} already exists. Pass --append to merge new "
+            f"fridays in, or --rebuild to overwrite. Refusing to silently "
+            f"clobber 121+ fridays of history."
+        )
 
     m3 = _load_m3()
     t_min = int(m3.index.min())
@@ -962,12 +1023,10 @@ def run(args: argparse.Namespace) -> None:
         # Incremental trades-parquet write so the API/dashboard can query
         # partial results while the long backfill is still running.
         if all_trades and (fi % 5 == 0 or fi == len(fridays)):
-            trades_df = pd.DataFrame(all_trades)
-            trades_out = os.path.join(args.out_dir, "m7_trades.parquet")
-            tmp = trades_out + ".tmp"
-            trades_df.to_parquet(tmp, compression="zstd", index=False)
-            os.replace(tmp, trades_out)
-            log.info(f"    → m7_trades.parquet snapshot: {len(trades_df):,} rows")
+            n = _write_trades_atomic(
+                all_trades, trades_out_path, append=effective_append)
+            log.info(f"    → m7_trades.parquet snapshot: {n:,} rows "
+                     f"({'merged' if effective_append else 'overwrite'})")
 
         conn.close()
 
@@ -975,17 +1034,13 @@ def run(args: argparse.Namespace) -> None:
         log.error("No trades produced; aborting trades-parquet write.")
         return
 
-    # Write trades parquet (atomic .tmp + rename)
-    trades_df = pd.DataFrame(all_trades)
-    trades_out = os.path.join(args.out_dir, "m7_trades.parquet")
-    tmp = trades_out + ".tmp"
-    trades_df.to_parquet(tmp, compression="zstd", index=False)
-    os.replace(tmp, trades_out)
+    # Final write
+    n = _write_trades_atomic(all_trades, trades_out_path, append=effective_append)
 
     elapsed = _time.time() - t0
     log.info("─" * 60)
     log.info(f"M7 done in {elapsed:.1f}s")
-    log.info(f"  trades = {len(trades_df):,} → {trades_out}")
+    log.info(f"  trades = {n:,} → {trades_out_path}")
     log.info(f"  paths partitioned by friday under: {paths_out_dir}")
 
 
@@ -1003,6 +1058,13 @@ def parse_args() -> argparse.Namespace:
                    help="Limit to first N expiries (debugging).")
     p.add_argument("--out-dir", type=str, default=M7_OUT_DIR,
                    help=f"Output directory. Default: {M7_OUT_DIR}.")
+    p.add_argument("--append", action="store_true",
+                   help="Merge new fridays into existing m7_trades.parquet. "
+                        "Idempotent on overlap: rows whose friday_date_ist "
+                        "is in this run's range are dropped before concat.")
+    p.add_argument("--rebuild", action="store_true",
+                   help="Force overwrite of m7_trades.parquet, ignoring "
+                        "--append. Explicit destructive flag.")
     return p.parse_args()
 
 

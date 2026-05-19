@@ -52,15 +52,16 @@ def _make_df(rows: list[dict]) -> pd.DataFrame:
 
 def test_rule_variants_count_and_shape():
     variants = bc._rule_variants()
-    # 1 baseline + 10 max_profit + 10 margin_target = 21
-    assert len(variants) == 21
+    # 3 SL × (1 baseline + 10 max_profit + 10 margin_target + 11 fixed_hour) = 96
+    assert len(variants) == 96
     labels = [v[0] for v in variants]
-    assert labels[0] == "baseline_sl100"
-    assert "max_profit_30" in labels
-    assert "margin_target_75" in labels
-    # Every variant has premium_sl_pct=100
-    for label, rule in variants:
-        assert rule["premium_sl_pct"] == 100
+    assert "sl50_baseline" in labels
+    assert "sl100_baseline" in labels
+    assert "sl75_max_profit_30" in labels
+    assert "sl100_margin_target_75" in labels
+    # Every variant carries one of the 3 sweep SL values
+    for _label, rule in variants:
+        assert rule["premium_sl_pct"] in (50, 75, 100)
 
 
 def test_rule_variants_no_dual_rule_combos():

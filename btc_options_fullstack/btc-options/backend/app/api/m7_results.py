@@ -41,14 +41,48 @@ TRADES_PATH = os.path.join(M7_BASE_DIR, "m7_trades.parquet")
 TRADES_ENRICHED_PATH = os.path.join(M7_BASE_DIR, "m7_trades_enriched.parquet")
 PATHS_GLOB = os.path.join(M7_BASE_DIR, "m7_paths/friday_date=*/part.parquet")
 
+# Joint delta+price-matched dataset — parallel parquet written by
+# m7_batch_backtester_joint. No enriched variant for v1; falls back gracefully
+# when missing (loaders raise 503 with a clear message).
+TRADES_PATH_PRICE_MATCHED = os.path.join(M7_BASE_DIR, "m7_trades_price_matched.parquet")
+PATHS_GLOB_PRICE_MATCHED = os.path.join(M7_BASE_DIR,
+                                         "m7_paths_price_matched/friday_date=*/part.parquet")
+
+
+def _trades_path_for_dataset(dataset: str) -> str:
+    """Resolve the on-disk trades parquet for the requested dataset.
+    For delta_match: prefer enriched, fall back to plain.
+    For price_match: single canonical path (no enriched variant for v1).
+    """
+    if dataset == "price_match":
+        return TRADES_PATH_PRICE_MATCHED
+    return (TRADES_ENRICHED_PATH
+            if os.path.exists(TRADES_ENRICHED_PATH) else TRADES_PATH)
+
+
+def _paths_glob_for_dataset(dataset: str) -> str:
+    if dataset == "price_match":
+        return PATHS_GLOB_PRICE_MATCHED
+    return PATHS_GLOB
+
+
 # Lazy module-level cache — auto-reloads when the parquet file changes on disk.
+# Keyed by dataset name so delta_match and price_match warm independently.
+_TRADES_BY_DATASET: dict[str, tuple[Optional[pd.DataFrame], float]] = {
+    "delta_match": (None, 0.0),
+    "price_match": (None, 0.0),
+}
+
+# Back-compat aliases — code paths that still reference _TRADES_DF / _TRADES_MTIME
+# without a dataset arg implicitly mean "delta_match" (the only dataset before
+# this refactor). The warmup_rule_async path uses these too.
 _TRADES_DF: Optional[pd.DataFrame] = None
 _TRADES_MTIME: float = 0.0
 
-# Exit derivation cache — keyed by (exit_rule json, trades_mtime).
-# Each entry is the FULL merged DataFrame (all trades, no filters) for that exit_rule.
-# Filtering happens in pandas on the cached frame, avoiding repeat DuckDB scans.
-_EXIT_CACHE: dict[tuple[str, float], pd.DataFrame] = {}
+# Exit derivation cache — keyed by (dataset, exit_rule json, trades_mtime).
+# Each entry is the FULL merged DataFrame (all trades, no filters) for that
+# (dataset, exit_rule). Filtering happens in pandas on the cached frame.
+_EXIT_CACHE: dict[tuple[str, str, float], pd.DataFrame] = {}
 
 # Serialise concurrent DuckDB scans across threads. The warmup thread in
 # `m7_best_combo` runs full-path scans in the background; if a request thread
@@ -58,37 +92,151 @@ _EXIT_CACHE: dict[tuple[str, float], pd.DataFrame] = {}
 # Cache hits in `_derive_exits` skip the lock entirely.
 _EXIT_COMPUTE_LOCK = threading.Lock()
 
+# Per-rule async warmup state for cells-mode. A cells-mode request with N
+# unique rule_dicts on a cold cache would block for N × ~5–15s; if the
+# backend restarts mid-request, the user sees a 500. Instead, when any rule
+# is cold we kick off a background thread per rule, return a warming response
+# immediately, and let the frontend poll. Once cached, the next request
+# returns instantly.
+_CELLS_WARMUP_TASKS: dict[str, threading.Thread] = {}
+_CELLS_WARMUP_LOCK = threading.Lock()
 
-def _load_trades() -> pd.DataFrame:
-    """Prefer m7_trades_enriched.parquet (with calibration_v2 join columns)
-    when present; fall back to plain m7_trades.parquet.
-    Re-reads from disk whenever the file's mtime changes (backfill writes
-    incremental snapshots every 5 Fridays)."""
+
+def _warmup_rule_async(rule_dict: dict, dataset: str = "delta_match") -> None:
+    """Idempotent: kick off `_compute_all_exits(rule_dict)` in a daemon
+    thread so the cells-mode endpoint can return a warming response without
+    blocking. Subsequent calls for the same rule_key are no-ops if a thread
+    is already running or the result is cached."""
+    rule_key = json.dumps(rule_dict or {}, sort_keys=True)
+    with _CELLS_WARMUP_LOCK:
+        _, mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
+        cache_key = (dataset, rule_key, mtime)
+        if _EXIT_CACHE.get(cache_key) is not None:
+            return
+        task_key = f"{dataset}:{rule_key}"
+        existing = _CELLS_WARMUP_TASKS.get(task_key)
+        if existing is not None and existing.is_alive():
+            return
+
+        def _do_warmup() -> None:
+            try:
+                _derive_exits({}, rule_dict, dataset=dataset)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cells warmup: rule %s (%s) failed: %s",
+                            rule_dict, dataset, exc)
+            finally:
+                with _CELLS_WARMUP_LOCK:
+                    _CELLS_WARMUP_TASKS.pop(task_key, None)
+
+        t = threading.Thread(target=_do_warmup, daemon=True,
+                             name=f"cells-warmup-{task_key[:40]}")
+        _CELLS_WARMUP_TASKS[task_key] = t
+        t.start()
+
+
+def _load_trades(dataset: str = "delta_match") -> pd.DataFrame:
+    """Load the trades parquet for the requested dataset.
+
+    delta_match: prefers m7_trades_enriched.parquet (calibration_v2 join cols)
+                 when present; falls back to plain m7_trades.parquet.
+    price_match: m7_trades_price_matched.parquet (no enriched variant for v1).
+
+    Re-reads from disk whenever the file's mtime changes. Maintains per-
+    dataset cache in _TRADES_BY_DATASET; the back-compat globals
+    (_TRADES_DF, _TRADES_MTIME) track the most-recently-loaded dataset for
+    code paths that haven't been threaded yet (`_warmup_rule_async`, cache
+    invalidation logic in callers).
+    """
     global _TRADES_DF, _TRADES_MTIME
-    path = TRADES_ENRICHED_PATH if os.path.exists(TRADES_ENRICHED_PATH) else TRADES_PATH
+    path = _trades_path_for_dataset(dataset)
     if not os.path.exists(path):
         raise HTTPException(
             status_code=503,
-            detail=f"m7_trades.parquet missing under {M7_BASE_DIR}; "
-                   f"run `python -m app.analytics.m7_batch_backtester` first.",
+            detail=(f"{os.path.basename(path)} missing under {M7_BASE_DIR}; "
+                    f"run the m7 backtester for dataset='{dataset}' first."),
         )
     mtime = os.path.getmtime(path)
-    if _TRADES_DF is None or mtime != _TRADES_MTIME:
-        # Trades changed → exit-derivation cache is stale
-        _EXIT_CACHE.clear()
-        _TRADES_DF = pd.read_parquet(path)
+    cached_df, cached_mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
+    if cached_df is None or mtime != cached_mtime:
+        # Trades for this dataset changed → drop ITS exit-cache entries
+        for k in list(_EXIT_CACHE.keys()):
+            if k[0] == dataset:
+                _EXIT_CACHE.pop(k, None)
+        df = pd.read_parquet(path)
         # Derive expiry_bucket from dte_days (not stored by backtester)
-        if "expiry_bucket" not in _TRADES_DF.columns and "dte_days" in _TRADES_DF.columns:
-            _TRADES_DF["expiry_bucket"] = pd.cut(
-                _TRADES_DF["dte_days"],
+        if "expiry_bucket" not in df.columns and "dte_days" in df.columns:
+            df["expiry_bucket"] = pd.cut(
+                df["dte_days"],
                 bins=[0, 1.5, 2.5, 5, 10, 20, 45, float("inf")],
                 labels=["current (Sat)", "next (Sun)", "next_to_next (Mon)",
                         "weekly (7d)", "biweekly (14d)", "monthly (30d)", "quarterly"],
             ).astype(str)
-        _add_entry_skew_columns(_TRADES_DF)
-        _TRADES_MTIME = mtime
-        log.info("M7 trades reloaded: %d rows from %s", len(_TRADES_DF), path)
-    return _TRADES_DF
+        _add_entry_skew_columns(df)
+        _attach_ivrv_and_slope_buckets(df)
+        _TRADES_BY_DATASET[dataset] = (df, mtime)
+        log.info("M7 trades reloaded (%s): %d rows from %s",
+                 dataset, len(df), path)
+        cached_df = df
+        cached_mtime = mtime
+    # Maintain back-compat globals — track whichever dataset was last loaded.
+    _TRADES_DF = cached_df
+    _TRADES_MTIME = cached_mtime
+    return cached_df
+
+
+def _attach_ivrv_and_slope_buckets(df: pd.DataFrame) -> None:
+    """In-place: derive ivrv_bucket + 4 slope-bucket columns from existing
+    per-trade columns. Reads cutoffs from m7_ranking_config:
+      - IVRV uses fixed thresholds (IVRV_RICH_THRESHOLD / IVRV_CHEAP_THRESHOLD).
+      - Each slope uses empirical p33/p67 from slope_cutoffs_v1.json (loaded
+        by load_slope_cutoffs() with a conservative fallback if the JSON is
+        absent — the calibration script writes it after enrichment runs).
+
+    Trades missing the source column (e.g. older parquet without IV slopes)
+    get NaN/None in the corresponding bucket so they're filtered out as
+    `low_n` by downstream consumers.
+    """
+    from app.api.m7_ranking_config import (
+        IVRV_RICH_THRESHOLD, IVRV_CHEAP_THRESHOLD, load_slope_cutoffs,
+    )
+
+    # IVRV — uses existing ctx_iv_rv_spread_7d on every enriched trade.
+    # Vectorized via np.where to avoid .loc[bool_mask_with_NaN] which
+    # tripped a pandas-internals dtype lookup on some load paths.
+    import numpy as np
+    if "ctx_iv_rv_spread_7d" in df.columns:
+        v = pd.to_numeric(df["ctx_iv_rv_spread_7d"], errors="coerce").to_numpy()
+        bucket = np.where(
+            np.isnan(v), None,
+            np.where(v > IVRV_RICH_THRESHOLD, "rich",
+            np.where(v < IVRV_CHEAP_THRESHOLD, "cheap", "fair")),
+        )
+        df["ivrv_bucket"] = bucket
+    else:
+        df["ivrv_bucket"] = None
+
+    # Slopes — empirical p33/p67 cutoffs per slope.
+    cutoffs = load_slope_cutoffs()
+    slope_to_bucket_col = {
+        "slope_current_next":          "slope_cn_bucket",
+        "slope_next_next_to_next":     "slope_nn_bucket",
+        "slope_current_next_to_next":  "slope_cnn_bucket",
+        "ctx_term_slope_7_30":         "ts_legacy_bucket",
+    }
+    for slope_col, bucket_col in slope_to_bucket_col.items():
+        if slope_col not in df.columns:
+            df[bucket_col] = None
+            continue
+        cuts = cutoffs.get(slope_col, {"p33": -0.01, "p67": 0.01})
+        p33 = float(cuts.get("p33", -0.01))
+        p67 = float(cuts.get("p67", 0.01))
+        v = pd.to_numeric(df[slope_col], errors="coerce").to_numpy()
+        bucket = np.where(
+            np.isnan(v), None,
+            np.where(v < p33, "backwardation",
+            np.where(v > p67, "contango", "neutral")),
+        )
+        df[bucket_col] = bucket
 
 
 def _add_entry_skew_columns(df: pd.DataFrame) -> None:
@@ -294,22 +442,34 @@ def _exit_rule_sql_predicate(rule: dict) -> str:
             f"(p.call_mark >= t.call_entry_mark * {mult} "
             f"OR p.put_mark >= t.put_entry_mark * {mult})"
         )
+    if rule.get("capital_sl_pct") is not None:
+        pct = float(rule['capital_sl_pct'])
+        # Capital SL: fires when LOSS reaches pct% of margin deployed for the
+        # trade (margin = capital-deployed per trade, used as a proxy for the
+        # trader's at-risk capital). Mirror of margin_target_pct on the loss
+        # side. pnl_after_slip is signed (negative = loss).
+        parts.append(
+            f"({pnl_after_slip} <= -t.margin_used_usd_at_entry * {pct / 100.0} "
+            f"AND t.margin_used_usd_at_entry > 0)"
+        )
     if not parts:
         return ""
     return " OR ".join(parts)
 
 
-def _derive_exits(filters: dict, exit_rule: dict) -> pd.DataFrame:
+def _derive_exits(filters: dict, exit_rule: dict,
+                   dataset: str = "delta_match") -> pd.DataFrame:
     """For every trade matching `filters`, derive the exit outcome under `exit_rule`.
 
-    Cached: the expensive DuckDB scan is computed once per `exit_rule` for ALL
-    trades, then filtered in pandas. Different exit_rules get separate cache
-    entries; first call for each new rule is slow (~5–15s), subsequent calls
-    with same rule + any filter combo are instant.
+    Cached: the expensive DuckDB scan is computed once per (dataset, exit_rule)
+    for ALL trades, then filtered in pandas. Different exit_rules get separate
+    cache entries; first call for each new rule is slow (~5–15s), subsequent
+    calls with same rule + any filter combo are instant.
     """
     # Ensure trades cache is fresh before computing the cache key.
-    _load_trades()
-    rule_key = (json.dumps(exit_rule or {}, sort_keys=True), _TRADES_MTIME)
+    _load_trades(dataset)
+    _, mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
+    rule_key = (dataset, json.dumps(exit_rule or {}, sort_keys=True), mtime)
     full = _EXIT_CACHE.get(rule_key)
     if full is None:
         # Serialise heavy DuckDB scans across threads. Re-check the cache
@@ -317,16 +477,17 @@ def _derive_exits(filters: dict, exit_rule: dict) -> pd.DataFrame:
         with _EXIT_COMPUTE_LOCK:
             full = _EXIT_CACHE.get(rule_key)
             if full is None:
-                full = _compute_all_exits(exit_rule)
+                full = _compute_all_exits(exit_rule, dataset=dataset)
                 _EXIT_CACHE[rule_key] = full
-                log.info("M7 exit cache populated for rule=%s (%d trades)",
-                         rule_key[0][:80], len(full))
+                log.info("M7 exit cache populated for (%s, %s) (%d trades)",
+                         dataset, rule_key[1][:80], len(full))
     if full.empty:
         return full
     return _apply_filters(full, filters)
 
 
-def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
+def _compute_all_exits(exit_rule: dict,
+                        dataset: str = "delta_match") -> pd.DataFrame:
     """Compute exit outcomes for ALL trades under `exit_rule` (no filters).
     This is the expensive DuckDB scan. Result is cached by `_derive_exits`.
 
@@ -334,9 +495,12 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
     [exit_ts, exit_reason, gross_pnl_usd, net_pnl_estimate_usd,
     pnl_pct_of_credit, pnl_pct_of_margin, exit_call_mark, exit_put_mark, exit_spot].
     """
-    trades = _load_trades()
+    trades = _load_trades(dataset)
     if trades.empty:
         return pd.DataFrame()
+    # Per-dataset on-disk paths (default = delta-match canonical).
+    paths_glob_local = _paths_glob_for_dataset(dataset)
+    trades_path_local = _trades_path_for_dataset(dataset)
 
     # fixed_exit_hour_ist: per-trade Saturday exit at a given IST hour.
     # Formula: target_ts = friday_midnight_utc + 86400 + hour*3600 - 19800
@@ -359,7 +523,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         # Per-trade fixed-hour exit ts (last path row at or before the hour)
         hour_sql = f"""
         SELECT p.trade_id, MAX(p.ts) AS hour_exit_ts
-        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
         JOIN _trade_targets ft ON p.trade_id = ft.trade_id
         WHERE p.ts <= ft._target_ts
         GROUP BY p.trade_id
@@ -369,12 +533,10 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         # bounded to the hour cap). Empty if no rules set.
         pred = _exit_rule_sql_predicate(exit_rule)
         if pred:
-            trades_path = (TRADES_ENRICHED_PATH
-                           if os.path.exists(TRADES_ENRICHED_PATH) else TRADES_PATH)
             triggers_sql = f"""
             SELECT p.trade_id, MIN(p.ts) AS rule_ts
-            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
-            JOIN read_parquet('{trades_path}') t ON p.trade_id = t.trade_id
+            FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
+            JOIN read_parquet('{trades_path_local}') t ON p.trade_id = t.trade_id
             JOIN _trade_targets ft ON p.trade_id = ft.trade_id
             WHERE p.ts <= ft._target_ts AND ({pred})
             GROUP BY p.trade_id
@@ -397,7 +559,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                p.put_mark AS exit_put_mark,
                p.gross_pnl_usd, p.pnl_pct_of_credit, p.pnl_pct_of_margin
         FROM chosen c
-        JOIN read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        JOIN read_parquet('{paths_glob_local}', hive_partitioning=true) p
           ON p.trade_id = c.trade_id AND p.ts = c.exit_ts
         """
         exits = conn.execute(sql).df()
@@ -411,7 +573,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                p.call_mark AS exit_call_mark, p.put_mark AS exit_put_mark,
                p.gross_pnl_usd, p.pnl_pct_of_credit, p.pnl_pct_of_margin,
                'fixed_time' AS exit_reason
-        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
         WHERE p.ts = {fix_ts}
         """
         conn = _duckdb_conn()
@@ -421,19 +583,19 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         pred = _exit_rule_sql_predicate(exit_rule)
         # Trades-side projection: marks for premium_sl, slippage + credit + margin
         # for the entry-slippage-adjusted gross-vs-target comparison.
-        meta_sql = """
+        meta_sql = f"""
         SELECT trade_id, call_entry_mark, put_entry_mark,
                entry_slippage_call_usd, entry_slippage_put_usd,
                credit_usd, margin_used_usd_at_entry
-        FROM read_parquet('{trades_path}')
-        """.format(trades_path=TRADES_PATH if not os.path.exists(TRADES_ENRICHED_PATH) else TRADES_ENRICHED_PATH)
+        FROM read_parquet('{trades_path_local}')
+        """
 
         if pred:
             triggers_sql = f"""
             WITH t AS ({meta_sql})
             SELECT p.trade_id,
                    MIN(p.ts) AS first_trigger_ts
-            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+            FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
             JOIN t ON p.trade_id = t.trade_id
             WHERE {pred}
             GROUP BY p.trade_id
@@ -445,7 +607,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         # Hard-cap = last path row per trade. Compute once per query.
         hardcap_sql = f"""
         SELECT trade_id, MAX(ts) AS hard_cap_ts
-        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true)
+        FROM read_parquet('{paths_glob_local}', hive_partitioning=true)
         GROUP BY trade_id
         """
 
@@ -464,7 +626,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                p.put_mark AS exit_put_mark,
                p.gross_pnl_usd, p.pnl_pct_of_credit, p.pnl_pct_of_margin
         FROM chosen c
-        JOIN read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        JOIN read_parquet('{paths_glob_local}', hive_partitioning=true) p
           ON p.trade_id = c.trade_id AND p.ts = c.exit_ts
         """
         conn = _duckdb_conn()
@@ -537,6 +699,10 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         "entry_rsi_14_1h",  "entry_macd_hist_1h",  "entry_bb_pct_b_1h",  "entry_atr_pct_1h",
         "entry_rsi_14_4h",  "entry_macd_hist_4h",  "entry_bb_pct_b_4h",  "entry_atr_pct_4h",
         "entry_rsi_14_1d",  "entry_macd_hist_1d",  "entry_bb_pct_b_1d",  "entry_atr_pct_1d",
+        # Joint Δ+price match columns (only present in price-matched dataset;
+        # gated below by `if c in trades.columns`).
+        "match_mode", "price_diff_usd", "price_diff_pct",
+        "delta_diff_call", "delta_diff_put",
     ]
     keep_trade_cols = [c for c in keep_trade_cols if c in trades.columns]
     merged = trades[keep_trade_cols].merge(exits, on="trade_id", how="inner")
@@ -575,7 +741,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         WITH troughs AS (
             SELECT p.trade_id,
                    arg_min(p.ts, p.gross_pnl_usd) AS ts_trough
-            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+            FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
             JOIN _trade_exits e ON p.trade_id = e.trade_id
             WHERE p.ts <= e._exit_ts
             GROUP BY p.trade_id
@@ -612,7 +778,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                    AS ts_peak_before,
                arg_max(p.ts, CASE WHEN p.ts > t.ts_trough THEN p.gross_pnl_usd END)
                    AS ts_peak_after
-        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
         JOIN _trade_exits e ON p.trade_id = e.trade_id
         LEFT JOIN troughs t ON p.trade_id = t.trade_id
         WHERE p.ts <= e._exit_ts
@@ -626,7 +792,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
         WITH troughs AS (
             SELECT p.trade_id,
                    arg_min(p.ts, p.gross_pnl_usd) AS ts_trough
-            FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+            FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
             JOIN _trade_exits e ON p.trade_id = e.trade_id
             WHERE p.ts <= e._exit_ts
             GROUP BY p.trade_id
@@ -644,7 +810,7 @@ def _compute_all_exits(exit_rule: dict) -> pd.DataFrame:
                    AS ts_peak_before,
                arg_max(p.ts, CASE WHEN p.ts > t.ts_trough THEN p.gross_pnl_usd END)
                    AS ts_peak_after
-        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true) p
+        FROM read_parquet('{paths_glob_local}', hive_partitioning=true) p
         JOIN _trade_exits e ON p.trade_id = e.trade_id
         LEFT JOIN troughs t ON p.trade_id = t.trade_id
         WHERE p.ts <= e._exit_ts
@@ -1235,8 +1401,11 @@ def _project_trade_to_diagnostic(row: pd.Series) -> dict:
             "exit_ts": _num("exit_ts"),
             "duration_minutes": duration_minutes,
             "entry_hour_ist": _int("entry_hour_ist"),
+            "entry_time_label": _str("entry_time_label"),
             "expiry_bucket": _str("expiry_bucket"),
             "expiry_date": _str("expiry_date"),
+            "dte_days": _num("dte_days"),
+            "dte_hours_at_entry": _num("dte_hours_at_entry"),
             "delta_target": _num("delta_target"),
             "is_straddle": _bool("is_straddle"),
             "exit_reason": _str("exit_reason"),
@@ -1253,10 +1422,18 @@ def _project_trade_to_diagnostic(row: pd.Series) -> dict:
             "max_mtm_usd": _num("max_mtm_usd"),
             "min_mtm_usd": _num("min_mtm_usd"),
             "exit_mtm_usd": _num("exit_mtm_usd"),
+            "max_gross_pnl_usd": _num("max_gross_pnl_usd"),
+            "min_gross_pnl_usd": _num("min_gross_pnl_usd"),
+            "ts_at_max_mtm": _num("ts_at_max_mtm"),
+            "ts_at_min_mtm": _num("ts_at_min_mtm"),
             "rel_time_max_mtm": _num("rel_time_max_mtm"),
             "rel_time_min_mtm": _num("rel_time_min_mtm"),
             "pct_return_on_credit": _num("pct_return_on_credit"),
             "pct_return_on_margin": _num("pct_return_on_margin"),
+            "pnl_pct_of_credit": _num("pnl_pct_of_credit"),
+            "pnl_pct_of_margin": _num("pnl_pct_of_margin"),
+            "pct_max_mtm_on_credit": _num("pct_max_mtm_on_credit"),
+            "pct_min_mtm_on_credit": _num("pct_min_mtm_on_credit"),
             "leg_pnl_diff_usd": _num("leg_pnl_diff_usd"),
         },
         "costs": {
@@ -1272,6 +1449,7 @@ def _project_trade_to_diagnostic(row: pd.Series) -> dict:
             "total_exit_cost_usd":     _num("total_exit_cost_usd"),
         },
         "per_leg": {
+            "quantity_lots": _int("quantity_lots"),
             "call": {
                 "strike": _num("call_strike"),
                 "entry_iv": _num("call_entry_iv"),
@@ -1347,11 +1525,33 @@ def _project_trade_to_diagnostic(row: pd.Series) -> dict:
             "spot_at_min_mtm": spot_min,
             "min_spot_in_window": spot_min_w,
             "max_spot_in_window": spot_max_w,
+            # Full 6-timeframe × 4-indicator spot-technicals grid
+            # (per docs/m7_loss_indicators.md categories #5–6).
             "entry_rsi_14_5m":  _num("entry_rsi_14_5m"),
+            "entry_rsi_14_15m": _num("entry_rsi_14_15m"),
+            "entry_rsi_14_30m": _num("entry_rsi_14_30m"),
+            "entry_rsi_14_1h":  _num("entry_rsi_14_1h"),
             "entry_rsi_14_4h":  _num("entry_rsi_14_4h"),
-            "entry_macd_hist_5m": _num("entry_macd_hist_5m"),
+            "entry_rsi_14_1d":  _num("entry_rsi_14_1d"),
+            "entry_macd_hist_5m":  _num("entry_macd_hist_5m"),
+            "entry_macd_hist_15m": _num("entry_macd_hist_15m"),
+            "entry_macd_hist_30m": _num("entry_macd_hist_30m"),
+            "entry_macd_hist_1h":  _num("entry_macd_hist_1h"),
+            "entry_macd_hist_4h":  _num("entry_macd_hist_4h"),
+            "entry_macd_hist_1d":  _num("entry_macd_hist_1d"),
             "entry_bb_pct_b_5m":  _num("entry_bb_pct_b_5m"),
-            "entry_atr_pct_5m":   _num("entry_atr_pct_5m"),
+            "entry_bb_pct_b_15m": _num("entry_bb_pct_b_15m"),
+            "entry_bb_pct_b_30m": _num("entry_bb_pct_b_30m"),
+            "entry_bb_pct_b_1h":  _num("entry_bb_pct_b_1h"),
+            "entry_bb_pct_b_4h":  _num("entry_bb_pct_b_4h"),
+            "entry_bb_pct_b_1d":  _num("entry_bb_pct_b_1d"),
+            "entry_atr_pct_5m":  _num("entry_atr_pct_5m"),
+            "entry_atr_pct_15m": _num("entry_atr_pct_15m"),
+            "entry_atr_pct_30m": _num("entry_atr_pct_30m"),
+            "entry_atr_pct_1h":  _num("entry_atr_pct_1h"),
+            "entry_atr_pct_4h":  _num("entry_atr_pct_4h"),
+            "entry_atr_pct_1d":  _num("entry_atr_pct_1d"),
+            # Regime context
             "ctx_atr_pct_4h":     _num("ctx_atr_pct_4h"),
             "ctx_adx_14_4h":      _num("ctx_adx_14_4h"),
             "ctx_pcr_oi":         _num("ctx_pcr_oi"),
@@ -1851,6 +2051,8 @@ def get_summary(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+                          description="'delta_match' (default) or 'price_match'."),
 ):
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
@@ -1858,7 +2060,7 @@ def get_summary(
                               ctx_gex_regime, friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"n_trades": 0, "n_wins": 0, "win_rate": 0.0,
                 "avg_net_pnl_usd": 0.0, "total_net_pnl_usd": 0.0,
@@ -1892,8 +2094,11 @@ def get_trades(
     entry_atm_iv_band: Optional[str] = None,
     entry_hour_ist: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
+    dataset: str = Query("delta_match",
+                          description="'delta_match' (default) or 'price_match' "
+                          "to read the joint delta+price-matched parquet."),
 ):
-    df = _apply_filters(_load_trades(), {
+    df = _apply_filters(_load_trades(dataset), {
         "delta_target": delta_target, "is_straddle": is_straddle,
         "expiry_date": expiry_date, "expiry_bucket": expiry_bucket,
         "entry_atm_iv_band": entry_atm_iv_band,
@@ -1908,14 +2113,20 @@ def get_trades(
 
 
 @router.get("/path")
-def get_path(trade_id: str = Query(...)):
+def get_path(
+    trade_id: str = Query(...),
+    dataset: str = Query("delta_match",
+                          description="'delta_match' (default) or 'price_match' "
+                          "to read the joint delta+price-matched paths."),
+):
     """Return the full 1m path for one trade."""
     try:
         tid = int(trade_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="trade_id must be int")
+    paths_glob_local = _paths_glob_for_dataset(dataset)
     sql = f"""
-    SELECT * FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true)
+    SELECT * FROM read_parquet('{paths_glob_local}', hive_partitioning=true)
     WHERE trade_id = {tid}
     ORDER BY ts ASC
     """
@@ -1943,6 +2154,8 @@ def get_aggregate(
     ctx_pattern: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+                          description="'delta_match' (default) or 'price_match'."),
 ):
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
@@ -1950,7 +2163,7 @@ def get_aggregate(
                               friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"rows": [], "metric": metric, "dimensions": dimensions.split(",")}
 
@@ -1976,6 +2189,8 @@ def get_heatmap(
     expiry_bucket: Optional[str] = None,
     entry_atm_iv_band: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Entry-time × Friday heatmap (one cell per friday_date × entry_hour)."""
     filters = _query_filters(delta_target, None, expiry_date,
@@ -1983,7 +2198,7 @@ def get_heatmap(
                               None, None, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"rows": []}
     grp = derived.groupby(["entry_hour_ist", "friday_date_ist"], dropna=False)
@@ -2011,6 +2226,8 @@ def get_missed_fridays(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """For each Friday NOT represented in any of the 10 IV-band best cells
     (under the same filters + exit rule), return that Friday's own best combo.
@@ -2024,7 +2241,7 @@ def get_missed_fridays(
                               ctx_gex_regime, friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"rows": [], "n_missed": 0, "n_total_fridays": 0}
 
@@ -2126,6 +2343,8 @@ def get_iv_band_summary(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """For each IV band, find the best (entry_hour, expiry, delta) combo
     by the chosen metric. Headline 'answer the question' table."""
@@ -2135,7 +2354,7 @@ def get_iv_band_summary(
                               ctx_gex_regime, friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"rows": []}
 
@@ -2254,6 +2473,8 @@ def get_best_combo_markers(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """For each IV band's best (entry_hour × expiry_bucket × delta) combo,
     return per-trade path-marker rows for the path-markers chart:
@@ -2265,7 +2486,7 @@ def get_best_combo_markers(
                               ctx_gex_regime, friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"metric": metric, "bands": []}
 
@@ -2367,6 +2588,8 @@ def get_best_combo(
     ctx_gex_regime: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Top-N (entry_hour × expiry_bucket × delta) combos by metric, given exit rule."""
     filters = _query_filters(delta_target, is_straddle, expiry_date,
@@ -2375,7 +2598,7 @@ def get_best_combo(
                               ctx_gex_regime, friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"rows": []}
 
@@ -2413,6 +2636,8 @@ def get_leg_attribution(
     sort_dir: str = "desc",
     limit: int = Query(200, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Per-trade leg-level breakdown — Chunk 1 of the Trade Copilot plan.
 
@@ -2435,7 +2660,7 @@ def get_leg_attribution(
         loss_cause,
     )
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"total": 0, "rows": [], "offset": offset, "limit": limit}
 
@@ -2522,6 +2747,8 @@ def get_leg_skew_heatmap(
     ctx_pattern: Optional[str] = None,
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """2D heatmap on the leg-attribution dataset.
 
@@ -2542,7 +2769,7 @@ def get_leg_skew_heatmap(
         loss_cause=loss_cause,
     )
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {"rows": [], "metric": metric,
                 "row_key": row_key, "col_key": col_key}
@@ -2569,13 +2796,17 @@ def get_leg_skew_heatmap(
 
 
 @router.get("/cost_breakdown")
-def get_cost_breakdown(trade_id: str = Query(...)):
+def get_cost_breakdown(
+    trade_id: str = Query(...),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
+):
     """Per-leg entry cost decomposition for one trade."""
     try:
         tid = int(trade_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="trade_id must be int")
-    df = _load_trades()
+    df = _load_trades(dataset)
     row = df[df["trade_id"] == tid]
     if row.empty:
         raise HTTPException(status_code=404, detail=f"trade_id={trade_id} not found")
@@ -2699,6 +2930,8 @@ def get_cell_winners_vs_losers(
     min_n_per_side: int = Query(3, ge=1, le=20,
         description="Below this, response.low_confidence=true and pool_suggestions are returned"),
     exit_rule: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """For ONE best-combo cell (band × hour × expiry_bucket × delta), compare
     avg(indicator) for winners vs losers across ~50 indicators.
@@ -2725,7 +2958,7 @@ def get_cell_winners_vs_losers(
             detail=f"cell missing required keys: {sorted(missing)}")
 
     rule = _parse_exit_rule(exit_rule)
-    full_derived = _derive_exits({}, rule)
+    full_derived = _derive_exits({}, rule, dataset=dataset)
     if full_derived.empty:
         return {"cell": cell_obj, "n_trades": 0, "n_win": 0, "n_loss": 0,
                 "win_rate": 0.0, "low_confidence": True,
@@ -2868,18 +3101,31 @@ def get_losses_distribution(
         description="pnl_asc | pnl_desc | friday_asc | friday_desc | band"),
     only_sl_hits: bool = Query(False,
         description="Restrict losers_sample to exit_reason=='rule_trigger'"),
+    cells: Optional[str] = Query(None,
+        description="JSON list of {entry_atm_iv_band, entry_hour_ist, "
+                    "expiry_bucket, delta_target, rule} cells. When given, "
+                    "the explorer pulls losses ONLY from these cells "
+                    "(scope/ranking/metric are ignored). This is what the "
+                    "Best Combo per IV band table on the dashboard passes "
+                    "down — its 10 per-band winning rows."),
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Loss distribution over a chosen trade set.
 
-    Three scopes:
-      - default (`scope=None`): universe — all filtered trades.
-      - `scope=full_coverage`: restrict to the per-band best-cell strict
-        ("rule" kind) trade set produced by m7_full_coverage. Filters in
-        the bar reshape the candidate pool, which reshapes the best cells.
-      - `scope=best_combo`: restrict to per-band best (expiry, delta, rule)
-        trade set produced by m7_best_combo. Premium SL pinned at 100%;
-        per-band rule overrides filter-bar exit_rule. Filters narrow each
-        band's resulting trade set.
+    Four modes (in priority order — first match wins):
+
+      - **`cells` provided**: explicit list of per-band cells. The endpoint
+        derives trades for each `(rule_dict)` once, intersects with each
+        cell's `(band, hour, expiry, delta)`, concats. Used by the Losses
+        Explorer when the dashboard's Best Combo table is the source of
+        truth. Filters in the bar still apply via _query_filters.
+      - `scope=full_coverage`: per-band best-cell strict ("rule" kind)
+        trade set (legacy — Full Coverage table was removed from the
+        dashboard but the endpoint stays callable for back-compat).
+      - `scope=best_combo`: per-band best (expiry, delta, rule) using
+        ranking=credit|margin (legacy — superseded by `cells`).
+      - default (`scope=None`, no `cells`): universe — all filtered trades.
 
     `loss_cause` filter always applies on top of the scoped set.
     """
@@ -2899,11 +3145,133 @@ def get_losses_distribution(
         "per_band_rules": [],
     }
 
-    if scope == "full_coverage":
+    # ── Mode 1: explicit `cells` list (preferred path used by the dashboard's
+    # Best Combo table → Losses Explorer pipeline). Takes priority over scope.
+    if cells:
+        try:
+            cell_list = json.loads(cells)
+            if not isinstance(cell_list, list):
+                raise ValueError("`cells` must be a JSON array")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400,
+                                detail=f"Invalid `cells` JSON: {exc}")
+        if not cell_list:
+            return _losses_empty_response(scope_summary)
+
+        scope_summary["scope"] = "cells"
+        scope_summary["exit_rule_overridden"] = True  # each cell has own rule
+
+        # Group cells by rule_dict so we call _derive_exits once per unique rule
+        # (cache absorbs duplicates within a request too, but this keeps the
+        # request fast on cold cache).
+        from collections import defaultdict
+        by_rule_key: dict[str, list[dict]] = defaultdict(list)
+        rule_dicts: dict[str, dict] = {}
+        for cell in cell_list:
+            if not isinstance(cell, dict):
+                continue
+            rule_dict = cell.get("rule") or {}
+            if not isinstance(rule_dict, dict):
+                rule_dict = {}
+            # Normalise rule_dict (drop nulls) so the cache key is stable.
+            clean_rule = {k: v for k, v in rule_dict.items() if v is not None}
+            key = json.dumps(clean_rule, sort_keys=True)
+            by_rule_key[key].append(cell)
+            rule_dicts[key] = clean_rule
+
+        # Cache-state precheck. On a cold cache, N unique rules would block
+        # for N × ~5–15s; the request can outlive a backend restart and 500.
+        # Instead we fire async warmups and return a warming response — the
+        # frontend polls until everything is cached, then the next request
+        # returns instantly (pure pandas filter on the cached frames).
+        _load_trades(dataset)  # refresh mtime for this dataset's cache key
+        _, ds_mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
+        cold_rules: list[str] = []
+        for rule_key, rule_dict in rule_dicts.items():
+            cache_key = (dataset, rule_key, ds_mtime)
+            if _EXIT_CACHE.get(cache_key) is None:
+                cold_rules.append(rule_key)
+                _warmup_rule_async(rule_dict, dataset=dataset)
+        if cold_rules:
+            return {
+                "n_losses": 0, "n_total": 0, "loss_rate": 0.0,
+                "avg_loss_usd": 0.0, "total_loss_usd": 0.0, "worst_loss_usd": 0.0,
+                "by_cause": {}, "by_band": {}, "by_band_stats": [], "rows": [],
+                "losers_sample": [], "losers_sample_total": 0,
+                "losers_sample_offset": 0, "losers_sample_limit": 0,
+                "scope_summary": {
+                    **scope_summary,
+                    "warming": True,
+                    "rules_done": len(rule_dicts) - len(cold_rules),
+                    "rules_total": len(rule_dicts),
+                },
+            }
+
+        per_cell_dfs: list[pd.DataFrame] = []
+        per_band_rules: list[dict] = []
+        for rule_key, rule_cells in by_rule_key.items():
+            rule_dict = rule_dicts[rule_key]
+            try:
+                derived_rule = _derive_exits(filters, rule_dict,
+                                              dataset=dataset)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cells mode: _derive_exits failed for rule %s: %s",
+                            rule_dict, exc)
+                continue
+            if derived_rule is None or derived_rule.empty:
+                continue
+            for cell in rule_cells:
+                band = cell.get("entry_atm_iv_band")
+                hour = cell.get("entry_hour_ist")
+                expiry = cell.get("expiry_bucket")
+                delta = cell.get("delta_target")
+                rule_label = cell.get("rule_label")
+                mask = pd.Series(True, index=derived_rule.index)
+                if band is not None:
+                    mask = mask & (derived_rule["entry_atm_iv_band"] == band)
+                if hour is not None:
+                    try:
+                        mask = mask & (derived_rule["entry_hour_ist"].astype("Int64") == int(hour))
+                    except (TypeError, ValueError):
+                        pass
+                if expiry is not None:
+                    mask = mask & (derived_rule["expiry_bucket"] == expiry)
+                if delta is not None:
+                    try:
+                        mask = mask & (derived_rule["delta_target"].astype(float) == float(delta))
+                    except (TypeError, ValueError):
+                        pass
+                sub = derived_rule[mask]
+                n_band = int(len(sub))
+                if n_band > 0:
+                    per_cell_dfs.append(sub)
+                per_band_rules.append({
+                    "band": str(band) if band is not None else None,
+                    "entry_hour_ist": int(hour) if hour is not None else None,
+                    "expiry_bucket": str(expiry) if expiry is not None else None,
+                    "delta_target": float(delta) if delta is not None else None,
+                    "rule_label": str(rule_label) if rule_label is not None else None,
+                    "rule_dict": rule_dict,
+                    "n_trades": n_band,
+                })
+
+        scope_summary["per_band_rules"] = per_band_rules
+        if per_cell_dfs:
+            derived = pd.concat(per_cell_dfs, ignore_index=True)
+            # De-dup defensively (a trade can only land in one cell since each
+            # trade has one band, one hour, one expiry, one delta — but a
+            # malformed cells payload could double-count).
+            if "trade_id" in derived.columns:
+                derived = derived.drop_duplicates(subset=["trade_id"], keep="first")
+        else:
+            derived = pd.DataFrame()
+        scope_summary["n_in_scope"] = int(len(derived))
+
+    elif scope == "full_coverage":
         # Filters flow through _query_filters → _derive_exits; the FILTERED
         # candidate pool is what we pick best cells from. Changing filters
         # changes the cells, which changes the trade set.
-        candidates = _derive_exits(filters, rule)
+        candidates = _derive_exits(filters, rule, dataset=dataset)
         if candidates.empty:
             return _losses_empty_response(scope_summary)
         try:
@@ -2941,9 +3309,10 @@ def get_losses_distribution(
     elif scope == "best_combo":
         from app.api import m7_best_combo as bc
         # Hydrate / kick off background warmup if grid not yet ready.
-        if bc._GRID_STATE["status"] in ("pending", None):
-            bc.kick_off_warmup()
-        if bc._GRID_STATE["status"] == "warming":
+        bc_state = bc._get_grid_state(dataset)
+        if bc_state["status"] in ("pending", None):
+            bc.kick_off_warmup(dataset)
+        if bc_state["status"] == "warming":
             return {
                 "n_losses": 0, "n_total": 0, "loss_rate": 0.0,
                 "avg_loss_usd": 0.0, "total_loss_usd": 0.0, "worst_loss_usd": 0.0,
@@ -2951,15 +3320,16 @@ def get_losses_distribution(
                 "scope_summary": {
                     **scope_summary,
                     "warming": True,
-                    "rules_done": int(bc._GRID_STATE.get("rules_done", 0)),
-                    "rules_total": int(bc._GRID_STATE.get("rules_total", 21)),
+                    "rules_done": int(bc_state.get("rules_done", 0)),
+                    "rules_total": int(bc_state.get(
+                        "rules_total", len(bc._rule_variants()))),
                 },
             }
-        if bc._GRID_STATE["status"] == "error":
+        if bc_state["status"] == "error":
             raise HTTPException(status_code=500,
                                 detail=f"Best-combo grid warmup failed: "
-                                       f"{bc._GRID_STATE.get('error')}")
-        grid = bc._GRID_STATE.get("grid")
+                                       f"{bc_state.get('error')}")
+        grid = bc_state.get("grid")
         if grid is None or grid.empty:
             return _losses_empty_response(scope_summary)
         ranking_eff = ranking if ranking in ("credit", "margin") else "credit"
@@ -2978,7 +3348,8 @@ def get_losses_distribution(
             rule_label = row["rule_label"]
             rule_dict = row["rule"] if row["rule"] is not None else {}
             try:
-                band_derived = _derive_exits(filters, rule_dict)
+                band_derived = _derive_exits(filters, rule_dict,
+                                              dataset=dataset)
             except Exception as exc:  # noqa: BLE001
                 log.warning("scope=best_combo failed to derive band %s rule %s: %s",
                             band, rule_label, exc)
@@ -3014,7 +3385,7 @@ def get_losses_distribution(
 
     else:
         # Universe (legacy / default)
-        derived = _derive_exits(filters, rule)
+        derived = _derive_exits(filters, rule, dataset=dataset)
         scope_summary["n_in_scope"] = int(len(derived))
 
     if derived is None or derived.empty:
@@ -3222,6 +3593,8 @@ def get_cell_worst_fridays(
     n_special: int = Query(5, ge=1, le=20,
         description="How many top |z| context cols to return per Friday"),
     exit_rule: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """For a best-combo cell, return the N Fridays with the worst
     `net_pnl_estimate_usd`, plus a per-Friday "what made it special" diff:
@@ -3246,7 +3619,7 @@ def get_cell_worst_fridays(
             detail=f"cell missing required keys: {sorted(missing)}")
 
     rule = _parse_exit_rule(exit_rule)
-    full = _derive_exits({}, rule)
+    full = _derive_exits({}, rule, dataset=dataset)
     if full.empty:
         return {"cell": cell_obj, "n_total_fridays": 0, "rows": []}
 
@@ -3347,6 +3720,8 @@ def get_cell_worst_fridays(
 def get_trade_diagnostic(
     trade_id: str = Query(..., description="Trade ID to diagnose"),
     exit_rule: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Sectioned diagnostic for one trade — every indicator at entry,
     per-leg breakdown, derived ratios, and hypothesis flags. Used by the
@@ -3356,7 +3731,7 @@ def get_trade_diagnostic(
     lookup once the cache is warm.
     """
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits({}, rule)
+    derived = _derive_exits({}, rule, dataset=dataset)
     if derived is None or derived.empty:
         raise HTTPException(status_code=404, detail="No trades available")
 
@@ -3378,6 +3753,8 @@ def get_trade_context_ohlc(
     pad_minutes_after: int = Query(30, ge=0, le=1440,
         description="Pad spot OHLC end forward by N minutes (post-exit visualization)"),
     exit_rule: Optional[str] = None,
+    dataset: str = Query("delta_match",
+        description="'delta_match' (default) or 'price_match'."),
 ):
     """Return spot 1m OHLC for the trade's window + per-minute IV and
     Greeks projections from the M7 path parquet. Used by Chunk 4's
@@ -3394,7 +3771,7 @@ def get_trade_context_ohlc(
         raise HTTPException(status_code=400, detail="trade_id must be int")
 
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits({}, rule)
+    derived = _derive_exits({}, rule, dataset=dataset)
     if derived.empty or tid not in derived["trade_id"].astype(int).values:
         raise HTTPException(status_code=404, detail=f"trade_id {tid} not found")
 
@@ -3426,12 +3803,13 @@ def get_trade_context_ohlc(
             for _, r in ohlc_df.iterrows()]
 
     # Per-minute IV / greeks aligned to spot bars from the path parquet.
+    paths_glob_local = _paths_glob_for_dataset(dataset)
     conn = _duckdb_conn()
     try:
         path_sql = f"""
         SELECT ts AS time, atm_iv_now, call_iv, put_iv,
                net_delta, theta_per_vega_combined
-        FROM read_parquet('{PATHS_GLOB}', hive_partitioning=true)
+        FROM read_parquet('{paths_glob_local}', hive_partitioning=true)
         WHERE trade_id = {tid} AND ts >= {entry_ts - pad_b} AND ts <= {exit_ts + pad_a}
         ORDER BY ts
         """
@@ -3465,9 +3843,12 @@ def get_trade_context_ohlc(
 
 
 @router.get("/meta")
-def get_meta():
+def get_meta(
+    dataset: str = Query("delta_match",
+                          description="'delta_match' (default) or 'price_match'."),
+):
     """Return the universe of dimension values for filter dropdowns."""
-    df = _load_trades()
+    df = _load_trades(dataset)
     # Stable bucket order (left → right = put-leaning → call-leaning) so
     # heatmap axes always sort the same way regardless of which buckets
     # are populated in the current dataset.

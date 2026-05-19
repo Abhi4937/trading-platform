@@ -256,6 +256,7 @@ def get_iv_band_full_coverage(
     friday_date_ist: Optional[str] = None,
     loss_cause: Optional[str] = None,
     coverage_mode: str = "force_fit",
+    dataset: str = "delta_match",
 ):
     """Full-coverage IV-band summary: every Friday is attributed to exactly
     one of the 10 best cells. Each row carries TWO metric blocks:
@@ -267,6 +268,9 @@ def get_iv_band_full_coverage(
     Plus per-row counts: `n_trades` (rule subset), `n_all`, `n_force_fit`,
     `n_closest_fallback`. Top-level: `n_total_fridays`, `n_rule_fridays`,
     `n_force_fit_fridays`, `n_closest_fallback_fridays`, `n_uncovered_fridays`.
+
+    `dataset` selects the underlying parquet: 'delta_match' (default) or
+    'price_match' for the joint delta+price-matched dataset.
     """
     filters = _query_filters(delta_target, is_straddle, expiry_date,
                               entry_atm_iv_band, entry_hour_ist, dte_bucket,
@@ -274,7 +278,7 @@ def get_iv_band_full_coverage(
                               ctx_gex_regime, friday_date_ist, expiry_bucket,
                               loss_cause=loss_cause)
     rule = _parse_exit_rule(exit_rule)
-    derived = _derive_exits(filters, rule)
+    derived = _derive_exits(filters, rule, dataset=dataset)
     if derived.empty:
         return {
             "rows": [], "metric": metric,

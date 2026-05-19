@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo, m7_friday_band_best_combo, m7_friday_band_results, m7_hybrid_results, m_month_results, m_month_best_combo, m9_friday_weekly_results, m9_friday_weekly_best_combo
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo, m7_friday_band_best_combo, m7_friday_band_results, m7_joint_match_stats, m7_hybrid_results, m7_pivot_profile, m_month_results, m_month_best_combo, m9_friday_weekly_results, m9_friday_weekly_best_combo
 
 # Fresh ID per process — frontend uses this to detect a backend restart and
 # wipe its auto-persisted UI state on the next page load.
@@ -83,14 +83,26 @@ async def lifespan(app: FastAPI):
     # background pre-warm of the archive.
     if m7_friday_band_best_combo._load_grid_and_sat_iv():
         logger.info("Startup — M7 Friday-band A1 grid loaded from disk cache")
-        # Pre-warm the per-trade archive in a background thread so that the
-        # first user click on B1/D1 doesn't pay the 30-45s load cost.
+        # Pre-warm the per-trade archive + scan the auto-persisted D1 chain
+        # cache directory in a background thread so the first user click on
+        # B1/D1 doesn't pay the 30-45s load cost, and any previously-built
+        # chains are usable from in-memory cache immediately.
         def _prewarm():
             try:
                 m7_friday_band_best_combo._load_per_trade_archive()
                 logger.info("Startup pre-warm — Friday-band per-trade archive loaded")
             except Exception as e:  # noqa: BLE001
                 logger.warning("Friday-band per-trade pre-warm failed: %s", e)
+            try:
+                import os
+                cache_dir = m7_friday_band_best_combo.CHAIN_CACHE_DIR
+                if os.path.isdir(cache_dir):
+                    n_files = sum(1 for _ in os.scandir(cache_dir)
+                                  if _.name.endswith(".parquet"))
+                    logger.info("Startup — M7 Friday-band chain cache has %d "
+                                "saved D1 chains at %s", n_files, cache_dir)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Chain cache scan failed: %s", e)
         asyncio.get_event_loop().run_in_executor(None, _prewarm)
     else:
         logger.info("Startup — M7 Friday-band grid NOT cached")
@@ -176,6 +188,8 @@ app.include_router(m7_full_coverage.router, prefix="/api/v1/m7",       tags=["M7
 app.include_router(m7_best_combo.router,    prefix="/api/v1/m7",       tags=["M7 Sweep"])
 app.include_router(m7_friday_band_best_combo.router, prefix="/api/v1/m7", tags=["M7 Sweep"])
 app.include_router(m7_friday_band_results.router, prefix="/api/v1/m7", tags=["M7 Friday-Band"])
+app.include_router(m7_joint_match_stats.router,   prefix="/api/v1/m7",       tags=["M7 Joint Match"])
+app.include_router(m7_pivot_profile.router,       prefix="/api/v1/m7",       tags=["M7 Pivot Profile"])
 app.include_router(m7_hybrid_results.router,      prefix="/api/v1/m7_hybrid", tags=["M7 Hybrid"])
 app.include_router(m_month_results.router,    prefix="/api/v1/m_month",  tags=["M-Month Sweep"])
 app.include_router(m_month_best_combo.router, prefix="/api/v1/m_month",  tags=["M-Month Sweep"])
