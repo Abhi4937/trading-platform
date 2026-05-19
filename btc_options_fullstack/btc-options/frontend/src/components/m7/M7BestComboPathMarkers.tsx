@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { fetchM7BestComboMarkers, fetchM7FridayBandBestComboMarkers } from '../../services/m7_api';
+import { fetchM7BestComboMarkers, fetchM7FridayBandBestComboMarkers, type M7Dataset } from '../../services/m7_api';
 import type {
   M7BestComboMarker, M7BestComboMarkersBand, M7ExitRule, M7Filters,
 } from '../../types/m7';
@@ -294,11 +294,13 @@ function BandPanel({ band }: { band: M7BestComboMarkersBand }) {
 }
 
 export function M7BestComboPathMarkers({ filters, exitRule, metric = 'avg_net_pnl',
-                                         useFridayBand = false, bandMode, d1Tiebreakers }: {
+                                         useFridayBand = false, bandMode, d1Tiebreakers,
+                                         dataset }: {
   filters: M7Filters; exitRule: M7ExitRule; metric?: string;
   useFridayBand?: boolean;
   bandMode?: 'A1' | 'B1' | 'D1';
   d1Tiebreakers?: string[];
+  dataset?: M7Dataset;
 }) {
   const [bands, setBands] = useState<M7BestComboMarkersBand[]>([]);
   const [loading, setLoading] = useState(false);
@@ -312,12 +314,12 @@ export function M7BestComboPathMarkers({ filters, exitRule, metric = 'avg_net_pn
     setErr(null);
     const p = useFridayBand
       ? fetchM7FridayBandBestComboMarkers({ ...filters, metric }, exitRule, bandMode, d1Tiebreakers, ac.signal)
-      : fetchM7BestComboMarkers({ ...filters, metric }, exitRule, ac.signal);
+      : fetchM7BestComboMarkers({ ...filters, metric }, exitRule, ac.signal, dataset);
     p.then(r => { if (active) setBands(r.bands); })
      .catch(e => { if (active && e?.name !== 'AbortError') setErr(String(e)); })
      .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
-  }, [JSON.stringify(filters), JSON.stringify(exitRule), metric, useFridayBand, bandMode, JSON.stringify(d1Tiebreakers ?? [])]);
+  }, [JSON.stringify(filters), JSON.stringify(exitRule), metric, useFridayBand, bandMode, JSON.stringify(d1Tiebreakers ?? []), dataset]);
 
   return (
     <div style={{

@@ -23,7 +23,6 @@ import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import {
   fetchM7IvBandBestCombo,
   type FetchBestComboArgs,
-  type M7Dataset,
   type M7IvBandBestComboResponse,
   type M7IvBandBestComboRow,
   type M7Ranking,
@@ -46,7 +45,8 @@ const PRIMARY_GROUPS: { label: string; metrics: MetricDef[] }[] = [
   {
     label: 'Composite',
     metrics: [
-      { key: 'composite_score', label: 'Composite score', fmt: 'num',  goodIsHigh: true },
+      { key: 'composite_score_v2', label: 'Composite v2 (5-comp, filtered)', fmt: 'num', goodIsHigh: true },
+      { key: 'composite_score', label: 'Composite score (v1)', fmt: 'num',  goodIsHigh: true },
       { key: 'sharpe_per_trade', label: 'Sharpe (per trade)', fmt: 'num', goodIsHigh: true },
       { key: 'sortino_per_trade', label: 'Sortino (per trade)', fmt: 'num', goodIsHigh: true },
       { key: 'calmar_like',     label: 'Calmar (avg_net/|max_loss|)', fmt: 'num', goodIsHigh: true },
@@ -154,6 +154,15 @@ const SECONDARY_GROUPS: { label: string; metrics: MetricDef[] }[] = [
     metrics: [
       { key: 'n_losers_above_avg_max_mtm',    label: 'L > avg max MTM',      fmt: 'count', goodIsHigh: false },
       { key: 'avg_loser_exit_offset_minutes', label: 'Avg loser exit (min)', fmt: 'count', goodIsHigh: false },
+    ],
+  },
+  {
+    label: 'Pro metrics (loss tail — scales linearly with lots)',
+    metrics: [
+      { key: 'var_95_net',          label: 'VaR 95 (5th %ile net)',  fmt: 'usd', goodIsHigh: true },
+      { key: 'cvar_95_net',         label: 'CVaR 95 (mean of tail)', fmt: 'usd', goodIsHigh: true },
+      { key: 'worst_5_avg_net',     label: 'Worst-5 avg net',        fmt: 'usd', goodIsHigh: true },
+      { key: 'avg_min_mtm',         label: 'Trough (avg min MTM)',   fmt: 'usd', goodIsHigh: true },
     ],
   },
 ];
@@ -295,20 +304,14 @@ function LoadingBar({ visible }: { visible: boolean }) {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-interface M7IvBandBestComboTableProps {
-  // Joint Δ+Price-match dataset toggle. Default = today's pure-Δ behavior.
-  dataset?: M7Dataset;
-  // Accepted but currently ignored at the table level — kept so the dashboard
-  // can forward it without a type error. The lifted-up selection wiring is
-  // pre-existing.
+interface Props {
+  // Called whenever the per-band rows change. Lets a parent (M7SweepDashboard)
+  // lift the current per-band best-combo selection up so it can pass it to
+  // the Losses Explorer's `cells` param.
   onSelectionsChange?: (rows: M7IvBandBestComboRow[]) => void;
 }
 
-export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) {
-  const { dataset } = props;
-  // onSelectionsChange is accepted but not wired up here yet — kept on Props
-  // so the dashboard can pass it without a type error.
-  void props.onSelectionsChange;
+export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
   const [primary, setPrimary] = useState<M7Ranking>(
     () => loadLS('primary', 'avg_net_pnl'));
   const [family, setFamily] = useState<M7RuleFamily>(
@@ -349,6 +352,12 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
   // lots/100; we cap lots so |scaled value| ≤ |dd_threshold|.
   const [ddThreshold, setDdThreshold] = useState<number>(
     () => loadLS('dd_threshold', 100));
+  // Multi-DD-cap (added 2026-05-14): additional (metric, threshold) constraints
+  // applied alongside the legacy single cap. Final per-band lots =
+  // min(margin-cap, legacy DD cap, …each item in this list…). Order in the
+  // list doesn't change the math (min() is commutative) but is preserved for UI.
+  const [ddCaps, setDdCaps] = useState<Array<{ metric: string; threshold: number }>>(
+    () => loadLS('dd_caps', []) as Array<{ metric: string; threshold: number }>);
   // Phase 0/1 picker filters
   // min_hit_pct: drop cells where (n_trades - n_hard_cap) / n_trades < X%.
   // Default 50 — set to 0 to disable.
@@ -369,6 +378,9 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
   // min_win_rate: filter cells whose win_rate < X%. 0/null disables.
   const [minWinRate, setMinWinRate] = useState<number | null>(
     () => loadLS('min_win_rate', null));
+  // max_losing_streak: drop cells whose max_consec_losses > X. null disables.
+  const [maxLosingStreak, setMaxLosingStreak] = useState<number | null>(
+    () => loadLS('max_losing_streak', null));
   // pick_mode: 'by_hour' (one cell per band+hour) vs 'aggregate_hours'
   // (collapse hours so every Friday with this band's IV is tested).
   const [pickMode, setPickMode] = useState<'by_hour' | 'aggregate_hours'>(
@@ -386,10 +398,28 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
     () => loadLS('delta_filter', []) as number[]);
   const [hourFilter, setHourFilter] = useState<number[]>(
     () => loadLS('hour_filter', []) as number[]);
+  const [bandFilter, setBandFilter] = useState<string[]>(
+    () => loadLS('band_filter', []) as string[]);
+  // Exit-time filter — restricts grid to fixed-hour rules (sl{X}_exit_hr_{h})
+  // whose hour-suffix is in the selection. Empty = no restriction. When set,
+  // non-fixed-hour rules (baseline, max_profit, margin_target) are dropped.
+  const [exitHourFilter, setExitHourFilter] = useState<string[]>(
+    () => loadLS('exit_hour_filter', []) as string[]);
   // Pro Metrics columns toggle — Sharpe/Sortino/VaR/CVaR/Worst-5 + path peak-trough-peak.
   // Off by default to keep the table manageable; persisted to localStorage.
   const [showProMetrics, setShowProMetrics] = useState<boolean>(
     () => loadLS('show_pro_metrics', false));
+  // Phase B: multi-dim bucketing tab. 'band' = legacy single-grid; others
+  // lazy-build on first request. Persisted under 'm7:bestcombo:tab'.
+  type BucketTab = 'band' | 'band_ivrv' | 'band_ivrv_slope_cn'
+                 | 'band_ivrv_slope_nn' | 'band_ivrv_slope_cnn'
+                 | 'band_ivrv_ts_legacy';
+  const [bucketTab, setBucketTab] = useState<BucketTab>(
+    () => loadLS('bucket_tab', 'band') as BucketTab);
+  const [ivrvBucket, setIvrvBucket] = useState<'rich' | 'fair' | 'cheap' | ''>(
+    () => loadLS('ivrv_bucket_filter', '') as 'rich' | 'fair' | 'cheap' | '');
+  const [slopeBucket, setSlopeBucket] = useState<'backwardation' | 'neutral' | 'contango' | ''>(
+    () => loadLS('slope_bucket_filter', '') as 'backwardation' | 'neutral' | 'contango' | '');
 
   const [resp, setResp] = useState<M7IvBandBestComboResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -415,6 +445,7 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
   useEffect(() => { saveLS('pct_deploy',        pctDeploy);       }, [pctDeploy]);
   useEffect(() => { saveLS('dd_metric',         ddMetric);        }, [ddMetric]);
   useEffect(() => { saveLS('dd_threshold',      ddThreshold);     }, [ddThreshold]);
+  useEffect(() => { saveLS('dd_caps',           ddCaps);          }, [ddCaps]);
   useEffect(() => { saveLS('sizing_mode',       sizingMode);      }, [sizingMode]);
   useEffect(() => { saveLS('fixed_lots',        fixedLots);       }, [fixedLots]);
   useEffect(() => { saveLS('min_hit_pct',       minHitPct);       }, [minHitPct]);
@@ -423,10 +454,16 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
   useEffect(() => { saveLS('show_pro_metrics',  showProMetrics);  }, [showProMetrics]);
   useEffect(() => { saveLS('min_n_trades',      minNTrades);      }, [minNTrades]);
   useEffect(() => { saveLS('min_win_rate',      minWinRate);      }, [minWinRate]);
+  useEffect(() => { saveLS('max_losing_streak', maxLosingStreak); }, [maxLosingStreak]);
   useEffect(() => { saveLS('pick_mode',         pickMode);        }, [pickMode]);
   useEffect(() => { saveLS('expiry_filter',     expiryFilter);    }, [expiryFilter]);
   useEffect(() => { saveLS('delta_filter',      deltaFilter);     }, [deltaFilter]);
   useEffect(() => { saveLS('hour_filter',       hourFilter);      }, [hourFilter]);
+  useEffect(() => { saveLS('band_filter',       bandFilter);      }, [bandFilter]);
+  useEffect(() => { saveLS('exit_hour_filter',  exitHourFilter);  }, [exitHourFilter]);
+  useEffect(() => { saveLS('bucket_tab',        bucketTab);       }, [bucketTab]);
+  useEffect(() => { saveLS('ivrv_bucket_filter', ivrvBucket);     }, [ivrvBucket]);
+  useEffect(() => { saveLS('slope_bucket_filter', slopeBucket);   }, [slopeBucket]);
 
   useEffect(() => {
     let active = true;
@@ -451,6 +488,8 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
           args.dd_metric = ddMetric;
           args.dd_threshold = ddThreshold;
         }
+        const validCaps = ddCaps.filter(c => c.metric && c.threshold > 0);
+        if (validCaps.length > 0) args.dd_caps = validCaps;
       }
       // Picker filters — always send (server defaults to 50 if absent, but we
       // want explicit control from UI state, including "disabled" = 0).
@@ -465,11 +504,22 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
       if (minWinRate != null && minWinRate > 0) {
         args.min_win_rate = minWinRate;
       }
+      if (maxLosingStreak != null && maxLosingStreak > 0) {
+        args.max_losing_streak = maxLosingStreak;
+      }
       args.pick_mode = pickMode;
       if (expiryFilter.length > 0) args.expiry_buckets = expiryFilter;
       if (deltaFilter.length > 0) args.delta_targets = deltaFilter;
       if (hourFilter.length > 0) args.entry_hours = hourFilter;
-      fetchM7IvBandBestCombo(args, ac.signal, undefined, undefined, undefined, dataset)
+      if (bandFilter.length > 0) args.iv_bands = bandFilter;
+      if (exitHourFilter.length > 0) args.exit_hours = exitHourFilter;
+      // Phase B — bucketed tabs. 'band' is the default no-tab path.
+      args.tab = bucketTab;
+      if (ivrvBucket) args.ivrv_bucket = ivrvBucket;
+      if (slopeBucket && bucketTab !== 'band' && bucketTab !== 'band_ivrv') {
+        args.slope_bucket = slopeBucket;
+      }
+      fetchM7IvBandBestCombo(args, ac.signal)
         .then(r => {
           if (!active) return;
           setResp(r);
@@ -498,9 +548,11 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
   }, [primary, family, mode, secondary, tolerancePct,
       sizingMode, fixedLots,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
-      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode,
-      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter),
-      dataset]);
+      JSON.stringify(ddCaps),
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, maxLosingStreak, pickMode,
+      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter), JSON.stringify(bandFilter),
+      JSON.stringify(exitHourFilter),
+      bucketTab, ivrvBucket, slopeBucket]);
 
   // Same args we send to /iv_band_best_combo so the missed-Fridays panel
   // below computes its picks against the user's exact filter/sizing state.
@@ -511,24 +563,42 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
       a.total_capital_usd = totalCapitalUsd;
       a.pct_deploy = pctDeploy;
       if (ddMetric && ddThreshold > 0) { a.dd_metric = ddMetric; a.dd_threshold = ddThreshold; }
+      const validCaps = ddCaps.filter(c => c.metric && c.threshold > 0);
+      if (validCaps.length > 0) a.dd_caps = validCaps;
     }
     a.min_hit_pct = minHitPct;
     if (maxLossCapPct != null && maxLossCapPct > 0 && sizingMode === 'capital') a.max_loss_cap_pct = maxLossCapPct;
     if (maxDropPct != null && maxDropPct > 0) a.max_drop_peak_to_trough_pct = maxDropPct;
     a.min_n_trades = minNTrades;
     if (minWinRate != null && minWinRate > 0) a.min_win_rate = minWinRate;
+    if (maxLosingStreak != null && maxLosingStreak > 0) a.max_losing_streak = maxLosingStreak;
     a.pick_mode = pickMode;
     if (expiryFilter.length > 0) a.expiry_buckets = expiryFilter;
     if (deltaFilter.length > 0) a.delta_targets = deltaFilter;
     if (hourFilter.length > 0) a.entry_hours = hourFilter;
+    if (bandFilter.length > 0) a.iv_bands = bandFilter;
+    if (exitHourFilter.length > 0) a.exit_hours = exitHourFilter;
     return a;
   }, [primary, family, mode, secondary, tolerancePct, sizingMode,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
-      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, pickMode,
-      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter)]);
+      JSON.stringify(ddCaps),
+      minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, maxLosingStreak, pickMode,
+      JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter), JSON.stringify(bandFilter),
+      JSON.stringify(exitHourFilter)]);
 
   const isWarming = resp?.status === 'warming';
   const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
+
+  // Notify the parent whenever the per-band rows change. Keyed on the rows'
+  // (iv_band, expiry, delta, rule_label) signature so we don't churn the
+  // callback on every re-render — only when the selection actually moves.
+  const rowsSignature = useMemo(() => rows.map(r =>
+    `${r.iv_band}|${r.entry_hour_ist}|${r.expiry_bucket}|${r.delta_target}|${r.rule_label}`
+  ).join('||'), [rows]);
+  useEffect(() => {
+    if (onSelectionsChange) onSelectionsChange(rows);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowsSignature, onSelectionsChange]);
   const primaryDef = ALL_METRICS[primary] ?? PRIMARY_GROUPS[0].metrics[0];
   const secondaryDef = ALL_METRICS[secondary];
   const showTiebreakChip = mode === 'tiebreak' && secondaryDef != null;
@@ -552,6 +622,80 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
       background: '#0a0e17', border: '1px solid #1a2d42', borderRadius: 6,
       padding: 12, marginBottom: 10,
     }}>
+      {/* Phase B — bucketed-tab strip. Default 'band' = legacy single-grid behavior.
+          Other tabs lazy-build their grid on first click (~5-15s on warm exit cache;
+          longer on cold). State persisted to localStorage. */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap',
+                    alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: '#7a9bb5', marginRight: 6 }}>Bucket:</span>
+        {([
+          ['band',                  'Bands',           ''],
+          ['band_ivrv',             '× IVRV',          'Split each band by IVRV regime (rich / fair / cheap).'],
+          ['band_ivrv_slope_cn',    '× slope (cur↔next)',
+            'Add IV-curve slope between current Sat and next Sun.'],
+          ['band_ivrv_slope_nn',    '× slope (next↔n2n)',
+            'Add IV-curve slope between next Sun and next_to_next Mon.'],
+          ['band_ivrv_slope_cnn',   '× slope (cur↔n2n)',
+            'Add IV-curve slope between current Sat and next_to_next Mon.'],
+          ['band_ivrv_ts_legacy',   '× 7d-30d (control)',
+            'Control axis using the legacy 7d-30d IV term-structure slope.'],
+        ] as const).map(([tab, label, title]) => (
+          <button key={tab}
+                  onClick={() => setBucketTab(tab as BucketTab)}
+                  title={title}
+                  style={{
+                    padding: '4px 10px', fontSize: 11,
+                    background: bucketTab === tab ? '#1f6feb' : '#0a1018',
+                    color: bucketTab === tab ? '#fff' : '#cfd9e3',
+                    border: bucketTab === tab ? '1px solid #2f7feb' : '1px solid #1a2d42',
+                    borderRadius: 4, cursor: 'pointer',
+                    fontWeight: bucketTab === tab ? 700 : 400,
+                  }}>
+            {label}
+          </button>
+        ))}
+        {/* IVRV chip-filter — only meaningful on bucketed tabs */}
+        {bucketTab !== 'band' && (
+          <>
+            <span style={{ fontSize: 11, color: '#7a9bb5', marginLeft: 10, marginRight: 4 }}>
+              IVRV:
+            </span>
+            {(['', 'rich', 'fair', 'cheap'] as const).map(b => (
+              <button key={`ivrv-${b}`}
+                      onClick={() => setIvrvBucket(b)}
+                      style={{
+                        padding: '3px 8px', fontSize: 10,
+                        background: ivrvBucket === b ? '#7d4cdb' : '#0a1018',
+                        color: ivrvBucket === b ? '#fff' : '#7a9bb5',
+                        border: '1px solid #1a2d42', borderRadius: 3, cursor: 'pointer',
+                      }}>
+                {b || 'all'}
+              </button>
+            ))}
+          </>
+        )}
+        {/* Slope chip-filter — only on slope tabs */}
+        {bucketTab !== 'band' && bucketTab !== 'band_ivrv' && (
+          <>
+            <span style={{ fontSize: 11, color: '#7a9bb5', marginLeft: 10, marginRight: 4 }}>
+              Slope:
+            </span>
+            {(['', 'backwardation', 'neutral', 'contango'] as const).map(b => (
+              <button key={`slope-${b}`}
+                      onClick={() => setSlopeBucket(b)}
+                      style={{
+                        padding: '3px 8px', fontSize: 10,
+                        background: slopeBucket === b ? '#d29922' : '#0a1018',
+                        color: slopeBucket === b ? '#0a0e17' : '#7a9bb5',
+                        border: '1px solid #1a2d42', borderRadius: 3, cursor: 'pointer',
+                      }}>
+                {b || 'all'}
+              </button>
+            ))}
+          </>
+        )}
+      </div>
+
       {/* Header — controls + summary */}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -709,6 +853,61 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
               style={{ ...inputStyle, width: 70 }}
               title="DD threshold (absolute USD or %)." />
           )}
+          {/* Multi-DD-cap: additional (metric, threshold) constraints. lots
+              = min(margin-cap, legacy DD cap, …all caps here…). */}
+          {sizingMode === 'capital' && ddCaps.map((cap, idx) => (
+            <span key={idx} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 11, color: '#7a9bb5' }}>∧</span>
+              <select
+                value={cap.metric}
+                onChange={e => {
+                  const next = ddCaps.slice();
+                  next[idx] = { ...next[idx], metric: e.target.value };
+                  setDdCaps(next);
+                }}
+                style={{ ...selectStyle, minWidth: 130 }}
+                title="Additional DD-cap metric. All caps combine via min().">
+                <option value="">— pick —</option>
+                {SECONDARY_GROUPS.map(g => (
+                  <optgroup key={g.label} label={g.label}>
+                    {g.metrics.map(md => (
+                      <option key={md.key} value={md.key}>{md.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              <input
+                type="number" min={0} step={10}
+                value={cap.threshold}
+                onChange={e => {
+                  const next = ddCaps.slice();
+                  next[idx] = { ...next[idx], threshold: Math.max(0, Number(e.target.value) || 0) };
+                  setDdCaps(next);
+                }}
+                style={{ ...inputStyle, width: 70 }}
+                title="Threshold for this DD cap (absolute USD)." />
+              <button
+                onClick={() => setDdCaps(ddCaps.filter((_, i) => i !== idx))}
+                style={{
+                  background: 'transparent', color: '#7a9bb5',
+                  border: '1px solid #1a2d42', borderRadius: 4,
+                  padding: '2px 6px', fontSize: 11, cursor: 'pointer',
+                }}
+                title="Remove this DD cap">✕</button>
+            </span>
+          ))}
+          {sizingMode === 'capital' && (
+            <button
+              onClick={() => setDdCaps([...ddCaps, { metric: '', threshold: 100 }])}
+              style={{
+                background: '#0d1421', color: '#7a9bb5',
+                border: '1px solid #1a2d42', borderRadius: 4,
+                padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+              }}
+              title="Add another drawdown cap. Final per-band lots = min(margin-cap, all DD caps).">
+              + Cap
+            </button>
+          )}
           {/* Lots-mode input (greyed when sizing by Capital). */}
           <span style={{ fontSize: 11, color: sizingMode === 'capital' ? '#3a4a5a' : '#7a9bb5' }}>Lots</span>
           <input
@@ -767,6 +966,17 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
             }}
             style={{ ...inputStyle, width: 55 }}
             title="Drop cells whose win_rate is below this percentage. Leave blank to disable." />
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}>Max losing streak ≤</span>
+          <input
+            type="number" min={1} max={50} step={1}
+            placeholder="off"
+            value={maxLosingStreak ?? ''}
+            onChange={e => {
+              const v = e.target.value;
+              setMaxLosingStreak(v === '' ? null : Math.max(1, Number(v) || 0));
+            }}
+            style={{ ...inputStyle, width: 55 }}
+            title="Drop cells whose max_consec_losses (longest run of consecutive losing trades) exceeds this. Leave blank to disable." />
           <button
             onClick={() => setPickMode(m => m === 'by_hour' ? 'aggregate_hours' : 'by_hour')}
             style={{
@@ -789,9 +999,29 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
             const ALL_EXPIRIES = ['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)'];
             const ALL_DELTAS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
             const ALL_HOURS = [0, 1, 2, 3, 21, 22, 23];
+            const ALL_BANDS = ['0-20', '20-30', '30-40', '40-50', '50-60', '60-70', '70-80', '80-90', '90-100', '100+'];
+            // Fixed-exit hours from backend _FIXED_HOURS. Suffix '1729' = 17:29 (just before settlement).
+            const ALL_EXIT_HOURS: { value: string; label: string }[] = [
+              { value: '5',    label: '05:00' },
+              { value: '6',    label: '06:00' },
+              { value: '7',    label: '07:00' },
+              { value: '8',    label: '08:00' },
+              { value: '9',    label: '09:00' },
+              { value: '10',   label: '10:00' },
+              { value: '11',   label: '11:00' },
+              { value: '12',   label: '12:00' },
+              { value: '13',   label: '13:00' },
+              { value: '14',   label: '14:00' },
+              { value: '15',   label: '15:00' },
+              { value: '16',   label: '16:00' },
+              { value: '17',   label: '17:00' },
+              { value: '1729', label: '17:29' },
+            ];
             const exp_all = expiryFilter.length === ALL_EXPIRIES.length;
             const dlt_all = deltaFilter.length === ALL_DELTAS.length;
             const hr_all  = hourFilter.length === ALL_HOURS.length;
+            const bnd_all = bandFilter.length === ALL_BANDS.length;
+            const eh_all  = exitHourFilter.length === ALL_EXIT_HOURS.length;
             const allBtnStyle = (on: boolean): React.CSSProperties => ({
               ...inputStyle,
               padding: '0 6px',
@@ -856,6 +1086,44 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
           </button>
           {hourFilter.length > 0 && (
             <button onClick={() => setHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear hour filter (revert to All)">×</button>
+          )}
+          <span style={{ fontSize: 11, color: bandFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: bandFilter.length ? 700 : 400 }}>
+            IV band {bandFilter.length ? `(${bandFilter.length})` : '(All)'}
+          </span>
+          <select
+            multiple
+            value={bandFilter}
+            onChange={e => setBandFilter(Array.from(e.target.selectedOptions, o => o.value))}
+            style={{ ...inputStyle, width: 80, height: 22, opacity: bandFilter.length ? 1 : 0.55 }}
+            title="Optional — Ctrl/Cmd-click to whitelist IV bands. Empty selection (default) = all 10 bands. Pick one band to isolate its best-fit; pick a few to compare side-by-side without the noise of the others.">
+            {ALL_BANDS.map(b => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+          <button onClick={() => setBandFilter(ALL_BANDS)} style={allBtnStyle(bnd_all)} title="Select every IV band.">
+            ✓ All
+          </button>
+          {bandFilter.length > 0 && (
+            <button onClick={() => setBandFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear IV band filter (revert to All)">×</button>
+          )}
+          <span style={{ fontSize: 11, color: exitHourFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: exitHourFilter.length ? 700 : 400 }}>
+            Exit time {exitHourFilter.length ? `(${exitHourFilter.length})` : '(All)'}
+          </span>
+          <select
+            multiple
+            value={exitHourFilter}
+            onChange={e => setExitHourFilter(Array.from(e.target.selectedOptions, o => o.value))}
+            style={{ ...inputStyle, width: 80, height: 22, opacity: exitHourFilter.length ? 1 : 0.55 }}
+            title="Optional — Ctrl/Cmd-click to whitelist fixed exit hours (IST). When set, the picker restricts to sl{X}_exit_hr_{h} rules whose hour matches; non-fixed-hour rule families (baseline, max_profit, margin_target) are excluded.">
+            {ALL_EXIT_HOURS.map(h => (
+              <option key={h.value} value={h.value}>{h.label}</option>
+            ))}
+          </select>
+          <button onClick={() => setExitHourFilter(ALL_EXIT_HOURS.map(h => h.value))} style={allBtnStyle(eh_all)} title="Select every fixed exit hour.">
+            ✓ All
+          </button>
+          {exitHourFilter.length > 0 && (
+            <button onClick={() => setExitHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear exit-time filter (revert to All)">×</button>
           )}
             </>);
           })()}
@@ -934,7 +1202,7 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
             Computing the full sweep ({resp?.rules_done ?? 0} / {resp?.rules_total ?? 96} rules done)
           </div>
           <div>
-            105 exit-rule variants × 10 IV bands × 7 expiries × 8 deltas.
+            96 exit-rule variants × 10 IV bands × 7 expiries × 8 deltas.
             <br />
             First load after backend restart takes ~45 minutes; subsequent loads are instant.
           </div>
@@ -989,7 +1257,9 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
                 <th style={thR}>Avg net <InfoIcon text="Mean net P&L per trade (entry slip + entry brokerage + exit slip + exit brokerage all subtracted)." /></th>
                 <th style={thR}>Total net <InfoIcon text="Sum of net P&L across all trades in the cell = n_trades × Avg net. Bottom-line cumulative P&L the cell produced (per 100-lot backtester baseline)." /></th>
                 <th style={thR}>Avg win <InfoIcon text="Mean net P&L across winners only (all 4 cost components subtracted)." /></th>
+                <th style={thR}>Total win <InfoIcon text="Sum of net P&L across winners only = avg_win × n_wins (scaled to sized lots). Bottom-line cumulative gain from winning trades alone." /></th>
                 <th style={thR}>Avg loss <InfoIcon text="Mean net P&L across losers only (negative number)." /></th>
+                <th style={thR}>Total loss <InfoIcon text="Sum of net P&L across losers only = avg_loss × n_losses (scaled to sized lots). Bottom-line cumulative loss from losing trades alone (negative)." /></th>
                 <th style={thR}>Largest win <InfoIcon text="Max net P&L of any single trade in the cell." /></th>
                 <th style={thR}>Largest loss <InfoIcon text="Min net P&L of any single trade in the cell (most negative)." /></th>
 
@@ -1046,6 +1316,12 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
                     <th style={thR}>Peak-1 <InfoIcon text="Avg max gross_pnl_usd seen BEFORE the trough across all trades in cell (entry-slip-only). Negative when the typical trade never went positive." /></th>
                     <th style={thR}>Trough <InfoIcon text="Avg min MTM across all trades — worst unrealized point during the hold." /></th>
                     <th style={thR}>Peak-2 <InfoIcon text="Avg max gross_pnl_usd seen AFTER the trough (recovery peak). High = trades typically bounce after dipping." /></th>
+                    <th style={thR}>P2_mid <InfoIcon text="v7: avg intermediate post-trough peak — the morning recovery peak between the deepest drawdown and the exit-time peak. NaN when no intermediate landmark exists (trade was monotonic between trough and exit, or grid is pre-v7)." /></th>
+                    <th style={thR}>T2_mid <InfoIcon text="v7: avg intermediate trough between P2_mid and P3_exit — the small drawdown after the morning peak before the exit recovery." /></th>
+                    <th style={thR}>t(P2_mid) <InfoIcon text="v7: avg IST clock time of the morning intermediate peak." /></th>
+                    <th style={thR}>t(T2_mid) <InfoIcon text="v7: avg IST clock time of the intermediate trough." /></th>
+                    <th style={thR}>P2 vs Exit ($) <InfoIcon text="Derived: avg_peak_2_mid − avg_peak_after_trough. Positive = morning peak was higher on average than the exit peak → exit-at-morning beats ride-to-exit." /></th>
+                    <th style={thR}>P2 / Exit (×) <InfoIcon text="Derived: avg_peak_2_mid ÷ avg_peak_after_trough. >1 = morning peak wins. Color-coded green ≥1.0, yellow 0.7-1.0, red <0.7." /></th>
                     <th style={thR}>Δ P1→T <InfoIcon text="Avg (peak-1 − trough) ÷ max(peak-1, |trough|, $0.01). What fraction of the peak (or absolute trough) the trade typically gives back. Lower = less stress." /></th>
                     <th style={thR}>t(Peak-1) <InfoIcon text="Avg relative time of peak-1 within the hold (0=entry, 1=exit). Earlier means the trade typically tops out then turns." /></th>
                     <th style={thR}>t(Trough) <InfoIcon text="Avg relative time of trough within the hold (0=entry, 1=exit). Late means losers crater near the end." /></th>
@@ -1099,6 +1375,54 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
                         }}
                         title="Low-sample warning: no cells in this band met the Min n threshold. Picker fell back to the full grid for this band — results are not statistically credible. Lower the Min n input or accept that high-IV regimes happen rarely enough that we have very few historical trades.">
                         ⚠ low-n
+                      </span>
+                    )}
+                    {r.rank_status && r.rank_status !== 'ranked' && (
+                      <span
+                        style={{
+                          marginLeft: 6, padding: '1px 5px', fontSize: 10,
+                          color: r.rank_status === 'filtered' ? '#f85149' : '#f0b300',
+                          border: `1px solid ${r.rank_status === 'filtered' ? '#f85149' : '#f0b300'}`,
+                          borderRadius: 3, fontWeight: 600, verticalAlign: 'middle',
+                        }}
+                        title={r.filter_reason
+                          ? `Composite-v2 status: ${r.rank_status}\nFailed gates: ${r.filter_reason}`
+                          : `Composite-v2 status: ${r.rank_status}`}>
+                        {r.rank_status === 'filtered' ? '⊘ filtered' : '⚠ low_n (v2)'}
+                      </span>
+                    )}
+                    {r.rank_in_band != null && (
+                      <span style={{
+                        marginLeft: 6, fontSize: 10, color: '#7a9bb5',
+                        fontWeight: 400,
+                      }}
+                            title="Rank within IV band under composite_score_v2 (lower = better).">
+                        #{r.rank_in_band}
+                      </span>
+                    )}
+                    {/* Phase B — IVRV / slope chip badges, visible on bucketed tabs. */}
+                    {(r as any).ivrv_bucket && (
+                      <span style={{
+                        marginLeft: 6, padding: '1px 5px', fontSize: 9,
+                        color: '#fff', background: '#7d4cdb',
+                        borderRadius: 3, fontWeight: 600, verticalAlign: 'middle',
+                      }} title="IVRV regime at trade entry">
+                        {(r as any).ivrv_bucket}
+                      </span>
+                    )}
+                    {((r as any).slope_cn_bucket
+                      || (r as any).slope_nn_bucket
+                      || (r as any).slope_cnn_bucket
+                      || (r as any).ts_legacy_bucket) && (
+                      <span style={{
+                        marginLeft: 4, padding: '1px 5px', fontSize: 9,
+                        color: '#0a0e17', background: '#d29922',
+                        borderRadius: 3, fontWeight: 600, verticalAlign: 'middle',
+                      }} title="Active slope-regime bucket">
+                        {(r as any).slope_cn_bucket
+                          || (r as any).slope_nn_bucket
+                          || (r as any).slope_cnn_bucket
+                          || (r as any).ts_legacy_bucket}
                       </span>
                     )}
                   </td>
@@ -1192,8 +1516,20 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
                   }}>
                     {r.avg_net_pnl == null ? '—' : usd((r.avg_net_pnl * r.n_trades) * k)}
                   </td>
-                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_win_usd)) }}>{usd(sk(r.avg_win_usd))}</td>
-                  <td style={{ ...tdR, color: pnlColor(sk(r.avg_loss_usd)) }}>{usd(sk(r.avg_loss_usd))}</td>
+                  {(() => {
+                    const totalWin = (r.avg_win_usd != null && r.n_wins != null)
+                      ? r.avg_win_usd * r.n_wins * k : null;
+                    const totalLoss = (r.avg_loss_usd != null && r.n_losses != null)
+                      ? r.avg_loss_usd * r.n_losses * k : null;
+                    return (
+                      <>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_win_usd)) }}>{usd(sk(r.avg_win_usd))}</td>
+                        <td style={{ ...tdR, color: pnlColor(totalWin) }}>{usd(totalWin)}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_loss_usd)) }}>{usd(sk(r.avg_loss_usd))}</td>
+                        <td style={{ ...tdR, color: pnlColor(totalLoss) }}>{usd(totalLoss)}</td>
+                      </>
+                    );
+                  })()}
                   <td style={{ ...tdR, color: pnlColor(sk(r.max_win_usd)) }}>{usd(sk(r.max_win_usd))}</td>
                   <td style={{ ...tdR, color: pnlColor(sk(r.max_loss_usd)) }}>{usd(sk(r.max_loss_usd))}</td>
 
@@ -1270,6 +1606,18 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
                       const denom = Math.max(Math.abs(tr), 0.01);
                       return (pa - tr) / denom;
                     })();
+                    // v7 — 5-landmark zigzag intermediate landmarks + derived
+                    // comparison vs the exit peak.
+                    const p2mid    = sk(r.avg_peak_2_mid);
+                    const p3exit   = sk(r.avg_peak_after_trough);
+                    const p2Advance = (p2mid != null && p3exit != null) ? p2mid - p3exit : null;
+                    const p2Ratio   = (p2mid != null && p3exit != null && p3exit !== 0)
+                      ? p2mid / p3exit : null;
+                    const ratioColor = (v: number | null | undefined) => {
+                      if (v == null || isNaN(v as number)) return '#7a9bb5';
+                      const x = v as number;
+                      return x >= 1.0 ? '#3fb950' : x >= 0.7 ? '#f0b300' : '#f85149';
+                    };
                     return (
                       <>
                         <td style={tdR}>{numFmt(r.sharpe_per_trade)}</td>
@@ -1280,7 +1628,16 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
                         <td style={{ ...tdR, color: pnlColor(sk(r.worst_5_avg_net)) }}>{usd(sk(r.worst_5_avg_net))}</td>
                         <td style={{ ...tdR, color: pnlColor(sk(r.avg_peak_before_trough)) }}>{usd(sk(r.avg_peak_before_trough))}</td>
                         <td style={{ ...tdR, color: pnlColor(sk(r.avg_min_mtm)) }}>{usd(sk(r.avg_min_mtm))}</td>
-                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_peak_after_trough)) }}>{usd(sk(r.avg_peak_after_trough))}</td>
+                        <td style={{ ...tdR, color: pnlColor(p3exit) }}>{usd(p3exit)}</td>
+                        {/* v7 — intermediate landmarks (P2_mid, T2_mid) */}
+                        <td style={{ ...tdR, color: pnlColor(p2mid) }}>{usd(p2mid)}</td>
+                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_trough_2_mid)) }}>{usd(sk(r.avg_trough_2_mid))}</td>
+                        <td style={tdR}>{relTime(r.avg_rel_time_peak_2_mid)}</td>
+                        <td style={tdR}>{relTime(r.avg_rel_time_trough_2_mid)}</td>
+                        <td style={{ ...tdR, color: pnlColor(p2Advance) }}>{usd(p2Advance)}</td>
+                        <td style={{ ...tdR, color: ratioColor(p2Ratio) }}>
+                          {p2Ratio == null ? '—' : `${p2Ratio.toFixed(2)}×`}
+                        </td>
                         <td style={{ ...tdR, color: dropColor(dropPct) }}>
                           {dropPct == null ? '—' : `${(dropPct * 100).toFixed(0)}%`}
                         </td>
@@ -1329,7 +1686,7 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
           )}
         </div>
       )}
-      <M7BestComboMissedFridaysTable args={missedFridaysArgs} dataset={dataset} />
+      <M7BestComboMissedFridaysTable args={missedFridaysArgs} />
       {drilldown && (
         <M7RuleComparisonModal
           band={drilldown.band}
@@ -1341,6 +1698,7 @@ export function M7IvBandBestComboTable(props: M7IvBandBestComboTableProps = {}) 
           pctDeploy={pctDeploy}
           ddMetric={sizingMode === 'capital' ? ddMetric : null}
           ddThreshold={sizingMode === 'capital' && ddMetric ? ddThreshold : null}
+          ddCaps={sizingMode === 'capital' ? ddCaps.filter(c => c.metric && c.threshold > 0) : []}
           minHitPct={minHitPct}
           maxLossCapPct={sizingMode === 'capital' ? maxLossCapPct : null}
           maxDropPct={maxDropPct}

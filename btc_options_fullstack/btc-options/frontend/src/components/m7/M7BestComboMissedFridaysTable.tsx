@@ -10,11 +10,12 @@ import { InfoIcon } from './InfoIcon';
 import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
 import {
   fetchM7BestComboMissedFridays,
+  type M7Dataset,
   type M7MissedFridaysForceFitResponse,
   type FetchBestComboArgs,
 } from '../../services/m7_api';
 
-export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboArgs }) {
+export function M7BestComboMissedFridaysTable({ args, dataset }: { args: FetchBestComboArgs; dataset?: M7Dataset }) {
   const [resp, setResp] = useState<M7MissedFridaysForceFitResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -27,7 +28,7 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
     setErr(null);
     const tick = () => {
       if (!active) return;
-      fetchM7BestComboMissedFridays(args, ac.signal)
+      fetchM7BestComboMissedFridays(args, ac.signal, dataset)
         .then(r => { if (active) setResp(r); })
         .catch(e => {
           if (!active || e?.name === 'AbortError') return;
@@ -43,13 +44,25 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
     };
     tick();
     return () => { active = false; ac.abort(); };
-  }, [JSON.stringify(args)]);
+  }, [JSON.stringify(args), dataset]);
 
   const rows = resp?.rows ?? [];
   const picks = resp?.picks ?? [];
   const stats = resp
-    ? { n_missed: resp.n_missed ?? 0, n_total: resp.n_total_fridays ?? 0, n_matched: resp.n_matched ?? 0 }
+    ? {
+        n_missed: resp.n_missed ?? 0,
+        n_total: resp.n_total_fridays ?? 0,
+        n_matched: resp.n_matched ?? 0,
+        n_rescuable: resp.n_rescuable ?? 0,
+      }
     : null;
+
+  const fmtUsd = (v: number): string => {
+    const sign = v < 0 ? '-' : '';
+    const abs = Math.abs(v);
+    if (abs >= 1000) return `${sign}$${(abs / 1000).toFixed(1)}K`;
+    return `${sign}$${abs.toFixed(0)}`;
+  };
 
   const th: React.CSSProperties = { padding: '6px 8px', color: '#7a9bb5', whiteSpace: 'nowrap' };
   const thR: React.CSSProperties = { ...th, textAlign: 'right' };
@@ -70,7 +83,10 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
           <InfoIcon text="Fridays NOT covered by any of the 10 IV-band Best Combo picks under your CURRENT sizing + filter settings (Capital, DD cap, Hit %, Min n, Max loss %, etc.). Different from the Missed Fridays table above which uses the simpler headline picker — this one reflects your actual Best Combo state. Even when a Friday is missed by the band-aware picker, the (hour, expiry, Δ) trade may exist — it just landed in a different IV band. The ✓/✗ matrix shows for each pick: would the trade have existed on that Friday at this (hour, expiry, Δ)?" />
           {stats && (
             <span style={{ fontWeight: 400, color: '#7a9bb5', marginLeft: 8, fontSize: 12 }}>
-              ({stats.n_missed} of {stats.n_total} Fridays not covered • {stats.n_matched} matched)
+              ({stats.n_missed} of {stats.n_total} Fridays not covered • {stats.n_matched} matched
+              {stats.n_rescuable > 0 && (
+                <> • <span style={{ color: '#3fb950' }}>{stats.n_rescuable} rescuable</span></>
+              )})
             </span>
           )}
         </div>
@@ -86,6 +102,10 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
                 n_total_trades: r.n_total_trades,
                 bands_touched: r.bands_touched.join(', '),
                 fits_picks: r.pick_availability.filter(p => p.fits).length,
+                rescued_band: r.rescue?.rescued_band ?? '',
+                rescued_rule: r.rescue?.rescued_rule_label ?? '',
+                rescued_net_pnl: r.rescue?.rescued_net_pnl ?? '',
+                rescued_outcome: r.rescue ? (r.rescue.rescued_is_win ? 'win' : 'loss') : '',
                 ...Object.fromEntries(r.pick_availability.map(p => [`fit_${p.pick_band}`, p.fits ? 'Y' : 'N'])),
               })))} />
           </span>
@@ -114,6 +134,8 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
                   <th style={thR}>n trades <InfoIcon text="Total trades in the enriched dataset for this Friday across ALL hour×expiry×Δ combos." /></th>
                   <th style={th}>Bands touched <InfoIcon text="Which IV bands this Friday's IV was in across its hourly entries (most Fridays span 2-7 bands)." /></th>
                   <th style={thR}>Fits picks <InfoIcon text="Of the 10 Best Combo picks, how many have a trade at their (hour, expiry, Δ) for this Friday. The trade may exist even though the Friday's IV landed in a different band." /></th>
+                  <th style={th}>Rescue to <InfoIcon text="Best fitting pick — the one whose RULE-derived net P&L on this Friday is highest. Shown band • rule label. If you relaxed the band-match constraint, this Friday would naturally be absorbed by that pick." /></th>
+                  <th style={thR}>Rescue P&L <InfoIcon text="Net P&L if that pick's rule had been applied to this Friday at its (hour, expiry, Δ). Green = win, red = loss." /></th>
                   {picks.map(p => (
                     <th key={`th-${p.band}`} style={th}
                         title={`Pick for band ${p.band}: ${p.entry_hour_ist}:00 / ${p.expiry_bucket} / Δ=${p.delta_target.toFixed(2)} / ${p.rule_label}. ✓ = trade exists for this Friday at the (hour, expiry, Δ); ✗ = no such trade.`}>
@@ -134,6 +156,19 @@ export function M7BestComboMissedFridaysTable({ args }: { args: FetchBestComboAr
                       const color = fits === total ? '#3fb950' : fits >= total / 2 ? '#f0b300' : '#f85149';
                       return <span style={{ color }}>{fits}/{total}</span>;
                     })()}</td>
+                    <td style={td}>{r.rescue ? (
+                      <span title={r.rescue.rescued_rule_label}>
+                        <span style={{ color: '#3fb950', fontWeight: 600 }}>{r.rescue.rescued_band}</span>
+                        <span style={{ color: '#7a9bb5', fontSize: 11, marginLeft: 4 }}>
+                          • {r.rescue.rescued_rule_label}
+                        </span>
+                      </span>
+                    ) : <span style={{ color: '#586e7e' }}>—</span>}</td>
+                    <td style={tdR}>{r.rescue ? (
+                      <span style={{ color: r.rescue.rescued_is_win ? '#3fb950' : '#f85149', fontWeight: 600 }}>
+                        {fmtUsd(r.rescue.rescued_net_pnl)}
+                      </span>
+                    ) : <span style={{ color: '#586e7e' }}>—</span>}</td>
                     {r.pick_availability.map((p, idx) => (
                       <td key={`row-${i}-${idx}`} style={{ ...td, textAlign: 'center' }}>
                         {p.fits ? <span style={{ color: '#3fb950', fontWeight: 700 }}>✓</span>

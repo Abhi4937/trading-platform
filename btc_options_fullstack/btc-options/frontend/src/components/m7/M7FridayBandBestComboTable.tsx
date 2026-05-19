@@ -11,7 +11,9 @@
 // arrive in later phases.
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { fetchM7IvBandBestCombo, type M7IvBandBestComboRow } from '../../services/m7_api';
+import { fetchM7IvBandBestCombo, fetchM7FridayBandBuildProgress,
+         type M7IvBandBestComboRow, type M7FridayBandBuildProgress,
+} from '../../services/m7_api';
 import { InfoIcon } from './InfoIcon';
 import { M7RuleComparisonModal } from './M7RuleComparisonModal';
 import { M7CellAnalysisModal } from './M7CellAnalysisModal';
@@ -133,6 +135,7 @@ export function M7FridayBandBestComboTable({ controlled }: M7FridayBandBestCombo
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [buildProgress, setBuildProgress] = useState<M7FridayBandBuildProgress | null>(null);
 
   // Drilldown modals
   const [ruleModal, setRuleModal] = useState<null | {
@@ -157,6 +160,9 @@ export function M7FridayBandBestComboTable({ controlled }: M7FridayBandBestCombo
     const ac = new AbortController();
     setLoading(true);
     setErr(null);
+    setBuildProgress(null);
+    // jsonFetch (services/m7_api.ts) already auto-retries 5xx with backoff
+    // — Vite-proxy 500s during cold-start bursts are handled transparently.
     fetchM7IvBandBestCombo(
       { ranking: ranking as any, min_n_trades: 5, min_hit_pct: 50, pick_mode: pickMode },
       ac.signal,
@@ -174,6 +180,33 @@ export function M7FridayBandBestComboTable({ controlled }: M7FridayBandBestCombo
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
   }, [bandMode, d1Tiebreakers.join(','), pickMode, ranking]);
+
+  // While the main fetch is in flight on a build-eligible mode, poll the
+  // backend's build_progress endpoint so the user sees "loading per-trade
+  // archive… → assigning bands… → aggregating grid…" instead of a black box.
+  useEffect(() => {
+    if (!loading) { setBuildProgress(null); return; }
+    if (bandMode === 'A1') return;  // A1 always cached, no progress needed
+    let active = true;
+    const ac = new AbortController();
+    const poll = () => {
+      if (!active) return;
+      fetchM7FridayBandBuildProgress(
+        bandMode,
+        bandMode === 'D1' ? d1Tiebreakers : undefined,
+        ac.signal,
+      ).then(p => {
+        if (!active) return;
+        setBuildProgress(p);
+        if (p.phase !== 'done' && p.phase !== 'error') {
+          setTimeout(poll, 1200);
+        }
+      }).catch(() => { /* ignore aborts/transient errors */ });
+    };
+    // First poll immediately, then on the timer.
+    poll();
+    return () => { active = false; ac.abort(); };
+  }, [loading, bandMode, d1Tiebreakers.join(',')]);
 
   const sortedRows = useMemo(() =>
     [...rows].sort((a, b) => bandSort(String(a.iv_band)) - bandSort(String(b.iv_band))),
@@ -309,7 +342,52 @@ export function M7FridayBandBestComboTable({ controlled }: M7FridayBandBestCombo
         </div>
       )}
 
-      {loading && <div style={{ color: '#7a9bb5', fontSize: 12, padding: 6 }}>Loading…</div>}
+      {loading && (() => {
+        const p = buildProgress;
+        const phaseLabel: Record<string, string> = {
+          idle:                       'Starting…',
+          loading_disk_cache:         'Checking disk cache',
+          loading_per_trade_archive:  'Loading per-trade archive (3.25M rows)',
+          building_band_map:          'Assigning each Friday to a band',
+          aggregating_grid:           'Aggregating grid (vectorized pandas)',
+          saving_to_disk:             'Persisting to disk cache',
+          done:                       'Done — formatting results',
+          error:                      'Build error',
+        };
+        const phase = p?.phase ?? 'idle';
+        const progressPct = Math.max(5, Math.round((p?.progress ?? 0) * 100));
+        const label = phaseLabel[phase] ?? phase;
+        const detail = p?.message;
+        const source = p?.source;
+        return (
+          <div style={{ padding: '10px 8px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between',
+                          alignItems: 'baseline', marginBottom: 6 }}>
+              <span style={{ color: '#cfd9e3', fontSize: 12, fontWeight: 600 }}>
+                {source ? `Loading (${source})…` : `Building Friday-band grid…`}
+              </span>
+              <span style={{ color: '#7a9bb5', fontSize: 11 }}>
+                {label}{detail ? ` — ${detail}` : ''}
+              </span>
+            </div>
+            <div style={{ height: 6, background: '#0d1421', borderRadius: 3,
+                          overflow: 'hidden', border: '1px solid #1a2d42' }}>
+              <div style={{
+                height: '100%', width: `${progressPct}%`,
+                background: phase === 'error' ? '#f85149' : '#1f6feb',
+                transition: 'width 300ms ease-in-out',
+              }} />
+            </div>
+            {bandMode === 'D1' && phase !== 'done' && phase !== 'error' && (
+              <div style={{ color: '#5b7894', fontSize: 10, marginTop: 4 }}>
+                D1 multi-tiebreaker chains build once (~20-30s) then auto-cache to
+                disk — future requests for this chain are instant, even after a
+                backend restart.
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {err && <div style={{ color: '#f85149', fontSize: 12, padding: 6 }}>Error: {err}</div>}
       {!loading && !err && status === 'not_built' && (
         <div style={{ color: '#e3b341', fontSize: 12, padding: 6 }}>

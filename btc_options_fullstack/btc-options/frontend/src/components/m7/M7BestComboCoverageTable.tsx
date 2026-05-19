@@ -19,6 +19,7 @@ import {
   type M7BestComboCoverageResponse,
   type M7BestComboCoverageRow,
   type M7CoverageMode,
+  type M7Dataset,
 } from '../../services/m7_api';
 
 const LS_KEY = 'm7:bestcombo:coverage_mode';
@@ -57,6 +58,8 @@ interface Props {
   pick_mode?: 'by_hour' | 'aggregate_hours';
   min_hit_pct?: number;
   min_n_trades?: number;
+  // Joint Δ+Price-match dataset toggle. Default = today's pure-Δ behavior.
+  dataset?: M7Dataset;
 }
 
 export function M7BestComboCoverageTable(props: Props = {}) {
@@ -67,6 +70,8 @@ export function M7BestComboCoverageTable(props: Props = {}) {
   const [resp, setResp] = useState<M7BestComboCoverageResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Drives the warming poll. Bumping it re-fires the fetch effect below.
+  const [warmingTick, setWarmingTick] = useState(0);
 
   useEffect(() => {
     window.localStorage.setItem(LS_KEY, mode);
@@ -86,6 +91,7 @@ export function M7BestComboCoverageTable(props: Props = {}) {
         coverage_mode: mode,
       },
       ac.signal,
+      props.dataset,
     )
       .then(r => setResp(r))
       .catch(e => {
@@ -94,7 +100,19 @@ export function M7BestComboCoverageTable(props: Props = {}) {
       })
       .finally(() => setLoading(false));
     return () => ac.abort();
-  }, [mode, props.ranking, props.rule_family, props.pick_mode, props.min_hit_pct, props.min_n_trades]);
+  }, [mode, props.ranking, props.rule_family, props.pick_mode,
+      props.min_hit_pct, props.min_n_trades, props.dataset, warmingTick]);
+
+  // Auto-poll on a cold cache. The backend returns status='warming'
+  // immediately when no cached response exists; a daemon thread runs the
+  // picker + classifier and writes the result into the response cache.
+  // Each poll is sub-second so the request survives backend restarts.
+  const isWarming = resp?.status === 'warming';
+  useEffect(() => {
+    if (!isWarming) return;
+    const id = window.setTimeout(() => setWarmingTick(t => t + 1), 2000);
+    return () => window.clearTimeout(id);
+  }, [isWarming]);
 
   const sortedRows = useMemo(() => {
     if (!resp?.rows) return [] as M7BestComboCoverageRow[];
@@ -125,6 +143,15 @@ export function M7BestComboCoverageTable(props: Props = {}) {
         <div style={{ padding: 12, background: '#3a1212', border: '1px solid #832929',
                        borderRadius: 6, fontSize: 13 }}>
           Failed to load: {error}
+        </div>
+      )}
+
+      {isWarming && !error && (
+        <div style={{ padding: '6px 10px', marginBottom: 8, fontSize: 12,
+                       color: '#7a9bb5', background: '#0d1421',
+                       border: '1px solid #1a2d42', borderRadius: 4 }}>
+          ⏳ Computing coverage (picker + classifier ≈ 16s on first call).
+          Auto-refreshing every 2s — sub-second on subsequent toggles.
         </div>
       )}
 

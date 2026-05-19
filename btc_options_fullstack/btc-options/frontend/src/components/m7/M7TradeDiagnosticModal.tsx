@@ -183,8 +183,20 @@ export function M7TradeDiagnosticModal({ tradeId, exitRule, onClose }: Props) {
 // ── Tab body components ──────────────────────────────────────────────────────
 
 function OverviewTab({ d }: { d: M7TradeDiagnosticResponse }) {
+  const id = d.identity as Record<string, unknown>;
+  const cp = d.context_premium as Record<string, number | null>;
   return (
     <>
+      <SectionTitle>Trade context</SectionTitle>
+      <Grid>
+        <KV label="DTE @ entry (days)" value={fmt(id.dte_days as number, 2)} />
+        <KV label="DTE @ entry (h)"    value={fmt(id.dte_hours_at_entry as number, 1)} />
+        <KV label="Entry time label"   value={(id.entry_time_label as string) ?? '—'} />
+        <KV label="Quantity (lots)"    value={(d.per_leg as Record<string, unknown>).quantity_lots != null
+                                                ? String((d.per_leg as Record<string, unknown>).quantity_lots)
+                                                : '—'} />
+      </Grid>
+
       <SectionTitle>P&amp;L</SectionTitle>
       <Grid>
         <KV label="Net P&L"      value={fmtUsd(d.pnl.net_pnl_estimate_usd)} />
@@ -194,6 +206,10 @@ function OverviewTab({ d }: { d: M7TradeDiagnosticResponse }) {
         <KV label="Max MTM"      value={fmtUsd(d.pnl.max_mtm_usd)} />
         <KV label="Min MTM"      value={fmtUsd(d.pnl.min_mtm_usd)} />
         <KV label="Exit MTM"     value={fmtUsd(d.pnl.exit_mtm_usd)} />
+        <KV label="Max gross P&L"
+            value={fmtUsd((d.pnl as Record<string, number | null>).max_gross_pnl_usd)} />
+        <KV label="Min gross P&L"
+            value={fmtUsd((d.pnl as Record<string, number | null>).min_gross_pnl_usd)} />
         <KV label="Duration"     value={d.identity.duration_minutes != null
                                           ? `${(d.identity.duration_minutes/60).toFixed(1)}h`
                                           : '—'} />
@@ -201,6 +217,31 @@ function OverviewTab({ d }: { d: M7TradeDiagnosticResponse }) {
         <KV label="rel time @ trough" value={fmt(d.pnl.rel_time_min_mtm, 2)} />
         <KV label="% return / credit" value={fmtPct(d.pnl.pct_return_on_credit)} />
         <KV label="% return / margin" value={fmtPct(d.pnl.pct_return_on_margin)} />
+        <KV label="P&L % of credit"
+            value={fmtPct((d.pnl as Record<string, number | null>).pnl_pct_of_credit)} />
+        <KV label="P&L % of margin"
+            value={fmtPct((d.pnl as Record<string, number | null>).pnl_pct_of_margin)} />
+        <KV label="Peak % of credit"
+            value={fmtPct((d.pnl as Record<string, number | null>).pct_max_mtm_on_credit)} />
+        <KV label="Trough % of credit"
+            value={fmtPct((d.pnl as Record<string, number | null>).pct_min_mtm_on_credit)} />
+      </Grid>
+
+      <SectionTitle>Premium calibration (was this trade priced well?)</SectionTitle>
+      <Grid>
+        <KV label="Fair credit @ IVP"   value={fmtUsd(cp.fair_credit_at_ivp)} />
+        <KV label="Structural credit %" value={fmtPct(cp.structural_credit_pct)} />
+        <KV label="IV regime premium %" value={fmtPct(cp.iv_regime_premium_pct)} />
+        <KV label="Excess over fair %"  value={fmtPct(cp.excess_over_fair_pct)}
+            color={(cp.excess_over_fair_pct ?? 0) > 0.10 ? '#3fb950' :
+                   (cp.excess_over_fair_pct ?? 0) < -0.10 ? '#f85149' : undefined} />
+        <KV label="Pattern win rate"    value={fmtPct(cp.pattern_winrate)} />
+        <KV label="Expectancy / credit %" value={fmtPct(cp.expectancy_per_credit_pct)} />
+        <KV label="Bucket win rate"     value={fmtPct(cp.bucket_overall_winrate)} />
+        <KV label="Bucket SL hit rate"  value={fmtPct(cp.bucket_sl_hit_rate)} />
+        <KV label="n trades in bucket"  value={cp.n_trades_in_bucket != null
+                                                  ? String(cp.n_trades_in_bucket)
+                                                  : '—'} />
       </Grid>
 
       <SectionTitle>Hypotheses</SectionTitle>
@@ -232,6 +273,20 @@ function PerLegTab({ d }: { d: M7TradeDiagnosticResponse }) {
         <KV label="Δ bucket"         value={d.per_leg.skew.delta_skew_bucket ?? '—'} />
         <KV label="Premium bucket"   value={d.per_leg.skew.premium_skew_bucket ?? '—'} />
         <KV label="Leg P&L diff"     value={fmtUsd(d.pnl.leg_pnl_diff_usd)} />
+      </Grid>
+
+      <SectionTitle>Cost summary</SectionTitle>
+      <Grid>
+        <KV label="Total entry cost"  value={fmtUsd(d.costs.total_entry_cost_usd)} />
+        <KV label="Total exit cost"   value={fmtUsd(d.costs.total_exit_cost_usd)} />
+        <KV label="Entry slip — CALL" value={fmtUsd(d.costs.entry_slippage_call_usd)} />
+        <KV label="Entry slip — PUT"  value={fmtUsd(d.costs.entry_slippage_put_usd)} />
+        <KV label="Exit slip — CALL"  value={fmtUsd(d.costs.exit_slippage_call_usd)} />
+        <KV label="Exit slip — PUT"   value={fmtUsd(d.costs.exit_slippage_put_usd)} />
+        <KV label="Entry brk — CALL"  value={fmtUsd(d.costs.entry_brokerage_call_usd)} />
+        <KV label="Entry brk — PUT"   value={fmtUsd(d.costs.entry_brokerage_put_usd)} />
+        <KV label="Exit brk — CALL"   value={fmtUsd(d.costs.exit_brokerage_call_usd)} />
+        <KV label="Exit brk — PUT"    value={fmtUsd(d.costs.exit_brokerage_put_usd)} />
       </Grid>
     </>
   );
@@ -330,17 +385,51 @@ function SpotTab({ d }: { d: M7TradeDiagnosticResponse }) {
         <KV label="Range %"        value={fmtPct(s.spot_range_pct as number)} />
       </Grid>
 
-      <SectionTitle>Spot indicators (entry)</SectionTitle>
+      <SectionTitle>Spot technicals — all 6 timeframes (entry)</SectionTitle>
+      {/* 6-timeframe × 4-indicator table (24 cells) per docs/m7_loss_indicators.md
+          category #6. Higher timeframes (1d / 4h / 1h) tend to carry the
+          strongest discriminating signal — keep them visually prominent. */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 11,
+                        fontFamily: 'ui-monospace, monospace',
+                        minWidth: 460 }}>
+          <thead>
+            <tr style={{ color: '#7a9bb5' }}>
+              <th style={{ padding: '4px 8px', textAlign: 'left', fontWeight: 700 }}>TF</th>
+              <th style={{ padding: '4px 8px', textAlign: 'right' }}>RSI(14)</th>
+              <th style={{ padding: '4px 8px', textAlign: 'right' }}>MACD hist</th>
+              <th style={{ padding: '4px 8px', textAlign: 'right' }}>BB %b</th>
+              <th style={{ padding: '4px 8px', textAlign: 'right' }}>ATR %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(['5m','15m','30m','1h','4h','1d'] as const).map(tf => (
+              <tr key={tf} style={{ borderBottom: '1px solid #0d1421' }}>
+                <td style={{ padding: '4px 8px', color: '#cfd9e3', fontWeight: 600 }}>{tf}</td>
+                <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                  {fmt(s[`entry_rsi_14_${tf}`] as number, 1)}
+                </td>
+                <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                  {fmt(s[`entry_macd_hist_${tf}`] as number, 2)}
+                </td>
+                <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                  {fmt(s[`entry_bb_pct_b_${tf}`] as number, 3)}
+                </td>
+                <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                  {fmt(s[`entry_atr_pct_${tf}`] as number, 3)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <SectionTitle>Regime context</SectionTitle>
       <Grid>
-        <KV label="RSI 5m"  value={fmt(s.entry_rsi_14_5m as number, 1)} />
-        <KV label="RSI 4h"  value={fmt(s.entry_rsi_14_4h as number, 1)} />
-        <KV label="MACD hist 5m" value={fmt(s.entry_macd_hist_5m as number, 2)} />
-        <KV label="BB %b 5m"  value={fmt(s.entry_bb_pct_b_5m as number, 3)} />
-        <KV label="ATR % 5m"  value={fmt(s.entry_atr_pct_5m as number, 3)} />
-        <KV label="ATR % 4h"  value={fmt(s.ctx_atr_pct_4h as number, 3)} />
-        <KV label="ADX 14 4h" value={fmt(s.ctx_adx_14_4h as number, 1)} />
-        <KV label="PCR OI"    value={fmt(s.ctx_pcr_oi as number, 2)} />
-        <KV label="Total GEX" value={fmtUsd(s.ctx_total_gex as number)} />
+        <KV label="ATR % 4h (ctx)"  value={fmt(s.ctx_atr_pct_4h as number, 3)} />
+        <KV label="ADX 14 4h"       value={fmt(s.ctx_adx_14_4h as number, 1)} />
+        <KV label="PCR OI"          value={fmt(s.ctx_pcr_oi as number, 2)} />
+        <KV label="Total GEX"       value={fmtUsd(s.ctx_total_gex as number)} />
       </Grid>
 
       <SectionTitle>Expected move vs actual</SectionTitle>

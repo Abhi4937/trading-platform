@@ -20,7 +20,7 @@ type SortDir = 'asc' | 'desc';
 
 export function M7RuleComparisonModal({
   band, expiry_bucket, delta_target, entry_hour_ist, pickedRuleLabel,
-  totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
+  totalCapitalUsd, pctDeploy, ddMetric, ddThreshold, ddCaps,
   minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate,
   ruleFamily,
   primaryMetric = 'avg_net_pnl', primaryLabel = 'Avg net',
@@ -36,6 +36,7 @@ export function M7RuleComparisonModal({
   pctDeploy?: number;
   ddMetric?: string | null;
   ddThreshold?: number | null;
+  ddCaps?: Array<{ metric: string; threshold: number }>;
   minHitPct?: number | null;
   maxLossCapPct?: number | null;
   maxDropPct?: number | null;
@@ -82,6 +83,7 @@ export function M7RuleComparisonModal({
       pct_deploy: pctDeploy,
       dd_metric: ddMetric ?? null,
       dd_threshold: ddThreshold ?? null,
+      dd_caps: ddCaps,
       min_hit_pct: minHitPct ?? null,
       max_loss_cap_pct: maxLossCapPct ?? null,
       max_drop_peak_to_trough_pct: maxDropPct ?? null,
@@ -96,6 +98,7 @@ export function M7RuleComparisonModal({
     return () => { active = false; ac.abort(); };
   }, [band, expiry_bucket, delta_target, entry_hour_ist,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
+      JSON.stringify(ddCaps),
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, ruleFamily,
       endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
 
@@ -171,7 +174,7 @@ export function M7RuleComparisonModal({
         </div>
         <div style={{ color: '#7a9bb5', fontSize: 10, marginBottom: 8 }}>
           {sizingActive
-            ? <>Each rule has its own <strong style={{ color: '#cfd9e3' }}>lots</strong> under the same Capital ${totalCapitalUsd?.toFixed(0)} / Deploy {pctDeploy ?? 100}%{ddMetric ? <> / DD cap {ddMetric}@${ddThreshold}</> : null}{ruleFamily && ruleFamily !== 'all' ? <> / Family <strong style={{ color: '#cfd9e3' }}>{ruleFamily}</strong></> : null} constraints. Picker maxes <strong style={{ color: '#cfd9e3' }}>Scaled {primaryLabel}</strong>. Rows tagged <span style={{ color: '#f0b300' }}>⊘</span> were excluded (rule family, Hit %, Min n, Max loss %, Max drop %, Win %) — that's why the ★ may not be the visible top.</>
+            ? <>Each rule has its own <strong style={{ color: '#cfd9e3' }}>lots</strong> under the same Capital ${totalCapitalUsd?.toFixed(0)} / Deploy {pctDeploy ?? 100}%{ddMetric ? <> / DD cap {ddMetric}@${ddThreshold}</> : null}{ddCaps && ddCaps.length > 0 ? <> / +{ddCaps.length} DD cap{ddCaps.length === 1 ? '' : 's'} ({ddCaps.map(c => `${c.metric}@$${c.threshold}`).join(' ∧ ')})</> : null}{ruleFamily && ruleFamily !== 'all' ? <> / Family <strong style={{ color: '#cfd9e3' }}>{ruleFamily}</strong></> : null} constraints. Picker maxes <strong style={{ color: '#cfd9e3' }}>Scaled {primaryLabel}</strong>. Rows tagged <span style={{ color: '#f0b300' }}>⊘</span> were excluded (rule family, Hit %, Min n, Max loss %, Max drop %, Win %) — that's why the ★ may not be the visible top.</>
             : <>No capital sizing active — values shown at per-100-lot baseline. Picker ranks by {primaryLabel}.</>}
         </div>
         {loading && <div style={{ color: '#7a9bb5', fontSize: 12 }}>Loading…</div>}

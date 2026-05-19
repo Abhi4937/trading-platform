@@ -5,7 +5,9 @@
 import React, { useEffect, useState } from 'react';
 import {
   fetchM7CrossBandCheck, fetchM7SingleComboSimulation,
+  fetchM7CellFridayDetail,
   type M7CrossBandCheckResponse, type M7SingleComboSimulationResponse,
+  type M7CellFridayDetailResponse, type M7CellFridayDetailRow,
   type M7IvBandBestComboRow,
 } from '../../services/m7_api';
 import { InfoIcon } from './InfoIcon';
@@ -17,7 +19,7 @@ const pct = (v: number | null | undefined, dp = 1) =>
 const pnlColor = (v: number | null | undefined) =>
   v == null ? '#7a9bb5' : v >= 0 ? '#3fb950' : '#f85149';
 
-type Tab = 'cross_band' | 'single_combo';
+type Tab = 'cross_band' | 'single_combo' | 'friday_detail';
 
 export function M7CellAnalysisModal({
   band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
@@ -46,6 +48,11 @@ export function M7CellAnalysisModal({
   const [singleCombo, setSingleCombo] = useState<M7SingleComboSimulationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Friday-detail tab is lazy-loaded the first time the user opens it so the
+  // common modal-open path stays fast (cold rule cache miss = 5–15 s).
+  const [fridayDetail, setFridayDetail] = useState<M7CellFridayDetailResponse | null>(null);
+  const [fridayLoading, setFridayLoading] = useState(false);
+  const [fridayErr, setFridayErr] = useState<string | null>(null);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -74,6 +81,31 @@ export function M7CellAnalysisModal({
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
   }, [band, expiry_bucket, delta_target, entry_hour_ist, rule_label, totalCapitalUsd, pctDeploy,
+      endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
+
+  useEffect(() => {
+    if (tab !== 'friday_detail' || fridayDetail !== null) return;
+    let active = true;
+    const ac = new AbortController();
+    setFridayLoading(true);
+    setFridayErr(null);
+    fetchM7CellFridayDetail({
+      band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
+      endpointPrefix, bandMode, d1Tiebreakers,
+    }, ac.signal)
+      .then(r => { if (active) setFridayDetail(r); })
+      .catch(e => { if (active && e?.name !== 'AbortError') setFridayErr(String(e)); })
+      .finally(() => { if (active) setFridayLoading(false); });
+    return () => { active = false; ac.abort(); };
+  }, [tab, band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
+      endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
+
+  // Reset the Friday-detail cache whenever the cell coordinates change so the
+  // tab re-fetches for the new cell when reopened.
+  useEffect(() => {
+    setFridayDetail(null);
+    setFridayErr(null);
+  }, [band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
       endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
 
   const tabStyle = (active: boolean): React.CSSProperties => ({
@@ -120,9 +152,13 @@ export function M7CellAnalysisModal({
             Cross-band check
             <InfoIcon text="Same combo applied across all 10 IV bands. Answers: does this rule generalise across IV regimes, or is it band-specific? Bands where the combo has no trades are absent." />
           </button>
-          <button onClick={() => setTab('single_combo')} style={{ ...tabStyle(tab === 'single_combo'), borderLeft: 'none', borderTopRightRadius: 4, borderBottomRightRadius: 4 }}>
+          <button onClick={() => setTab('single_combo')} style={{ ...tabStyle(tab === 'single_combo'), borderLeft: 'none' }}>
             Single-combo simulation
             <InfoIcon text="Counterfactual: what if every Friday traded this single combo regardless of IV regime? Weighted aggregate across all bands. Compare to band-aware (regime-switching) P&L to decide if regime detection adds value." />
+          </button>
+          <button onClick={() => setTab('friday_detail')} style={{ ...tabStyle(tab === 'friday_detail'), borderLeft: 'none', borderTopRightRadius: 4, borderBottomRightRadius: 4 }}>
+            Friday detail
+            <InfoIcon text="For this exact cell: which Friday each losing trade was on, the Friday behind the worst-MTM winner (Min MTM (W)), the Friday of the largest win, and the Fridays of winners that dipped below the cell's avg min MTM (W < avg min MTM). Loads lazily on first open of this tab." />
           </button>
         </div>
 
@@ -233,7 +269,177 @@ export function M7CellAnalysisModal({
         {tab === 'single_combo' && !loading && !singleCombo?.summary && (
           <div style={{ color: '#7a9bb5', fontSize: 12 }}>No data for this combo across all bands.</div>
         )}
+
+        {tab === 'friday_detail' && (
+          <FridayDetailTab
+            data={fridayDetail}
+            loading={fridayLoading}
+            err={fridayErr}
+            th={th}
+            thR={thR}
+            td={td}
+            tdR={tdR}
+            sk={sk}
+            lots={lots}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+function FridayDetailRowsTable({
+  rows, columns, th, thR, td, tdR, sk,
+}: {
+  rows: M7CellFridayDetailRow[];
+  columns: Array<'friday' | 'net' | 'min' | 'max' | 'exit'>;
+  th: React.CSSProperties; thR: React.CSSProperties;
+  td: React.CSSProperties; tdR: React.CSSProperties;
+  sk: (v: number | null | undefined) => number | null;
+}) {
+  if (rows.length === 0) {
+    return <div style={{ color: '#7a9bb5', fontSize: 11, padding: '6px 0' }}>—</div>;
+  }
+  return (
+    <table style={{ borderCollapse: 'collapse', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: '#cfd9e3', width: '100%' }}>
+      <thead><tr style={{ textAlign: 'left' }}>
+        {columns.includes('friday') && <th style={th}>Friday</th>}
+        {columns.includes('net') && <th style={thR}>Net P&L</th>}
+        {columns.includes('min') && <th style={thR}>Min MTM</th>}
+        {columns.includes('max') && <th style={thR}>Max MTM</th>}
+        {columns.includes('exit') && <th style={th}>Exit</th>}
+      </tr></thead>
+      <tbody>
+        {rows.map(r => (
+          <tr key={r.trade_id || `${r.friday_date_ist}-${r.net_pnl_estimate_usd}`} style={{ borderTop: '1px solid #1a2d42' }}>
+            {columns.includes('friday') && <td style={{ ...td, fontWeight: 600 }}>{r.friday_date_ist}</td>}
+            {columns.includes('net') && (
+              <td style={{ ...tdR, color: (r.net_pnl_estimate_usd ?? 0) >= 0 ? '#3fb950' : '#f85149' }}>
+                {usd(sk(r.net_pnl_estimate_usd))}
+              </td>
+            )}
+            {columns.includes('min') && (
+              <td style={{ ...tdR, color: '#f85149' }}>{usd(sk(r.min_mtm_usd))}</td>
+            )}
+            {columns.includes('max') && (
+              <td style={{ ...tdR, color: '#3fb950' }}>{usd(sk(r.max_mtm_usd))}</td>
+            )}
+            {columns.includes('exit') && (
+              <td style={{ ...td, color: '#7a9bb5', fontSize: 10 }}>{r.exit_reason || '—'}</td>
+            )}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function FridayDetailTab({
+  data, loading, err, th, thR, td, tdR, sk, lots,
+}: {
+  data: M7CellFridayDetailResponse | null;
+  loading: boolean;
+  err: string | null;
+  th: React.CSSProperties; thR: React.CSSProperties;
+  td: React.CSSProperties; tdR: React.CSSProperties;
+  sk: (v: number | null | undefined) => number | null;
+  lots: number;
+}) {
+  if (err) return <div style={{ color: '#f85149', fontSize: 12 }}>{err}</div>;
+  if (loading) {
+    return (
+      <div style={{ color: '#7a9bb5', fontSize: 12 }}>
+        Loading Friday detail… (first request per rule warms a per-trade cache — typically 5–15 s)
+      </div>
+    );
+  }
+  if (!data) return null;
+  if (data.status === 'unknown_rule') {
+    return <div style={{ color: '#f85149', fontSize: 12 }}>Unknown rule label — cannot resolve trade detail.</div>;
+  }
+  if (data.status === 'no_trades' || !data.cell) {
+    return <div style={{ color: '#7a9bb5', fontSize: 12 }}>No trades in this cell.</div>;
+  }
+  const c = data.cell;
+  return (
+    <div>
+      <div style={{ color: '#7a9bb5', fontSize: 11, marginBottom: 10 }}>
+        Friday-level breakdown for this cell. Numbers scaled to <strong style={{ color: '#cfd9e3' }}>{lots} lots</strong>.
+      </div>
+
+      <Section
+        title={`Losing Fridays (n=${c.n_losses})`}
+        info="Every Friday this cell took a loss, sorted by net P&L ascending (worst first)."
+      >
+        <FridayDetailRowsTable
+          rows={data.losers}
+          columns={['friday', 'net', 'min', 'max', 'exit']}
+          th={th} thR={thR} td={td} tdR={tdR} sk={sk}
+        />
+      </Section>
+
+      <Section
+        title="Worst-MTM winner"
+        info="The single winning trade that dipped deepest into drawdown before recovering. This is where the cell's Min MTM (W) aggregate comes from."
+      >
+        {data.worst_winner ? (
+          <div style={{ color: '#cfd9e3', fontSize: 12 }}>
+            <strong>{data.worst_winner.friday_date_ist}</strong>
+            <span style={{ color: '#7a9bb5', marginLeft: 8 }}>
+              · Net <span style={{ color: '#3fb950' }}>{usd(sk(data.worst_winner.net_pnl_estimate_usd))}</span>
+              · MinMTM <span style={{ color: '#f85149' }}>{usd(sk(data.worst_winner.min_mtm_usd))}</span>
+              · MaxMTM <span style={{ color: '#3fb950' }}>{usd(sk(data.worst_winner.max_mtm_usd))}</span>
+              {data.worst_winner.exit_reason && <> · exit: {data.worst_winner.exit_reason}</>}
+            </span>
+          </div>
+        ) : (
+          <div style={{ color: '#7a9bb5', fontSize: 11 }}>No winners in this cell.</div>
+        )}
+      </Section>
+
+      <Section
+        title="Largest win"
+        info="The winning trade with the highest net P&L. This is where the cell's Largest win aggregate comes from."
+      >
+        {data.largest_win ? (
+          <div style={{ color: '#cfd9e3', fontSize: 12 }}>
+            <strong>{data.largest_win.friday_date_ist}</strong>
+            <span style={{ color: '#7a9bb5', marginLeft: 8 }}>
+              · Net <span style={{ color: '#3fb950' }}>{usd(sk(data.largest_win.net_pnl_estimate_usd))}</span>
+              · MinMTM <span style={{ color: '#f85149' }}>{usd(sk(data.largest_win.min_mtm_usd))}</span>
+              · MaxMTM <span style={{ color: '#3fb950' }}>{usd(sk(data.largest_win.max_mtm_usd))}</span>
+              {data.largest_win.exit_reason && <> · exit: {data.largest_win.exit_reason}</>}
+            </span>
+          </div>
+        ) : (
+          <div style={{ color: '#7a9bb5', fontSize: 11 }}>No winners in this cell.</div>
+        )}
+      </Section>
+
+      <Section
+        title={`Winners below avg MinMTM (n=${c.n_winners_below_avg_min_mtm})`}
+        info="Winners whose min MTM dipped below the cell's avg_min_mtm_winners. The cell's W < avg min MTM count. Sorted by min MTM ascending (deepest dip first)."
+      >
+        <div style={{ color: '#7a9bb5', fontSize: 10, marginBottom: 6 }}>
+          Threshold (avg min MTM among winners): <strong style={{ color: '#f85149' }}>{usd(sk(c.avg_min_mtm_winners))}</strong>
+        </div>
+        <FridayDetailRowsTable
+          rows={data.winners_below_avg_min_mtm}
+          columns={['friday', 'min', 'net', 'max']}
+          th={th} thR={thR} td={td} tdR={tdR} sk={sk}
+        />
+      </Section>
+    </div>
+  );
+}
+
+function Section({ title, info, children }: { title: string; info?: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: '#0d1421', border: '1px solid #1a2d42', borderRadius: 6, padding: 10, marginBottom: 10 }}>
+      <div style={{ color: '#cfd9e3', fontWeight: 700, fontSize: 12, marginBottom: 6 }}>
+        {title}{info && <InfoIcon text={info} />}
+      </div>
+      {children}
     </div>
   );
 }

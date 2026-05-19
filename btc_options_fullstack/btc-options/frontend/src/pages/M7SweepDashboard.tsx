@@ -1,12 +1,37 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { fetchM7Summary, type M7LossesCell } from '../services/m7_api';
+import { fetchM7Summary, type M7Dataset, type M7LossesCell } from '../services/m7_api';
 import type { M7ExitRule, M7Filters, M7Summary } from '../types/m7';
 import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
 import { M7IvBandBestComboTable } from '../components/m7/M7IvBandBestComboTable';
 import { M7BestComboCoverageTable } from '../components/m7/M7BestComboCoverageTable';
+import { M7JointMatchStats } from '../components/m7/M7JointMatchStats';
 import type { M7IvBandBestComboRow } from '../services/m7_api';
 import { M7LossesExplorer } from '../components/m7/M7LossesExplorer';
+import { M7PivotProfilePanel } from '../components/m7/M7PivotProfilePanel';
+import { usePersistedState } from '../hooks/usePersistedState';
+
+class JointStatsBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error) { console.error('M7JointMatchStats crashed:', error); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ background: '#3a1f1f', border: '1px solid #b94a4a',
+                      color: '#ffb4b4', padding: 10, borderRadius: 4,
+                      margin: '8px 0', fontSize: 12 }}>
+          Joint-match stats panel failed to render ({this.state.error.message}).
+          Toggle back to Δ-match to recover.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Returns a value that only updates after `delay` ms of no change.
 // Used so rapid filter / exit-rule edits don't fire a request on every keystroke.
@@ -20,6 +45,15 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
+// Allowed dataset values. Used to validate the persisted localStorage value
+// on first mount — falls back to delta_match if the stored entry is stale or
+// not in this whitelist.
+const DATASET_VALUES: M7Dataset[] = ['delta_match', 'price_match'];
+
+function isValidDataset(v: unknown): v is M7Dataset {
+  return typeof v === 'string' && (DATASET_VALUES as string[]).includes(v);
+}
+
 export function M7SweepDashboard() {
   const [filters] = useState<M7Filters>({});
   const [exitRule] = useState<M7ExitRule>({});
@@ -27,6 +61,13 @@ export function M7SweepDashboard() {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [metric] = useState<string>('avg_net_pnl');
   const [error, setError] = useState<string | null>(null);
+
+  // Joint Δ+Price-match dataset toggle. Persisted to localStorage so the
+  // choice survives mode switches and reloads. Defensive: validate stored
+  // value on every read so stale entries can't break the UI.
+  const [datasetRaw, setDataset] = usePersistedState<M7Dataset>(
+    'm7:dataset', 'delta_match');
+  const dataset: M7Dataset = isValidDataset(datasetRaw) ? datasetRaw : 'delta_match';
 
   // Debounce filter / exit-rule / metric so rapid changes coalesce into a
   // single backend round-trip instead of firing on every keystroke. The
@@ -54,6 +95,7 @@ export function M7SweepDashboard() {
           delta_target: r.delta_target,
           rule: r.rule,
           rule_label: r.rule_label,
+          lots: r.lots ?? null,
         }));
       setBestCells(cells);
     },
@@ -67,7 +109,7 @@ export function M7SweepDashboard() {
     setError(null);
     const tick = () => {
       if (!active) return;
-      fetchM7Summary(dFilters, dExitRule, ac.signal)
+      fetchM7Summary(dFilters, dExitRule, ac.signal, dataset)
         .then(s => { if (active) { setSummary(s); setSummaryLoading(false); } })
         .catch(e => {
           if (!active || e?.name === 'AbortError') return;
@@ -83,7 +125,7 @@ export function M7SweepDashboard() {
     };
     tick();
     return () => { active = false; ac.abort(); };
-  }, [JSON.stringify(dFilters), JSON.stringify(dExitRule)]);
+  }, [JSON.stringify(dFilters), JSON.stringify(dExitRule), dataset]);
 
   if (error) {
     return (
@@ -99,14 +141,63 @@ export function M7SweepDashboard() {
 
   return (
     <div style={{ padding: 14, color: '#cfd9e3', minHeight: '100vh', overflowY: 'auto', height: '100%' }}>
+      <DatasetToggle dataset={dataset} onChange={setDataset} />
+
       <M7HeadlineStrip summary={summary} loading={summaryLoading} />
 
-      <M7IvBandBestComboTable onSelectionsChange={handleSelectionsChange} />
-      <M7BestComboCoverageTable />
-      <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric} />
+      <JointStatsBoundary>
+        <M7JointMatchStats dataset={dataset} />
+      </JointStatsBoundary>
+
+      <M7IvBandBestComboTable onSelectionsChange={handleSelectionsChange} dataset={dataset} />
+      <M7BestComboCoverageTable dataset={dataset} />
+      <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric}
+                              dataset={dataset} />
 
       <M7LossesExplorer filters={dFilters} exitRule={dExitRule} metric={dMetric}
-                        cells={dBestCells} />
+                        cells={dBestCells} dataset={dataset} />
+
+      <M7PivotProfilePanel dataset={dataset} cells={dBestCells} />
+
+    </div>
+  );
+}
+
+// ── Dataset toggle (2-button group) ──────────────────────────────────────────
+
+function DatasetToggle({
+  dataset, onChange,
+}: { dataset: M7Dataset; onChange: (v: M7Dataset) => void }) {
+  const btn = (active: boolean): React.CSSProperties => ({
+    padding: '6px 14px',
+    background: active ? '#1f6feb' : '#0d1421',
+    color: active ? '#ffffff' : '#cfd9e3',
+    border: `1px solid ${active ? '#1f6feb' : '#1a2d42'}`,
+    borderRadius: 4,
+    cursor: 'pointer',
+    fontSize: 12,
+    fontWeight: 600,
+  });
+  return (
+    <div style={{
+      display: 'flex', gap: 6, alignItems: 'center',
+      marginBottom: 10, padding: '6px 0',
+    }}>
+      <span style={{ fontSize: 11, color: '#7a9bb5',
+                     textTransform: 'uppercase', letterSpacing: 0.5,
+                     fontWeight: 600, marginRight: 4 }}>
+        Dataset:
+      </span>
+      <button style={btn(dataset === 'delta_match')}
+              onClick={() => onChange('delta_match')}
+              title="Today's behavior — strikes picked by closest |Δ| from below, independently per leg.">
+        ◆ Δ-match
+      </button>
+      <button style={btn(dataset === 'price_match')}
+              onClick={() => onChange('price_match')}
+              title="Strikes jointly optimized to minimize both Δ deviation AND premium asymmetry, with fallback to Δ-only when no joint match fits within tolerance.">
+        ◆ Δ+Price match
+      </button>
     </div>
   );
 }

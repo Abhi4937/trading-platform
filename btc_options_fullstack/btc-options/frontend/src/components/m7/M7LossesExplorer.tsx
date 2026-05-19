@@ -16,6 +16,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   fetchM7LossesDistribution,
   fetchM7FridayBandLossesDistribution,
+  type M7Dataset,
+  type M7LossesCell,
   type M7LossesDistResponse,
   type M7LossesRanking,
   type M7LossesScope,
@@ -32,6 +34,13 @@ interface Props {
   useFridayBand?: boolean;
   bandMode?: 'A1' | 'B1' | 'D1';
   d1Tiebreakers?: string[];
+  // When `cells` is set, the explorer mirrors the dashboard's Best Combo
+  // table 1:1 — the scope toggle row + credit/margin pills are hidden, and
+  // losses are pulled from exactly these per-band selections. Used by
+  // M7SweepDashboard.
+  cells?: M7LossesCell[];
+  // Joint Δ+Price-match dataset toggle. Default = today's pure-Δ behavior.
+  dataset?: M7Dataset;
 }
 
 const CAUSE_COLORS: Record<string, string> = {
@@ -61,7 +70,13 @@ function fmtUsd(v: number): string {
 }
 
 export function M7LossesExplorer({ filters, exitRule, metric,
-                                   useFridayBand = false, bandMode, d1Tiebreakers }: Props) {
+                                   useFridayBand = false, bandMode, d1Tiebreakers,
+                                   cells, dataset }: Props) {
+  // "cells mode" — the dashboard passed an explicit per-band selection list.
+  // When active, scope/ranking UI is hidden and the explorer mirrors those
+  // cells exactly. Empty array still counts as cells-mode (means the table
+  // hasn't loaded yet — show 0 trades rather than universe).
+  const cellsMode = cells !== undefined;
   const [collapsed, setCollapsed] = useState(false);
   const [data, setData] = useState<M7LossesDistResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -78,6 +93,8 @@ export function M7LossesExplorer({ filters, exitRule, metric,
   const [tradesPage, setTradesPage] = useState(0);
   const TRADES_PER_PAGE = 50;
   const [selectedTradeId, setSelectedTradeId] = useState<string | null>(null);
+  // Drives the cells-mode warming poll (see effect below).
+  const [warmingTick, setWarmingTick] = useState(0);
 
   useEffect(() => {
     if (collapsed) return;
@@ -97,20 +114,34 @@ export function M7LossesExplorer({ filters, exitRule, metric,
           trades_offset: tradesPage * TRADES_PER_PAGE,
           trades_sort: tradesSort,
           only_sl_hits: onlySlHits,
-        }, bandMode, d1Tiebreakers, ac.signal)
-      : fetchM7LossesDistribution({
-          ...filters,
-          dimensions,
-          exit_rule: exitRule,
-          scope: scope ?? undefined,
-          ranking: scope === 'best_combo' ? ranking : undefined,
-          metric,
-          include_trades: tradesExpanded,
-          trades_limit: TRADES_PER_PAGE,
-          trades_offset: tradesPage * TRADES_PER_PAGE,
-          trades_sort: tradesSort,
-          only_sl_hits: onlySlHits,
-        }, ac.signal);
+        }, bandMode, d1Tiebreakers, ac.signal, dataset)
+      : fetchM7LossesDistribution(cellsMode
+          ? {
+              // cells-mode: ignore the scope/ranking choice entirely; the
+              // dashboard's Best Combo selection is the source of truth.
+              ...filters,
+              dimensions,
+              exit_rule: exitRule,
+              cells: cells ?? [],
+              include_trades: tradesExpanded,
+              trades_limit: TRADES_PER_PAGE,
+              trades_offset: tradesPage * TRADES_PER_PAGE,
+              trades_sort: tradesSort,
+              only_sl_hits: onlySlHits,
+            }
+          : {
+              ...filters,
+              dimensions,
+              exit_rule: exitRule,
+              scope: scope ?? undefined,
+              ranking: scope === 'best_combo' ? ranking : undefined,
+              metric,
+              include_trades: tradesExpanded,
+              trades_limit: TRADES_PER_PAGE,
+              trades_offset: tradesPage * TRADES_PER_PAGE,
+              trades_sort: tradesSort,
+              only_sl_hits: onlySlHits,
+            }, ac.signal, dataset);
     p.then(setData)
      .catch(e => { if ((e as Error).name !== 'AbortError') setErr(String(e)); })
      .finally(() => setLoading(false));
@@ -118,7 +149,14 @@ export function M7LossesExplorer({ filters, exitRule, metric,
   }, [collapsed, JSON.stringify(filters), JSON.stringify(exitRule),
       primaryDim, secondaryDim, scope, ranking, metric,
       tradesExpanded, tradesSort, onlySlHits, tradesPage,
-      useFridayBand, bandMode, JSON.stringify(d1Tiebreakers ?? [])]);
+      useFridayBand, bandMode, JSON.stringify(d1Tiebreakers ?? []),
+      cellsMode, JSON.stringify(cells ?? []),
+      dataset,
+      // warmingTick re-fires the fetch on each poll while cells-mode is
+      // warming (see the warming useEffect below). It's a no-op when not
+      // warming because the response will come back warming=false and the
+      // poll effect exits.
+      warmingTick]);
 
   // Reset pagination when filters/scope/sort change.
   useEffect(() => { setTradesPage(0); }, [
@@ -126,11 +164,29 @@ export function M7LossesExplorer({ filters, exitRule, metric,
     scope, ranking, tradesSort, onlySlHits,
   ]);
 
-  const scopeLabel = scope === 'full_coverage'
-    ? 'Full Coverage best cells'
-    : scope === 'best_combo'
-      ? `Best Combo (% ${ranking})`
-      : 'Universe';
+  // Auto-poll while the backend warms the cells-mode exit-rule cache.
+  // The backend returns `scope_summary.warming=true` immediately when any
+  // unique rule_dict in the cells payload is cold; daemon threads compute
+  // each rule in parallel. Bumping `warmingTick` re-triggers the main fetch
+  // effect every 3s until the response stops setting warming=true. This
+  // keeps the rules_done/rules_total counter live without hammering the API
+  // and survives backend restarts because each request is short.
+  const isWarming = data?.scope_summary?.warming === true;
+  useEffect(() => {
+    if (!isWarming || collapsed) return;
+    const id = window.setTimeout(() => setWarmingTick(t => t + 1), 3000);
+    return () => window.clearTimeout(id);
+  }, [isWarming, collapsed]);
+
+  const scopeLabel = cellsMode
+    ? (cells && cells.length > 0
+        ? `Best Combo per IV band (${cells.length} cells)`
+        : 'Best Combo per IV band — waiting for table')
+    : scope === 'full_coverage'
+      ? 'Full Coverage best cells'
+      : scope === 'best_combo'
+        ? `Best Combo (% ${ranking})`
+        : 'Universe';
 
   const causeTotal = useMemo(() => {
     if (!data) return 0;
@@ -160,9 +216,11 @@ export function M7LossesExplorer({ filters, exitRule, metric,
 
       {!collapsed && (
         <>
-          {/* Scope toggle row — two mutually-exclusive buttons (FC / BC) +
-              credit/margin sub-pills when BC is on. Stops click bubbling so
-              the header collapse caret doesn't fire on toggle clicks. */}
+          {/* Scope toggle row — hidden in cells-mode (M7SweepDashboard
+              passes a `cells` array down, so there's no choice to make).
+              Friday-Band and any other consumer without a `cells` prop
+              still see the legacy toggles. */}
+          {!cellsMode && (
           <div style={{
             display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8,
             marginTop: 10, paddingTop: 8, paddingBottom: 4,
@@ -203,6 +261,22 @@ export function M7LossesExplorer({ filters, exitRule, metric,
               </button>
             )}
           </div>
+          )}
+
+          {/* Cells-mode info banner — replaces the override banner. Shows
+              the user that the explorer is mirroring the dashboard's
+              Best Combo table and that exit rules are per-band. */}
+          {cellsMode && cells && cells.length > 0 && (
+            <div style={{
+              marginTop: 8, padding: '6px 10px',
+              background: '#0d1f33', border: '1px solid #1a3d5e',
+              borderRadius: 4, fontSize: 11, color: '#79c0ff',
+            }} onClick={(e) => e.stopPropagation()}>
+              ⛓ Mirroring Best Combo per IV band — {cells.length} cells, each
+              band's own exit rule. Change any control on the table above
+              and the losses recompute.
+            </div>
+          )}
 
           {/* Override banner — only when scope=best_combo. */}
           {scope === 'best_combo' && data?.scope_summary?.exit_rule_overridden && (
@@ -252,15 +326,23 @@ export function M7LossesExplorer({ filters, exitRule, metric,
             </div>
           )}
 
-          {/* Warming notice — only when scope=best_combo and grid still building */}
-          {scope === 'best_combo' && data?.scope_summary?.warming && (
+          {/* Warming notice — fires for either scope=best_combo (grid build)
+              or cells-mode (per-rule _derive_exits cache fill). In cells-mode
+              the warming response includes rules_done/rules_total counters
+              that update every 3s via the auto-poll effect. */}
+          {data?.scope_summary?.warming && (scope === 'best_combo' || cellsMode) && (
             <div style={{
               marginTop: 8, padding: '6px 10px', fontSize: 11, color: '#7a9bb5',
               background: '#0d1421', border: '1px solid #1a2d42', borderRadius: 4,
             }}>
-              Best Combo grid warming up… {data.scope_summary.rules_done ?? 0}
-              {' / '}{data.scope_summary.rules_total ?? 21} rules processed.
-              Try again in a few seconds.
+              {cellsMode
+                ? <>⏳ Warming the per-rule exit cache…{' '}
+                    {data.scope_summary.rules_done ?? 0}
+                    {' / '}{data.scope_summary.rules_total ?? cells?.length ?? 0}
+                    {' rules ready. Auto-refreshing every 3s.'}</>
+                : <>Best Combo grid warming up… {data.scope_summary.rules_done ?? 0}
+                    {' / '}{data.scope_summary.rules_total ?? 96} rules processed.
+                    Try again in a few seconds.</>}
             </div>
           )}
 

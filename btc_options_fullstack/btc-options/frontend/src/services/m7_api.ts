@@ -11,8 +11,21 @@ import type {
 
 const BASE = '/api/v1/m7';
 
+// Joint Δ+Price-match dataset toggle. Default = today's pure-Δ behavior;
+// 'price_match' reads the parallel parquet built by m7_batch_backtester_joint.
+export type M7Dataset = 'delta_match' | 'price_match';
+
+// Append the dataset query param IFF it's a non-default value. Used by every
+// M7 endpoint that reads trades/paths/grid so the toggle threads through.
+function appendDatasetParam(params: URLSearchParams, dataset?: M7Dataset): void {
+  if (dataset && dataset !== 'delta_match') {
+    params.set('dataset', dataset);
+  }
+}
+
 function buildQuery(filters: Record<string, unknown>,
-                    exit_rule?: M7ExitRule): string {
+                    exit_rule?: M7ExitRule,
+                    dataset?: M7Dataset): string {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(filters)) {
     if (v === null || v === undefined || v === '') continue;
@@ -29,6 +42,7 @@ function buildQuery(filters: Record<string, unknown>,
       params.append('exit_rule', JSON.stringify(cleaned));
     }
   }
+  appendDatasetParam(params, dataset);
   const qs = params.toString();
   return qs ? `?${qs}` : '';
 }
@@ -99,68 +113,78 @@ async function _jsonFetchInner<T>(url: string, signal?: AbortSignal): Promise<T>
   throw lastErr ?? new Error('jsonFetch: exhausted retries');
 }
 
-export function fetchM7Summary(filters: M7Filters = {}, exit_rule?: M7ExitRule, signal?: AbortSignal): Promise<M7Summary> {
-  return jsonFetch<M7Summary>(`${BASE}/summary${buildQuery(filters as Record<string, unknown>, exit_rule)}`, signal);
+export function fetchM7Summary(filters: M7Filters = {}, exit_rule?: M7ExitRule, signal?: AbortSignal, dataset?: M7Dataset): Promise<M7Summary> {
+  return jsonFetch<M7Summary>(`${BASE}/summary${buildQuery(filters as Record<string, unknown>, exit_rule, dataset)}`, signal);
 }
 
 export function fetchM7Trades(opts: M7Filters & {
   limit?: number; offset?: number; sort_by?: string; sort_dir?: 'asc' | 'desc';
-} = {}): Promise<M7TradesResponse> {
-  return jsonFetch<M7TradesResponse>(`${BASE}/trades${buildQuery(opts as Record<string, unknown>)}`);
+} = {}, dataset?: M7Dataset): Promise<M7TradesResponse> {
+  return jsonFetch<M7TradesResponse>(`${BASE}/trades${buildQuery(opts as Record<string, unknown>, undefined, dataset)}`);
 }
 
-export function fetchM7Path(trade_id: string): Promise<M7PathResponse> {
-  return jsonFetch<M7PathResponse>(`${BASE}/path?trade_id=${encodeURIComponent(trade_id)}`);
+export function fetchM7Path(trade_id: string, dataset?: M7Dataset): Promise<M7PathResponse> {
+  const params = new URLSearchParams({ trade_id });
+  appendDatasetParam(params, dataset);
+  return jsonFetch<M7PathResponse>(`${BASE}/path?${params.toString()}`);
 }
 
 export function fetchM7Aggregate(opts: M7Filters & {
   dimensions: string;
   metric?: string;
-}, exit_rule?: M7ExitRule): Promise<M7AggregateResponse> {
-  return jsonFetch<M7AggregateResponse>(`${BASE}/aggregate${buildQuery(opts as unknown as Record<string, unknown>, exit_rule)}`);
+}, exit_rule?: M7ExitRule, dataset?: M7Dataset): Promise<M7AggregateResponse> {
+  return jsonFetch<M7AggregateResponse>(`${BASE}/aggregate${buildQuery(opts as unknown as Record<string, unknown>, exit_rule, dataset)}`);
 }
 
 export function fetchM7Heatmap(opts: M7Filters & {
   metric?: string;
-} = {}, exit_rule?: M7ExitRule): Promise<M7AggregateResponse> {
-  return jsonFetch<M7AggregateResponse>(`${BASE}/heatmap${buildQuery(opts as Record<string, unknown>, exit_rule)}`);
+} = {}, exit_rule?: M7ExitRule, dataset?: M7Dataset): Promise<M7AggregateResponse> {
+  return jsonFetch<M7AggregateResponse>(`${BASE}/heatmap${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`);
 }
 
 export function fetchM7IvBandSummary(opts: M7Filters & { metric?: string } = {},
                                       exit_rule?: M7ExitRule,
-                                      signal?: AbortSignal): Promise<{ rows: M7IvBandSummaryRow[]; metric: string }> {
-  return jsonFetch(`${BASE}/iv_band_summary${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+                                      signal?: AbortSignal,
+                                      dataset?: M7Dataset): Promise<{ rows: M7IvBandSummaryRow[]; metric: string }> {
+  return jsonFetch(`${BASE}/iv_band_summary${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`, signal);
 }
 
 export function fetchM7BestCombo(opts: M7Filters & {
   metric?: string;
   top_n?: number;
-} = {}, exit_rule?: M7ExitRule): Promise<{ rows: M7BestComboRow[]; metric: string }> {
-  return jsonFetch(`${BASE}/best_combo${buildQuery(opts as Record<string, unknown>, exit_rule)}`);
+} = {}, exit_rule?: M7ExitRule, dataset?: M7Dataset): Promise<{ rows: M7BestComboRow[]; metric: string }> {
+  return jsonFetch(`${BASE}/best_combo${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`);
 }
 
-export function fetchM7CostBreakdown(trade_id: string): Promise<M7CostBreakdown> {
-  return jsonFetch<M7CostBreakdown>(`${BASE}/cost_breakdown?trade_id=${encodeURIComponent(trade_id)}`);
+export function fetchM7CostBreakdown(trade_id: string, dataset?: M7Dataset): Promise<M7CostBreakdown> {
+  const params = new URLSearchParams({ trade_id });
+  appendDatasetParam(params, dataset);
+  return jsonFetch<M7CostBreakdown>(`${BASE}/cost_breakdown?${params.toString()}`);
 }
 
-export function fetchM7Meta(): Promise<M7Meta> {
-  return jsonFetch<M7Meta>(`${BASE}/meta`);
+export function fetchM7Meta(dataset?: M7Dataset): Promise<M7Meta> {
+  const params = new URLSearchParams();
+  appendDatasetParam(params, dataset);
+  const qs = params.toString();
+  return jsonFetch<M7Meta>(`${BASE}/meta${qs ? `?${qs}` : ''}`);
 }
 
 export function fetchM7MissedFridays(opts: M7Filters & { metric?: string } = {},
                                       exit_rule?: M7ExitRule,
-                                      signal?: AbortSignal): Promise<M7MissedFridaysResponse> {
+                                      signal?: AbortSignal,
+                                      dataset?: M7Dataset): Promise<M7MissedFridaysResponse> {
   return jsonFetch<M7MissedFridaysResponse>(
-    `${BASE}/missed_fridays${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+    `${BASE}/missed_fridays${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`, signal);
 }
 
 export function fetchM7BestComboMarkers(
   opts: M7Filters & { metric?: string } = {},
   exit_rule?: M7ExitRule,
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7BestComboMarkersResponse> {
   return jsonFetch<M7BestComboMarkersResponse>(
-    `${BASE}/best_combo_markers${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+    `${BASE}/best_combo_markers${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`, signal);
 }
 
 // ── Chunk 1: Per-leg attribution endpoints ──────────────────────────────────
@@ -174,9 +198,10 @@ export function fetchM7LegAttribution(
   } = {},
   exit_rule?: M7ExitRule,
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7LegAttributionResponse> {
   return jsonFetch<M7LegAttributionResponse>(
-    `${BASE}/leg_attribution${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+    `${BASE}/leg_attribution${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`, signal);
 }
 
 export function fetchM7LegSkewHeatmap(
@@ -187,9 +212,10 @@ export function fetchM7LegSkewHeatmap(
   } = {},
   exit_rule?: M7ExitRule,
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7LegSkewHeatmapResponse> {
   return jsonFetch<M7LegSkewHeatmapResponse>(
-    `${BASE}/leg_skew_heatmap${buildQuery(opts as Record<string, unknown>, exit_rule)}`, signal);
+    `${BASE}/leg_skew_heatmap${buildQuery(opts as Record<string, unknown>, exit_rule, dataset)}`, signal);
 }
 
 // ── Best combo per IV band (max % credit / margin) ───────────────────────────
@@ -369,6 +395,7 @@ export function fetchM7IvBandBestCombo(
   endpointPrefix: string = '/iv_band_best_combo',
   bandMode?: 'A1' | 'B1' | 'D1',
   d1Tiebreakers?: string[],
+  dataset?: M7Dataset,
 ): Promise<M7IvBandBestComboResponse> {
   // Legacy: callers passing a bare 'credit' | 'margin' string still work.
   const opts: FetchBestComboArgs =
@@ -452,6 +479,7 @@ export function fetchM7IvBandBestCombo(
   if (opts.slope_bucket) {
     params.set('slope_bucket', opts.slope_bucket);
   }
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7IvBandBestComboResponse>(
     `${BASE}${endpointPrefix}?${params.toString()}`, signal);
 }
@@ -488,6 +516,7 @@ export interface M7BestComboCoverageResponse extends Omit<M7IvBandBestComboRespo
 export function fetchM7IvBandBestComboCoverage(
   args: FetchBestComboArgs & { coverage_mode?: M7CoverageMode } = {},
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7BestComboCoverageResponse> {
   const params = new URLSearchParams();
   params.set('ranking', args.ranking ?? 'avg_net_pnl');
@@ -522,6 +551,7 @@ export function fetchM7IvBandBestComboCoverage(
   if (args.delta_targets && args.delta_targets.length > 0) params.set('delta_targets', args.delta_targets.map(d => String(d)).join(','));
   if (args.entry_hours && args.entry_hours.length > 0) params.set('entry_hours', args.entry_hours.map(h => String(h)).join(','));
   params.set('coverage_mode', args.coverage_mode ?? 'force_fit');
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7BestComboCoverageResponse>(
     `${BASE}/iv_band_best_combo/coverage?${params.toString()}`,
     signal,
@@ -579,6 +609,7 @@ export function fetchM7RuleComparison(args: {
   endpointPrefix?: string;
   bandMode?: 'A1' | 'B1' | 'D1';
   d1Tiebreakers?: string[];
+  dataset?: M7Dataset;
 }, signal?: AbortSignal): Promise<M7RuleComparisonResponse> {
   const p = new URLSearchParams({
     band: args.band,
@@ -611,6 +642,7 @@ export function fetchM7RuleComparison(args: {
   if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
     p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
   }
+  appendDatasetParam(p, args.dataset);
   const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
   return jsonFetch<M7RuleComparisonResponse>(
     `${BASE}${prefix}/rule_comparison?${p}`, signal);
@@ -635,6 +667,7 @@ export function fetchM7CrossBandCheck(args: {
   endpointPrefix?: string;
   bandMode?: 'A1' | 'B1' | 'D1';
   d1Tiebreakers?: string[];
+  dataset?: M7Dataset;
 }, signal?: AbortSignal): Promise<M7CrossBandCheckResponse> {
   const p = new URLSearchParams({
     band: args.band,
@@ -647,6 +680,7 @@ export function fetchM7CrossBandCheck(args: {
   if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
     p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
   }
+  appendDatasetParam(p, args.dataset);
   const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
   return jsonFetch<M7CrossBandCheckResponse>(
     `${BASE}${prefix}/cross_band_check?${p}`, signal);
@@ -696,6 +730,7 @@ export function fetchM7SingleComboSimulation(args: {
   endpointPrefix?: string;
   bandMode?: 'A1' | 'B1' | 'D1';
   d1Tiebreakers?: string[];
+  dataset?: M7Dataset;
 }, signal?: AbortSignal): Promise<M7SingleComboSimulationResponse> {
   const p = new URLSearchParams({
     expiry_bucket: args.expiry_bucket,
@@ -713,9 +748,79 @@ export function fetchM7SingleComboSimulation(args: {
   if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
     p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
   }
+  appendDatasetParam(p, args.dataset);
   const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
   return jsonFetch<M7SingleComboSimulationResponse>(
     `${BASE}${prefix}/single_combo_simulation?${p}`, signal);
+}
+
+// Friday-level drilldown for one Best Combo cell — surfaces the Fridays
+// behind the cell's `Largest win`, `Min MTM (W)`, `W < avg min MTM` aggregates
+// + the list of all losing Fridays. Backed by /iv_band_best_combo/cell_friday_detail
+// (or /friday_band_best_combo/cell_friday_detail for the Friday-locked variant).
+
+export interface M7CellFridayDetailRow {
+  trade_id: string;
+  friday_date_ist: string;
+  net_pnl_estimate_usd: number | null;
+  min_mtm_usd: number | null;
+  max_mtm_usd: number | null;
+  exit_reason: string;
+}
+
+export interface M7CellFridayDetailCell {
+  band: string;
+  expiry_bucket: string;
+  delta_target: number;
+  entry_hour_ist: number;
+  rule_label: string;
+  n_trades?: number;
+  n_wins?: number;
+  n_losses: number;
+  n_winners_below_avg_min_mtm: number;
+  max_win_usd: number | null;
+  min_mtm_winners: number | null;
+  avg_min_mtm_winners: number | null;
+}
+
+export interface M7CellFridayDetailResponse {
+  status: 'ok' | 'unknown_rule' | 'no_trades' | 'not_built' | string;
+  message?: string;
+  cell: M7CellFridayDetailCell | null;
+  losers: M7CellFridayDetailRow[];
+  worst_winner: M7CellFridayDetailRow | null;
+  largest_win: M7CellFridayDetailRow | null;
+  winners_below_avg_min_mtm: M7CellFridayDetailRow[];
+  band_mode?: string;
+  d1_tiebreakers?: string[];
+}
+
+export function fetchM7CellFridayDetail(args: {
+  band: string;
+  expiry_bucket: string;
+  delta_target: number;
+  entry_hour_ist: number;
+  rule_label: string;
+  endpointPrefix?: string;
+  bandMode?: 'A1' | 'B1' | 'D1';
+  d1Tiebreakers?: string[];
+  dataset?: M7Dataset;
+}, signal?: AbortSignal): Promise<M7CellFridayDetailResponse> {
+  const p = new URLSearchParams({
+    band: args.band,
+    expiry_bucket: args.expiry_bucket,
+    delta_target: String(args.delta_target),
+    entry_hour_ist: String(args.entry_hour_ist),
+    rule_label: args.rule_label,
+  });
+  if (args.bandMode) p.set('band_mode', args.bandMode);
+  if (args.d1Tiebreakers && args.d1Tiebreakers.length > 0) {
+    p.set('d1_tiebreakers', args.d1Tiebreakers.join(','));
+  }
+  appendDatasetParam(p, args.dataset);
+  const prefix = args.endpointPrefix ?? '/iv_band_best_combo';
+  return jsonFetch<M7CellFridayDetailResponse>(
+    `${BASE}${prefix}/cell_friday_detail?${p}`, signal);
 }
 
 // Missed-Friday force-fit drilldown (Feature A)
@@ -766,9 +871,12 @@ export interface M7MissedFridaysForceFitResponse {
   picks?: M7MissedFridayPickInfo[];
 }
 
-export function fetchM7MissedFridaysForceFit(signal?: AbortSignal): Promise<M7MissedFridaysForceFitResponse> {
+export function fetchM7MissedFridaysForceFit(signal?: AbortSignal, dataset?: M7Dataset): Promise<M7MissedFridaysForceFitResponse> {
+  const params = new URLSearchParams();
+  appendDatasetParam(params, dataset);
+  const qs = params.toString();
   return jsonFetch<M7MissedFridaysForceFitResponse>(
-    `${BASE}/iv_band_best_combo/missed_fridays_force_fit`, signal);
+    `${BASE}/iv_band_best_combo/missed_fridays_force_fit${qs ? `?${qs}` : ''}`, signal);
 }
 
 // Best Combo picker's own missed-Fridays endpoint. Accepts ALL the same
@@ -778,6 +886,7 @@ export function fetchM7MissedFridaysForceFit(signal?: AbortSignal): Promise<M7Mi
 export function fetchM7BestComboMissedFridays(
   args: Partial<FetchBestComboArgs>,
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7MissedFridaysForceFitResponse> {
   const p = new URLSearchParams();
   p.set('ranking', args.ranking ?? 'avg_net_pnl');
@@ -812,6 +921,7 @@ export function fetchM7BestComboMissedFridays(
   if (args.entry_hours && args.entry_hours.length > 0) {
     p.set('entry_hours', args.entry_hours.map(h => String(h)).join(','));
   }
+  appendDatasetParam(p, dataset);
   return jsonFetch<M7MissedFridaysForceFitResponse>(
     `${BASE}/iv_band_best_combo/missed_fridays?${p.toString()}`, signal);
 }
@@ -853,6 +963,7 @@ export function fetchM7CellWinnersVsLosers(
   cell: M7Cell,
   opts?: { discriminate_sigma?: number; min_n_per_side?: number; exit_rule?: M7ExitRule },
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7CellWvlResponse> {
   const params = new URLSearchParams();
   params.append('cell', JSON.stringify(cell));
@@ -868,6 +979,7 @@ export function fetchM7CellWinnersVsLosers(
     if (Object.keys(cleaned).length > 0)
       params.append('exit_rule', JSON.stringify(cleaned));
   }
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7CellWvlResponse>(
     `${BASE}/cell_winners_vs_losers?${params.toString()}`, signal);
 }
@@ -912,6 +1024,7 @@ export function fetchM7CellWorstFridays(
   cell: M7Cell,
   opts?: { n?: number; n_special?: number; exit_rule?: M7ExitRule },
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7CellWorstFridaysResponse> {
   const params = new URLSearchParams();
   params.append('cell', JSON.stringify(cell));
@@ -925,6 +1038,7 @@ export function fetchM7CellWorstFridays(
     if (Object.keys(cleaned).length > 0)
       params.append('exit_rule', JSON.stringify(cleaned));
   }
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7CellWorstFridaysResponse>(
     `${BASE}/cell_worst_fridays?${params.toString()}`, signal);
 }
@@ -1028,6 +1142,10 @@ export interface M7LossesCell {
     fixed_exit_hour_ist?: number;
   };
   rule_label?: string;
+  // Per-band capital-sized lot count from the Best Combo table; used by
+  // downstream panels (e.g. pivot profile) to scale $ values away from the
+  // 100-lot backtester baseline.
+  lots?: number | null;
 }
 
 export function fetchM7LossesDistribution(
@@ -1045,6 +1163,7 @@ export function fetchM7LossesDistribution(
     cells?: M7LossesCell[];
   } = {},
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7LossesDistResponse> {
   const { dimensions, exit_rule, scope, ranking, metric,
           include_trades, trades_limit, trades_offset, trades_sort, only_sl_hits,
@@ -1074,6 +1193,7 @@ export function fetchM7LossesDistribution(
     if (Object.keys(cleaned).length > 0)
       params.append('exit_rule', JSON.stringify(cleaned));
   }
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7LossesDistResponse>(
     `${BASE}/losses_distribution?${params.toString()}`, signal);
 }
@@ -1339,6 +1459,7 @@ export function fetchM7FridayBandLossesDistribution(
   bandMode?: 'A1' | 'B1' | 'D1',
   d1Tiebreakers?: string[],
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7LossesDistResponse> {
   const { dimensions, exit_rule, scope, metric,
           include_trades, trades_limit, trades_offset, trades_sort, only_sl_hits,
@@ -1365,14 +1486,188 @@ export function fetchM7FridayBandLossesDistribution(
     if (Object.keys(cleaned).length > 0)
       params.append('exit_rule', JSON.stringify(cleaned));
   }
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7LossesDistResponse>(
     `${BASE}/friday_band_losses_distribution?${params.toString()}`, signal);
 }
+
+// ── M7 Joint Δ+Price Match stats endpoint ─────────────────────────────────
+
+export interface M7JointMatchOutcomes {
+  win_count: number;
+  loss_count: number;
+  win_rate: number | null;
+  avg_pnl_usd: number | null;
+  sl_count: number;
+  profit_count: number;
+  neutral_count: number;
+}
+
+export interface M7JointMatchPerDelta {
+  delta_target: number;
+  joint: number;
+  fallback: number;
+  joint_winrate: number | null;
+  fallback_winrate: number | null;
+  joint_avg_pnl: number | null;
+  fallback_avg_pnl: number | null;
+}
+
+export interface M7JointMatchPerBand {
+  iv_band: string;
+  joint: number;
+  fallback: number;
+  joint_winrate: number | null;
+  fallback_winrate: number | null;
+  joint_avg_pnl: number | null;
+  fallback_avg_pnl: number | null;
+}
+
+export interface M7JointMatchPerDeltaBand {
+  delta_target: number;
+  iv_band: string;
+  joint: number;
+  fallback: number;
+  joint_winrate: number | null;
+  fallback_winrate: number | null;
+  joint_avg_pnl: number | null;
+  fallback_avg_pnl: number | null;
+}
+
+export interface M7JointMatchStatsResponse {
+  status: 'ok' | 'no_data';
+  message?: string;
+  total_trades?: number;
+  joint_match_count?: number;
+  delta_fallback_count?: number;
+  joint_match_pct?: number;
+  fallback_pct?: number;
+  joint_outcomes?: M7JointMatchOutcomes;
+  fallback_outcomes?: M7JointMatchOutcomes;
+  per_delta_target?: M7JointMatchPerDelta[];
+  per_iv_band?: M7JointMatchPerBand[];
+  per_delta_x_band?: M7JointMatchPerDeltaBand[];
+  price_diff_distribution?: {
+    p25: number;
+    median: number;
+    p75: number;
+    p95: number;
+  };
+}
+
+export function fetchM7JointMatchStats(
+  dataset: M7Dataset = 'price_match',
+  signal?: AbortSignal,
+): Promise<M7JointMatchStatsResponse> {
+  const params = new URLSearchParams();
+  appendDatasetParam(params, dataset);
+  const qs = params.toString();
+  return jsonFetch<M7JointMatchStatsResponse>(
+    `${BASE}/joint_match_stats${qs ? `?${qs}` : ''}`, signal);
+}
+
+// ── M7 Pivot Profile (segment-based per-trade peak/trough/DD per IV band) ───
+
+export interface M7PivotProfileSegment {
+  n_trades: number;
+  n_trades_for_dd_pct: number;
+  avg_peak_ts_ist: string | null;
+  avg_peak_minute_offset: number | null;
+  avg_peak_mtm_usd: number | null;
+  median_peak_mtm_usd: number | null;
+  p25_peak_mtm_usd: number | null;
+  p75_peak_mtm_usd: number | null;
+  std_peak_mtm_usd: number | null;
+  n_within_1sd_peak: number;
+  n_above_avg_peak: number;
+  n_below_avg_peak: number;
+  avg_trough_ts_ist: string | null;
+  avg_trough_minute_offset: number | null;
+  avg_trough_mtm_usd: number | null;
+  median_trough_mtm_usd: number | null;
+  p25_trough_mtm_usd: number | null;
+  p75_trough_mtm_usd: number | null;
+  std_trough_mtm_usd: number | null;
+  n_within_1sd_trough: number;
+  n_above_avg_trough: number;
+  n_below_avg_trough: number;
+  avg_dd_usd: number | null;
+  median_dd_usd: number | null;
+  std_dd_usd: number | null;
+  n_within_1sd_dd: number;
+  n_above_avg_dd: number;
+  n_below_avg_dd: number;
+  avg_dd_pct_from_peak: number | null;
+  median_dd_pct_from_peak: number | null;
+}
+
+export type M7PivotByBand = Record<
+  string,
+  Record<'Seg1' | 'Seg2' | 'Seg3' | 'Seg4' | 'Seg5', M7PivotProfileSegment>
+>;
+
+export interface M7PivotProfileResult {
+  by_band: M7PivotByBand;
+  by_band_winners: M7PivotByBand | null;
+  by_band_losers: M7PivotByBand | null;
+  params: {
+    entry_hours: number[];
+    n_total_trades: number;
+    n_after_filter: number;
+    n_processed?: number;
+    n_winners?: number | null;
+    n_losers?: number | null;
+    min_trades_per_band_cell: number;
+  };
+}
+
+export interface M7PivotProfileResponse {
+  status: 'warming' | 'ready' | 'error';
+  progress: number;
+  result: M7PivotProfileResult | null;
+  error: string | null;
+  min_trades_per_band_cell: number;
+  params_echo: { dataset: string; entry_hours: number[] };
+}
+
+export function fetchM7PivotProfile(
+  entry_hours: string,
+  dataset?: M7Dataset,
+  signal?: AbortSignal,
+): Promise<M7PivotProfileResponse> {
+  const params = new URLSearchParams({ entry_hours });
+  appendDatasetParam(params, dataset);
+  return jsonFetch<M7PivotProfileResponse>(
+    `${BASE}/pivot_profile?${params.toString()}`, signal);
+}
+
+export interface M7PivotCell {
+  entry_atm_iv_band: string;
+  entry_hour_ist: number;
+  expiry_bucket: string;
+  delta_target: number;
+  rule?: Record<string, number>;
+  lots?: number | null;
+}
+
+export function fetchM7PivotProfileCells(
+  cells: M7PivotCell[],
+  dataset?: M7Dataset,
+  signal?: AbortSignal,
+): Promise<M7PivotProfileResponse> {
+  const params = new URLSearchParams();
+  params.set('cells', JSON.stringify(cells));
+  appendDatasetParam(params, dataset);
+  return jsonFetch<M7PivotProfileResponse>(
+    `${BASE}/pivot_profile?${params.toString()}`, signal);
+}
+
 
 export function fetchM7TradeDiagnostic(
   trade_id: string,
   exit_rule?: M7ExitRule,
   signal?: AbortSignal,
+  dataset?: M7Dataset,
 ): Promise<M7TradeDiagnosticResponse> {
   const params = new URLSearchParams({ trade_id });
   if (exit_rule && Object.keys(exit_rule).length > 0) {
@@ -1383,6 +1678,7 @@ export function fetchM7TradeDiagnostic(
     if (Object.keys(cleaned).length > 0)
       params.append('exit_rule', JSON.stringify(cleaned));
   }
+  appendDatasetParam(params, dataset);
   return jsonFetch<M7TradeDiagnosticResponse>(
     `${BASE}/trade_diagnostic?${params.toString()}`, signal);
 }
