@@ -119,9 +119,11 @@ DTE_SCALE_EXP         = 0.234           # decay exponent
 # Hard rule: model output must always be at-or-above Delta's actual ARM
 # (the "Order Margin" charge shown in UI). Slight over-estimation is fine,
 # under-estimation breaks orders at placement.
-# Verified against UI on 2026-04-30 (8-May expiry δ=0.10 strangle):
-# 20% covers all lot sizes within ±3% of Delta's UI charge.
-SAFETY_BUFFER_PCT     = 0.20
+# 2026-05-15: lowered from 0.20 → 0.10 after user observed ~32% over on a
+# 2-DTE strangle. Native engine residual is ±7% (per DTE-scale calibration),
+# so 10% keeps total bias safely on the over-charge side without bleeding
+# usable margin headroom.
+SAFETY_BUFFER_PCT     = 0.10
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
