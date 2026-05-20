@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PROJECT="/mnt/c/Users/Abhis/OneDrive/Desktop/Trading/Trading platform/btc_options_fullstack/btc-options"
+PROJECT="/mnt/c/dev/trading_platform/btc_options_fullstack/btc-options"
 LOGFILE="/tmp/calib_loop.log"
 END_TS=$(($(date +%s) + 24*3600))
 

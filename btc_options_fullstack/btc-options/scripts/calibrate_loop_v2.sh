@@ -5,7 +5,7 @@
 
 set -uo pipefail
 
-PROJECT="/mnt/c/Users/Abhis/OneDrive/Desktop/Trading/Trading platform/btc_options_fullstack/btc-options"
+PROJECT="/mnt/c/dev/trading_platform/btc_options_fullstack/btc-options"
 LOGFILE="/tmp/calib_v2_loop.log"
 INTERVAL=900           # 15 minutes
 DURATION=$((24*3600))  # 24 hours

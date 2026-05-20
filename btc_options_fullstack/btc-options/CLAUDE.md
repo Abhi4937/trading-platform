@@ -231,8 +231,7 @@ if something there changed. Don't churn the files.
 ## Shell Environment
 
 Claude Code runs in **Git Bash on Windows** (not WSL, not PowerShell).
-Project root: `C:/Users/Abhis/OneDrive/Desktop/Trading/Trading platform/btc_options_fullstack/btc-options`
-(contains a space — always quote paths with double-quotes in shell commands).
+Project root: `C:/dev/trading_platform/btc_options_fullstack/btc-options`
 
 ### Available tools
 `cat` `head` `tail` `grep` `rg` `jq` `awk` `sed` `find` `ls` `wc` `diff`
