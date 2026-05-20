@@ -421,3 +421,56 @@ to `height: calc(100vh - 120px); flexShrink: 0` so chain+chart panel
 keep their viewport sizing while the spot chart pushes the page below
 into a scrollable region. A floating "↓ Spot Chart" button (bottom-right,
 fixed) smooth-scrolls to the spot chart section.
+
+## RULE #6 — Per-session backend isolation (added 2026-05-20)
+
+When two Claude sessions are doing active backend development in parallel,
+each session should run its own isolated backend container so a rebuild in
+one session never clobbers the other's in-memory state (backtest jobs,
+caches, ticker stream).
+
+### Session A (primary — unchanged)
+Session A uses the canonical `docker-backend-1` on port **8000** and the
+frontend on port **3000**, exactly as always.
+
+### Session B (secondary — isolated)
+Session B runs its own container (`docker-backend-session-b-1`) on port
+**8001** using `docker/docker-compose.session-b.yml`.
+
+**Start Session B backend** (from the `docker/` directory):
+```bash
+docker compose -f docker-compose.yml -f docker-compose.session-b.yml up --build -d backend_session_b
+```
+
+**Start Session B frontend** (PowerShell, from repo root):
+```powershell
+$env:VITE_API_URL="http://localhost:8001/api/v1"
+$env:VITE_API_BASE="http://localhost:8001"
+$env:VITE_WS_HOST="localhost:8001"
+cd frontend; npm run dev -- --port 3001
+```
+
+**Stop Session B backend**:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.session-b.yml stop backend_session_b
+```
+
+**Stop Session B frontend**: `fuser -k 3001/tcp`
+
+### Key properties
+- **Redis DB `/1`**: Session B uses Redis DB 1 instead of DB 0 — no key collisions.
+- **Live ticker disabled**: `DISABLE_LIVE_TICKER=1` skips the Delta WS subscription and live
+  recorder in Session B. Do NOT use Session B for live-ticker feature development; use Session A.
+- **Shared disk caches**: bind-mounts at `~/btc-data/derived/...` are shared — both sessions
+  read the same parquet caches. If B writes a new derived parquet, A can see it immediately.
+- **Merge-time**: once Session B's code is committed and merged, rebuild `docker-backend-1`
+  normally. The canonical `:3000` frontend picks up all changes automatically — no extra wiring.
+
+### Verify isolation
+```bash
+# Both containers should show different IDs:
+docker ps | grep backend
+# Different session UUIDs = independent processes:
+curl http://localhost:8000/api/v1/session-id
+curl http://localhost:8001/api/v1/session-id
+```

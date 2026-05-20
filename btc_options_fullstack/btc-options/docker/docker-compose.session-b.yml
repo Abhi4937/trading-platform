@@ -1,0 +1,34 @@
+# Session-B isolation overlay — per-session backend on port 8001.
+# Keeps docker-backend-1 (:8000) untouched so the two sessions never clobber each other.
+#
+# Launch (from repo root):
+#   cd docker && docker compose -f docker-compose.yml -f docker-compose.session-b.yml up --build -d backend_session_b
+#
+# Stop:
+#   cd docker && docker compose -f docker-compose.yml -f docker-compose.session-b.yml stop backend_session_b
+#
+# Logs:
+#   docker logs -f docker-backend-session-b-1
+services:
+  backend_session_b:
+    build:
+      context: ../backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: docker-backend-session-b-1
+    ports:
+      - "8001:8000"
+    env_file:
+      - ../backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/1
+      - DISABLE_LIVE_TICKER=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - C:/Users/Abhis/btc-data/data:/home/abhis/btc-data/data
+      - C:/Users/Abhis/btc-data/data_live:/home/abhis/btc-data/data_live
+      - C:/Users/Abhis/btc-data/derived:/home/abhis/btc-data/derived
+      - C:/Users/Abhis/btc-data/logs:/home/abhis/btc-data/logs
+      - ../backend/tests:/app/tests:ro
+      - ../backend/app:/app/app:ro

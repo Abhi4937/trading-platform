@@ -59,11 +59,16 @@ async def lifespan(app: FastAPI):
     await init_cache()
     await asyncio.get_event_loop().run_in_executor(None, _build_strike_index)
     logger.info("Startup — Strike index built")
-    ws_task = asyncio.create_task(run_delta_ws())
-    logger.info("Startup — Delta WebSocket client started")
-    await start_recorder()
-    merge_task = asyncio.create_task(merge_schedule_loop())
-    logger.info("Startup — live recorder + merge scheduler started")
+    ws_task = None
+    merge_task = None
+    if not os.environ.get("DISABLE_LIVE_TICKER"):
+        ws_task = asyncio.create_task(run_delta_ws())
+        logger.info("Startup — Delta WebSocket client started")
+        await start_recorder()
+        merge_task = asyncio.create_task(merge_schedule_loop())
+        logger.info("Startup — live recorder + merge scheduler started")
+    else:
+        logger.info("Startup — live ticker DISABLED (DISABLE_LIVE_TICKER is set)")
     # M7 best-combo grid: load from disk if present (instant), otherwise leave
     # status='pending'. NEVER auto-spawn a warmup thread inside the backend
     # process — the heavy DuckDB scans hold the GIL and starve request handlers
@@ -107,19 +112,21 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Startup — M7 Friday-band grid NOT cached")
     yield
-    logger.info("Shutdown — stopping live recorder + merge scheduler...")
-    await stop_recorder()
-    merge_task.cancel()
-    try:
-        await merge_task
-    except asyncio.CancelledError:
-        pass
-    logger.info("Shutdown — stopping Delta WebSocket...")
-    ws_task.cancel()
-    try:
-        await ws_task
-    except asyncio.CancelledError:
-        pass
+    if merge_task is not None:
+        logger.info("Shutdown — stopping live recorder + merge scheduler...")
+        await stop_recorder()
+        merge_task.cancel()
+        try:
+            await merge_task
+        except asyncio.CancelledError:
+            pass
+    if ws_task is not None:
+        logger.info("Shutdown — stopping Delta WebSocket...")
+        ws_task.cancel()
+        try:
+            await ws_task
+        except asyncio.CancelledError:
+            pass
     logger.info("Shutdown — closing cache...")
     await close_cache()
 
