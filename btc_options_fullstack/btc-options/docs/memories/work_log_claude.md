@@ -2174,3 +2174,20 @@ this as acceptable.
 - **Files Touched:** `backend/app/api/m7_ranking_config.py` (new), `backend/app/api/m7_best_combo.py` (M), `backend/app/api/m7_results.py` (M), `backend/app/scripts/enrich_m7_trades_with_iv_slopes.py` (new), `backend/app/scripts/calibrate_m7_slope_cutoffs.py` (new), `backend/app/scripts/m7_composite_score_calibration.py` (new), `frontend/src/services/m7_api.ts` (M), `frontend/src/components/m7/M7IvBandBestComboTable.tsx` (M), `HANDOFF.md` (M).
 - **Pending after session end**: First `band_ivrv` build to complete (~30 min cold cache). Then trigger 4 other bucketed grids (~5 min each on warm cache). Then run audit XLSX. Empirical "best slope" finding is the deliverable.
 - **Restart:** Backend rebuilt 3x (composite v2 + helpers + multi-grid manager). Frontend restarted to pick up tab-strip JSX (WSL inotify miss).
+
+## Session 33 (2026-05-21) — M7 Sweep 193-rule expansion + Part H/E/F
+- **Status:** Code complete, Part G backfill running, Part I/F pending.
+- **Plan:** `C:\Users\Abhis\.claude\plans\can-u-check-list-twinkly-token.md`
+- **Commits:**
+  - `4223b51` — Parts D, G, A, B, C (193 rules, expiry/delta filters, disk caches, remove v7 zigzag)
+  - `7b12bfb` — Parts H, E, F (deadline-fallback, index file, prewarm script)
+- **Part D:** `_PREMIUM_SL_PCTS` [50,75,100] → [50,75,100,150,200]; cap_sl unlocked for delta_match → 193 total rules (vs 105 before)
+- **Part G:** `_KEPT_EXPIRY_BUCKETS` + `_KEPT_DELTAS` in `m7_results._load_trades()` + `_load_exit_cache_disk()`. Trade pool: 34,166 → 13,276 rows after both filters. Backtester restricted to 4 deltas + 10-day expiry window.
+- **Part A/B:** Coverage + pivot disk caches (sha1-keyed JSON, atomic write, ds_mtime stale-guard)
+- **Part C:** Deleted ~230 lines `_attach_zigzag_v7_to_picks` + `_ZIGZAG_V7_CACHE` + 6 frontend columns. Kills 600s+ cold-start bottleneck.
+- **Part H:** `_resolve_deadline_fallback_trades()` + `_build_fallback_row_for_friday()` in `m7_results.py`. Fires for fridays with zero strict coverage (safety net; currently n_fallback=0 with complete dataset). All strict rows tagged `is_fallback=False`. Back-compat in `_load_exit_cache_disk`.
+- **Part E:** `_emit_index()` writes `exit_cache/delta_match/_INDEX.json` with rule_label→sha1 mapping
+- **Part F:** `backend/app/scripts/prewarm_m7_sweep.py` — checkpoint-safe prewarm (skip-if-exists per rule)
+- **Part G backfill RUNNING:** `docker logs -f backfill_may_1779305520` — 4 fridays (2026-04-24 → 2026-05-15)
+- **Pending:** Part I grid rebuild → Part F prewarm (see HANDOFF.md for exact commands)
+- **Files Touched:** `backend/app/api/m7_results.py` (M), `backend/app/api/m7_best_combo.py` (M), `backend/app/api/m7_pivot_profile.py` (M), `backend/app/analytics/m7_batch_backtester.py` (M), `backend/app/scripts/prewarm_m7_sweep.py` (new), `frontend/src/services/m7_api.ts` (M), `frontend/src/components/m7/M7IvBandBestComboTable.tsx` (M), `HANDOFF.md` (M)

@@ -1,9 +1,74 @@
 # Handoff Log
 
 ## Last Session
-**Who:** Claude (Opus 4.7)
-**Date:** 2026-05-18 (Session 32 — 243-rule hybrid scaffolding committed; plans rewritten for strict separation)
+**Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-21 (Session 33 — M7 Sweep 193-rule expansion Parts H/E/F complete; Part G backfill running)
 **Branch:** `mainbranch-gemini_claude`
+
+### Session 33 — Shipped (committed)
+
+**Commit `4223b51`** — `feat(m7): 193-rule grid + expiry/delta filters + disk caches + remove v7 zigzag`
+- Parts D, G, A, B, C of M7 Sweep expansion plan (see plan file for details)
+
+**Commit `7b12bfb`** — `feat(m7): Part H deadline-fallback augmentation + Part E/F index + prewarm`
+- Part H: `_resolve_deadline_fallback_trades()` + `_build_fallback_row_for_friday()` added to `m7_results.py`. Tags all strict rows `is_fallback=False`. Synthesizes fallback trades at Sat 12:00 IST for completely dark fridays (rare; fast-paths when all covered). Back-compat: `_load_exit_cache_disk` adds `is_fallback=False` for old parquets.
+- Part E: `_emit_index()` in prewarm script writes `exit_cache/<dataset>/_INDEX.json`
+- Part F: `backend/app/scripts/prewarm_m7_sweep.py` — checkpoint-safe prewarm for 193 delta_match rules with skip-if-exists
+
+**Part G backfill RUNNING** (container `backfill_may_1779305520`):
+- `python -m app.analytics.m7_batch_backtester --since 2026-04-24 --append`
+- 4 new fridays: 2026-04-24 through 2026-05-15
+- Uses restricted TARGET_DELTAS (0.25, 0.30, 0.40, 0.50) + MAX_EXPIRY_DTE_DAYS=10
+- Monitor: `docker logs -f backfill_may_1779305520`
+- ETA: ~20-30 min
+
+### NEXT STEPS (in order — do NOT start Part I or F until backfill completes)
+
+1. **Wait for backfill**: `docker logs -f backfill_may_1779305520` until it exits
+2. **Verify backfill**: `docker exec docker-backend-1 python -c "from app.api.m7_results import _load_trades; df=_load_trades('delta_match'); print(len(df), df['friday_date_ist'].nunique())"`
+   Expected: ~16,576 rows (4 new fridays × ~1,120 cells), 125 fridays, latest=2026-05-15
+3. **Launch Part I grid rebuild** (~4-5h unattended):
+   ```bash
+   docker compose run -d --rm --name grid_rebuild_$(date +%s) backend python -m app.scripts.build_m7_best_combo_grid
+   ```
+4. **After grid rebuild finishes**, launch Part F prewarm (~3-4h unattended):
+   ```bash
+   docker compose run -d --rm --name prewarm_$(date +%s) backend python -m app.scripts.prewarm_m7_sweep
+   ```
+5. **Verify** (after prewarm):
+   - 193 exit_caches: `docker exec docker-backend-1 ls /home/abhis/btc-data/derived/m7/exit_cache/delta_match/*.parquet | wc -l`
+   - Grid freshness: grid mtime > trades mtime
+   - Cold-start < 500ms for iv_band_best_combo
+
+### Verification commands
+```bash
+# Rule count
+docker exec docker-backend-1 python -c "from app.api.m7_best_combo import _rule_variants; print(len(_rule_variants('delta_match')))"
+# Expected: 193
+
+# Trade count after backfill
+docker exec docker-backend-1 python -c "
+from app.api.m7_results import _load_trades
+df = _load_trades('delta_match')
+print('rows:', len(df), 'fridays:', df['friday_date_ist'].nunique())
+print('latest:', df['friday_date_ist'].max())
+"
+# Expected: ~16576 rows, 125 fridays, latest=2026-05-15
+
+# is_fallback column present
+docker exec docker-backend-1 python -c "
+from app.api.m7_results import _derive_exits
+from app.api.m7_best_combo import _rule_variants
+_, rule = _rule_variants('delta_match')[0]
+df = _derive_exits({}, rule)
+print('is_fallback present:', 'is_fallback' in df.columns)
+print('n_fallback:', df['is_fallback'].sum())
+"
+```
+
+---
+
+## Previous Session (Session 32)
 
 ### Session 32 — Shipped (committed)
 
