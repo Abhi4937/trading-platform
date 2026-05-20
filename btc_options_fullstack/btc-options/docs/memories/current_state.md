@@ -614,7 +614,7 @@
 [Delta WS candlestick_1m]                  [btc-collector REST]
      │                                          │
      ▼                                          ▼
-backend live_recorder         /mnt/c/Users/Abhis/btc-collector/
+backend live_recorder         C:/Users/Abhis/btc-collector/
      │                                          │
      ▼                                          ▼
 data_live/{spot,options}/        ~/btc-data/data/{spot,options}/
