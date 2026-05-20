@@ -592,11 +592,20 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
   // Notify the parent whenever the per-band rows change. Keyed on the rows'
   // (iv_band, expiry, delta, rule_label) signature so we don't churn the
   // callback on every re-render — only when the selection actually moves.
-  const rowsSignature = useMemo(() => rows.map(r =>
-    `${r.iv_band}|${r.entry_hour_ist}|${r.expiry_bucket}|${r.delta_target}|${r.rule_label}`
-  ).join('||'), [rows]);
+  // Rows with the effective per-band lot count baked in. In 'lots' sizing mode
+  // the backend returns the 100-lot baseline; the displayed lots come from
+  // `fixedLots` (see render below). Downstream consumers (M7LossesExplorer,
+  // M7PivotProfilePanel) scope by `lots` so we must hand them the same
+  // effective value the table is showing, not the raw backend `lots`.
+  const rowsWithEffectiveLots = useMemo(() => rows.map(r => ({
+    ...r,
+    lots: sizingMode === 'lots' ? fixedLots : (r.lots ?? 100),
+  })), [rows, sizingMode, fixedLots]);
+  const rowsSignature = useMemo(() => rowsWithEffectiveLots.map(r =>
+    `${r.iv_band}|${r.entry_hour_ist}|${r.expiry_bucket}|${r.delta_target}|${r.rule_label}|${r.lots}`
+  ).join('||'), [rowsWithEffectiveLots]);
   useEffect(() => {
-    if (onSelectionsChange) onSelectionsChange(rows);
+    if (onSelectionsChange) onSelectionsChange(rowsWithEffectiveLots);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowsSignature, onSelectionsChange]);
   const primaryDef = ALL_METRICS[primary] ?? PRIMARY_GROUPS[0].metrics[0];
