@@ -46,9 +46,8 @@ log = logging.getLogger(__name__)
 # v6 adds path peak-trough-peak fields, risk-adjusted metrics, tail risk
 # (VaR/CVaR), drawdown sequence, edge stability — and bakes in the Phase 0A
 # NaN-gross drop so cells reflect only valid strangle trades.
-# v7 (5-landmark zigzag P2_mid/T2_mid) is computed lazily per-cell at
-# request time in `_attach_zigzag_v7_to_picks` rather than baked into the
-# grid — the per-rule SQL cost was prohibitive (~5 min/rule × 96 rules).
+# v7 zigzag columns (P2_mid/T2_mid) removed — logic was suspect and the lazy
+# DuckDB scan caused 600 s+ cold-start timeouts.
 GRID_PARQUET_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v6.parquet")
 # v4 fallback — load v4 while v6 is still rebuilding so the UI keeps
 # working; new v6 columns will simply be None for those cells.
@@ -85,10 +84,10 @@ def _price_match_no_data_payload(extra: Optional[dict] = None) -> dict:
 
 # ── Sweep dimensions ──────────────────────────────────────────────────────────
 
-# Three premium SL levels × four take-profit families per SL:
+# Five premium SL levels × four take-profit families per SL:
 #   1 baseline (SL only) + 10 max_profit + 10 margin_target + 14 fixed-hour
-#   = 35 variants per SL × 3 SLs = 105 total rule variants.
-_PREMIUM_SL_PCTS = [50, 75, 100]
+#   = 35 variants per SL × 5 SLs = 175 total premium-SL rule variants.
+_PREMIUM_SL_PCTS = [50, 75, 100, 150, 200]
 _PCT_GRID = [10, 15, 20, 25, 30, 40, 50, 60, 75, 100]
 # Hourly Saturday exits 5 AM..5 PM IST + 5:29 PM (just before settlement).
 # 17.4833 = 17h + 29m / 60 — the engine accepts decimal hours.
@@ -115,19 +114,27 @@ def _hour_label(h: float) -> str:
 def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
     """Rule label → rule_dict tuples for the grid sweep.
 
-    delta_match (default, backwards-compatible): 105 variants
-      = 3 premium_sl × (1 baseline + 10 max_profit + 10 margin_target + 14 fixed_hour)
-    price_match: 243 variants (hybrid sweep)
-      = 105 existing
-      + 3   standalone cap_sl baselines              (capital_sl_pct ∈ {10,15,20})
-      + 9   2-way hybrids                            (cap_sl × premium_sl)
-      + 126 3-way hybrids                            (cap_sl × premium_sl × exit_hr)
+    delta_match: 193 variants
+      = 175 premium_sl rules (5 SL × 35 exit variants)
+      + 3   standalone cap_sl baselines   (capital_sl_pct ∈ {10,15,20})
+      + 15  2-way hybrids                 (cap_sl × premium_sl, 3 × 5)
+      = 193 total.
+
+    price_match: 243 variants
+      = 105 premium_sl rules (3 SL × 35 exit variants — kept for backwards compat)
+      + 3   standalone cap_sl baselines
+      + 9   2-way hybrids                 (cap_sl × premium_sl, 3 × 3)
+      + 126 3-way hybrids                 (cap_sl × premium_sl × exit_hr, 3 × 3 × 14)
       = 243 total.
+
     Hybrid combos EXCLUDE max_profit and margin_target per locked-in
     user decision — adding those would blow up the search space.
     """
     out: list[tuple[str, dict]] = []
-    for sl in _PREMIUM_SL_PCTS:
+    # Price-match keeps the original 3-SL grid for backwards compat;
+    # delta_match uses the expanded 5-SL grid.
+    sl_grid = _PREMIUM_SL_PCTS if dataset == "delta_match" else [50, 75, 100]
+    for sl in sl_grid:
         out.append((f"sl{sl}_baseline", {"premium_sl_pct": sl}))
         for p in _PCT_GRID:
             out.append((f"sl{sl}_max_profit_{p}",
@@ -138,20 +145,20 @@ def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
         for h in _FIXED_HOURS:
             out.append((f"sl{sl}_exit_hr_{_hour_label(h)}",
                         {"premium_sl_pct": sl, "fixed_exit_hour_ist": h}))
+    # Standalone cap_sl baselines — both datasets.
+    for csl in _CAPITAL_SL_PCTS:
+        out.append((f"cap{csl}_baseline", {"capital_sl_pct": csl}))
+    # 2-way hybrid: cap_sl × premium_sl — both datasets.
+    for csl in _CAPITAL_SL_PCTS:
+        for sl in sl_grid:
+            out.append((
+                f"sl{sl}_cap{csl}",
+                {"premium_sl_pct": sl, "capital_sl_pct": csl},
+            ))
     if dataset == "price_match":
-        # Standalone cap_sl: 3 baselines
+        # 3-way hybrid: cap_sl × premium_sl × exit_hr (3 × 3 × 14 = 126).
         for csl in _CAPITAL_SL_PCTS:
-            out.append((f"cap{csl}_baseline", {"capital_sl_pct": csl}))
-        # 2-way hybrid: cap_sl × premium_sl (3 × 3 = 9)
-        for csl in _CAPITAL_SL_PCTS:
-            for sl in _PREMIUM_SL_PCTS:
-                out.append((
-                    f"sl{sl}_cap{csl}",
-                    {"premium_sl_pct": sl, "capital_sl_pct": csl},
-                ))
-        # 3-way hybrid: cap_sl × premium_sl × exit_hr (3 × 3 × 14 = 126)
-        for csl in _CAPITAL_SL_PCTS:
-            for sl in _PREMIUM_SL_PCTS:
+            for sl in sl_grid:
                 for h in _FIXED_HOURS:
                     out.append((
                         f"sl{sl}_cap{csl}_exit_hr_{_hour_label(h)}",
@@ -1635,248 +1642,7 @@ def _pick_best_per_band(
     return best
 
 
-# ── v7 lazy zigzag (P2_mid / T2_mid) ─────────────────────────────────────────
-#
-# v7 introduces 4 cell-level metrics that describe the "middle" of the trade
-# path: P2_mid (intermediate post-trough peak) and T2_mid (the local trough
-# between P2_mid and P3_exit). Computing these for the entire 132K-cell grid
-# at build time was prohibitively slow (~5 min/rule × 96 rules ≈ 8 h). Since
-# the user only ever views ~10 picked cells per request, we compute them
-# lazily here, after the picker has chosen its cells.
-#
-# Per-request cost: one filtered DuckDB scan (trade_id IN ~500 list) → seconds.
-# Cache below memoises results across requests for identical (rule_label,
-# cell-key) tuples so re-querying with different sizing/filters is free.
 
-_ZIGZAG_V7_CACHE: dict[tuple, dict] = {}
-# Key: (rule_label, iv_band, expiry_bucket, delta_target, entry_hour_ist)
-# Value: {"avg_peak_2_mid": float, "avg_trough_2_mid": float,
-#         "avg_rel_time_peak_2_mid": float, "avg_rel_time_trough_2_mid": float,
-#         "n_used": int}
-
-
-def _attach_zigzag_v7_to_picks(picks: pd.DataFrame) -> pd.DataFrame:
-    """For each picked cell, compute & attach 4 v7 zigzag fields (mean across
-    the cell's trades). Returns the same picks frame with new columns:
-    avg_peak_2_mid, avg_trough_2_mid, avg_rel_time_peak_2_mid,
-    avg_rel_time_trough_2_mid. Failures are silent (cells get None values).
-
-    Non-blocking by design: if any picked rule isn't already in the per-trade
-    `_EXIT_CACHE`, we kick off a background warmup thread for those rules and
-    return picks immediately with v7=None. By the time the user's NEXT
-    request lands (filter change, refresh, etc.) the cache is warm and the
-    helper computes synchronously in seconds. This avoids the cold-cache
-    100s+ blocking call that was timing out the frontend.
-    """
-    if picks is None or picks.empty:
-        return picks
-
-    # ── 0) Detect cold-cache rules. Warm them SYNCHRONOUSLY with a hard
-    #     time budget — slower first response but every cell that fits in
-    #     the budget gets a real value. After the budget expires, remaining
-    #     cells render as None (frontend "—") and the warmup keeps running
-    #     in background so the next request finds them cached.
-    cold_rule_dicts: list[dict] = []
-    warm_rule_keys: set[tuple] = set()
-    seen_rule_keys: set[tuple] = set()
-    for _, p in picks.iterrows():
-        rd = p.get("rule") if "rule" in p.index else None
-        if not isinstance(rd, dict):
-            continue
-        rk = (json.dumps(rd, sort_keys=True), m7r._TRADES_MTIME)
-        if rk in seen_rule_keys:
-            continue
-        seen_rule_keys.add(rk)
-        if rk in m7r._EXIT_CACHE:
-            warm_rule_keys.add(rk)
-        else:
-            cold_rule_dicts.append(rd)
-
-    if cold_rule_dicts:
-        # 30s budget — most rules take ~10s of which the parquet scan dominates.
-        # Allows 2-3 cold rules to warm within the budget on a typical request.
-        budget_deadline = time.time() + 30.0
-        log.info("v7 zigzag: %d rules cold; warming synchronously (budget=30s); %d already warm",
-                 len(cold_rule_dicts), len(warm_rule_keys))
-        for rd in cold_rule_dicts:
-            if time.time() >= budget_deadline:
-                # Out of time — drop into background warmup for the rest so
-                # the next request finds them cached.
-                remaining = cold_rule_dicts[cold_rule_dicts.index(rd):]
-                def _bg_warmup(rules: list[dict]) -> None:
-                    for r in rules:
-                        try:
-                            m7r._derive_exits({}, r)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("v7 zigzag bg warmup failed: %s", exc)
-                threading.Thread(target=_bg_warmup, args=(remaining,),
-                                  name="v7-zigzag-bg-warmup", daemon=True).start()
-                log.info("v7 zigzag: budget exceeded; %d rules deferred to background",
-                         len(remaining))
-                break
-            try:
-                m7r._derive_exits({}, rd)
-                rk = (json.dumps(rd, sort_keys=True), m7r._TRADES_MTIME)
-                warm_rule_keys.add(rk)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("v7 zigzag inline warmup failed for rule=%s: %s",
-                            json.dumps(rd, sort_keys=True)[:80], exc)
-
-    if not warm_rule_keys:
-        out = picks.copy()
-        for col in ("avg_peak_2_mid", "avg_trough_2_mid",
-                    "avg_rel_time_peak_2_mid", "avg_rel_time_trough_2_mid"):
-            out[col] = None
-        return out
-
-    # ── 1) For each pick, gather its trades (using the existing _EXIT_CACHE
-    #     populated by _derive_exits during picker / grid build).
-    #     Skip picks whose rule is still cold — they get None values; warm
-    #     ones get computed inline.
-    pick_trade_lists: dict[int, pd.DataFrame] = {}  # row_idx → trade subset
-    cell_keys: dict[int, tuple] = {}                 # row_idx → cache key
-    work_trades: list[pd.DataFrame] = []             # to dedupe & query in bulk
-    for idx, p in picks.iterrows():
-        rule_dict = p.get("rule") if "rule" in p.index else None
-        rule_label = p.get("rule_label")
-        if not isinstance(rule_dict, dict) or rule_label is None:
-            continue
-        rk = (json.dumps(rule_dict, sort_keys=True), m7r._TRADES_MTIME)
-        if rk not in warm_rule_keys:
-            continue  # rule still being warmed in background — skip this row
-        ck = (str(rule_label), str(p.get("iv_band")),
-              str(p.get("expiry_bucket")),
-              float(p.get("delta_target")) if p.get("delta_target") is not None else None,
-              int(p.get("entry_hour_ist")) if p.get("entry_hour_ist") is not None else None)
-        cell_keys[idx] = ck
-        if ck in _ZIGZAG_V7_CACHE:
-            continue  # cache hit — no need to fetch
-        try:
-            derived = m7r._derive_exits({}, rule_dict)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("v7 zigzag: derive_exits failed for %s: %s", rule_label, exc)
-            continue
-        if derived is None or derived.empty:
-            continue
-        sub = derived[
-            (derived["entry_atm_iv_band"] == p["iv_band"])
-            & (derived["entry_hour_ist"] == p["entry_hour_ist"])
-            & (derived["expiry_bucket"] == p["expiry_bucket"])
-            & (np.isclose(derived["delta_target"].astype(float),
-                          float(p["delta_target"]), atol=0.001))
-        ]
-        if sub.empty or "ts_at_min_mtm" not in sub.columns or "ts_peak_after" not in sub.columns:
-            continue
-        # Need: trade_id, ts_at_min_mtm (= ts_trough), ts_peak_after,
-        # entry_ts_utc, exit_ts (the latter two for rel_time normalisation).
-        keep_cols = ["trade_id", "ts_at_min_mtm", "ts_peak_after",
-                     "entry_ts_utc", "exit_ts"]
-        keep_cols = [c for c in keep_cols if c in sub.columns]
-        td = sub[keep_cols].copy()
-        td = td.dropna(subset=["ts_at_min_mtm", "ts_peak_after",
-                               "entry_ts_utc", "exit_ts"])
-        if td.empty:
-            continue
-        td["_cell_key"] = [ck] * len(td)
-        pick_trade_lists[idx] = td
-        work_trades.append(td)
-
-    if not work_trades:
-        # Nothing to compute — still attach the columns as None for downstream
-        # consistency.
-        for col in ("avg_peak_2_mid", "avg_trough_2_mid",
-                    "avg_rel_time_peak_2_mid", "avg_rel_time_trough_2_mid"):
-            if col not in picks.columns:
-                picks[col] = None
-        return picks
-
-    # ── 2) Single SQL: for all trades across all uncached cells, find ts of
-    #     the intermediate peak (P2_mid) in the (ts_trough, ts_peak_after)
-    #     open window, then the intermediate trough (T2_mid) between P2_mid
-    #     and ts_peak_after. Queries the parquet ONCE filtered by trade_id —
-    #     the JOIN with our small `_zigzag_pick_trades` table prunes the scan.
-    all_trades = pd.concat(work_trades, ignore_index=True).drop_duplicates("trade_id")
-    # Cast for DuckDB compatibility — these are timestamps stored as int64 ns
-    # in the parquet (or as datetime; DuckDB handles both transparently).
-    conn = m7r._duckdb_conn()
-    conn.register("_zigzag_pick_trades",
-                  all_trades[["trade_id", "ts_at_min_mtm", "ts_peak_after"]]
-                  .rename(columns={"ts_at_min_mtm": "_ts_trough",
-                                   "ts_peak_after": "_ts_peak_after"}))
-    zig_sql = f"""
-    WITH peak_2_mids AS (
-        SELECT p.trade_id,
-               arg_max(p.ts,
-                       CASE WHEN p.ts > zt._ts_trough AND p.ts < zt._ts_peak_after
-                            THEN p.gross_pnl_usd END) AS ts_peak_2_mid,
-               MAX(CASE WHEN p.ts > zt._ts_trough AND p.ts < zt._ts_peak_after
-                        THEN p.gross_pnl_usd END) AS peak_2_mid_gross
-        FROM read_parquet('{m7r.PATHS_GLOB}', hive_partitioning=true) p
-        JOIN _zigzag_pick_trades zt ON p.trade_id = zt.trade_id
-        WHERE p.ts <= zt._ts_peak_after
-        GROUP BY p.trade_id
-    )
-    SELECT pm.trade_id, pm.ts_peak_2_mid, pm.peak_2_mid_gross,
-           MIN(CASE WHEN p.ts > pm.ts_peak_2_mid AND p.ts < zt._ts_peak_after
-                    THEN p.gross_pnl_usd END) AS trough_2_mid_gross,
-           arg_min(p.ts, CASE WHEN p.ts > pm.ts_peak_2_mid AND p.ts < zt._ts_peak_after
-                              THEN p.gross_pnl_usd END) AS ts_trough_2_mid
-    FROM read_parquet('{m7r.PATHS_GLOB}', hive_partitioning=true) p
-    JOIN _zigzag_pick_trades zt ON p.trade_id = zt.trade_id
-    JOIN peak_2_mids pm ON p.trade_id = pm.trade_id
-    WHERE p.ts <= zt._ts_peak_after
-    GROUP BY pm.trade_id, pm.ts_peak_2_mid, pm.peak_2_mid_gross
-    """
-    try:
-        zig_df = conn.execute(zig_sql).df()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("v7 zigzag SQL failed: %s", exc)
-        zig_df = pd.DataFrame(columns=["trade_id", "ts_peak_2_mid",
-                                        "peak_2_mid_gross",
-                                        "trough_2_mid_gross", "ts_trough_2_mid"])
-    finally:
-        try:
-            conn.unregister("_zigzag_pick_trades")
-        except Exception:  # noqa: BLE001
-            pass
-        conn.close()
-
-    # ── 3) Per-trade aggregation back to cell level. mtm convention = subtract
-    #     entry slippage; here we approximate as zero since the lazy compute
-    #     is for visualisation only and the cell-level mean is dominated by
-    #     gross magnitude. Same convention as v6 peak_after_trough_mtm uses
-    #     entry_slip; if precise alignment is needed, recover entry_slip per
-    #     trade via the mtm_df attached during _compute_all_exits.
-    per_trade = all_trades.merge(zig_df, on="trade_id", how="left")
-    duration = (per_trade["exit_ts"] - per_trade["entry_ts_utc"]).astype(float)
-    valid = duration > 0
-    per_trade["rel_time_peak_2_mid"] = (
-        (per_trade["ts_peak_2_mid"] - per_trade["entry_ts_utc"]) / duration
-    ).where(valid).clip(lower=0.0, upper=1.0)
-    per_trade["rel_time_trough_2_mid"] = (
-        (per_trade["ts_trough_2_mid"] - per_trade["entry_ts_utc"]) / duration
-    ).where(valid).clip(lower=0.0, upper=1.0)
-
-    # Aggregate per (rule_label, band, expiry, delta, hour) cell.
-    by_cell = per_trade.groupby("_cell_key", dropna=False)
-    for ck, sub in by_cell:
-        if not isinstance(ck, tuple):
-            continue
-        _ZIGZAG_V7_CACHE[ck] = {
-            "avg_peak_2_mid":             _safe_mean(sub["peak_2_mid_gross"]),
-            "avg_trough_2_mid":           _safe_mean(sub["trough_2_mid_gross"]),
-            "avg_rel_time_peak_2_mid":    _safe_mean(sub["rel_time_peak_2_mid"]),
-            "avg_rel_time_trough_2_mid":  _safe_mean(sub["rel_time_trough_2_mid"]),
-            "n_used":                     int(sub["peak_2_mid_gross"].notna().sum()),
-        }
-
-    # ── 4) Attach to picks frame (cache lookup; misses → None).
-    out = picks.copy()
-    for col in ("avg_peak_2_mid", "avg_trough_2_mid",
-                "avg_rel_time_peak_2_mid", "avg_rel_time_trough_2_mid"):
-        out[col] = [_ZIGZAG_V7_CACHE.get(cell_keys.get(idx, ()), {}).get(col)
-                    for idx in out.index]
-    return out
 
 
 def _records(df: pd.DataFrame) -> list[dict]:
@@ -2250,7 +2016,7 @@ def get_iv_band_best_combo(
         "max_losing_streak": max_losing_streak,
         "pick_mode": pick_mode,
         "status": "ready",
-        "rows": _records(_attach_zigzag_v7_to_picks(best)),
+        "rows": _records(best),
         "n_rules": len(_rule_variants()),
         "n_cells": int(len(family_grid)),
     }
@@ -3041,6 +2807,43 @@ def get_missed_fridays_force_fit(
 _COVERAGE_CACHE: dict[tuple, dict] = {}
 _COVERAGE_CACHE_MAX = 16
 
+# L2 disk persistence for _COVERAGE_CACHE — survives backend restarts.
+_COVERAGE_DISK_DIR = os.path.join(m7r.M7_BASE_DIR, "coverage_cache")
+
+
+def _coverage_cache_path(cache_key: tuple) -> str:
+    h = hashlib.sha1(repr(cache_key).encode()).hexdigest()
+    return os.path.join(_COVERAGE_DISK_DIR, f"{h}.json")
+
+
+def _load_coverage_disk(cache_key: tuple, ds_mtime: float) -> Optional[dict]:
+    path = _coverage_cache_path(cache_key)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if data.get("_ds_mtime") != ds_mtime:
+            return None
+        data.pop("_ds_mtime", None)
+        return data
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Coverage disk cache read failed (%s): %s", path, exc)
+        return None
+
+
+def _save_coverage_disk(cache_key: tuple, response: dict, ds_mtime: float) -> None:
+    try:
+        os.makedirs(_COVERAGE_DISK_DIR, exist_ok=True)
+        path = _coverage_cache_path(cache_key)
+        payload = {**response, "_ds_mtime": ds_mtime}
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Coverage disk cache write failed: %s", exc)
+
 # Per-cache-key async warmup state. Cold calls used to block ~18s (picker
 # + classifier) — long enough for the browser/proxy to time out, surfacing
 # as a 500. Now: on cache miss, kick off a daemon thread that computes the
@@ -3126,6 +2929,10 @@ def get_iv_band_best_combo_coverage(
         ds_mtime,
     )
     cached = _COVERAGE_CACHE.get(cache_key)
+    if cached is None:
+        cached = _load_coverage_disk(cache_key, ds_mtime)
+        if cached is not None:
+            _COVERAGE_CACHE[cache_key] = cached
     if cached is not None:
         return cached
     if grid_state["status"] == "pending":
@@ -3407,11 +3214,12 @@ def _compute_coverage_payload(
         "n_rules": len(_rule_variants()),
         "n_cells": int(len(family_grid)),
     }
-    # Store in cache (LRU-ish: drop oldest when over limit)
+    # Store in memory cache (LRU-ish: drop oldest when over limit) and on disk.
     if len(_COVERAGE_CACHE) >= _COVERAGE_CACHE_MAX:
         try:
             _COVERAGE_CACHE.pop(next(iter(_COVERAGE_CACHE)))
         except StopIteration:
             pass
     _COVERAGE_CACHE[cache_key] = response
+    _save_coverage_disk(cache_key, response, ds_mtime)
     return response

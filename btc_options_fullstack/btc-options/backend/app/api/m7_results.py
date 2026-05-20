@@ -105,6 +105,14 @@ _EXIT_COMPUTE_LOCK = threading.Lock()
 _EXIT_CACHE_DIR = os.path.join(M7_BASE_DIR, "exit_cache")
 _EXIT_CACHE_DISK_ENABLED = os.environ.get("M7_EXIT_CACHE_DISK", "1") != "0"
 
+# Query-time trade-pool filters — applied once at _load_trades() so all
+# downstream (exit_cache, coverage, pivot, endpoints) see only kept rows.
+# Drop biweekly/monthly/quarterly expiry buckets and low-delta entries.
+_KEPT_EXPIRY_BUCKETS = frozenset({
+    "current (Sat)", "next (Sun)", "next_to_next (Mon)", "weekly (7d)"
+})
+_KEPT_DELTAS = frozenset({0.25, 0.30, 0.40, 0.50})
+
 
 def _rule_cache_path(dataset: str, exit_rule: dict) -> str:
     """Return the on-disk parquet path for an (exit_rule) under `dataset`.
@@ -219,6 +227,17 @@ def _load_trades(dataset: str = "delta_match") -> pd.DataFrame:
             ).astype(str)
         _add_entry_skew_columns(df)
         _attach_ivrv_and_slope_buckets(df)
+        # Query-time pool filters for delta_match only (price_match has its
+        # own expiry/delta config — don't clobber it).
+        if dataset == "delta_match":
+            if "expiry_bucket" in df.columns:
+                before = len(df)
+                df = df[df["expiry_bucket"].isin(_KEPT_EXPIRY_BUCKETS)]
+                log.info("M7 trades expiry filter (%s): %d → %d rows", dataset, before, len(df))
+            if "delta_target" in df.columns:
+                before = len(df)
+                df = df[df["delta_target"].isin(_KEPT_DELTAS)]
+                log.info("M7 trades delta filter (%s): %d → %d rows", dataset, before, len(df))
         _TRADES_BY_DATASET[dataset] = (df, mtime)
         log.info("M7 trades reloaded (%s): %d rows from %s",
                  dataset, len(df), path)
@@ -565,7 +584,17 @@ def _load_exit_cache_disk(dataset: str, exit_rule: dict,
     if file_mtime < trades_mtime:
         return None
     try:
-        return pd.read_parquet(path)
+        df = pd.read_parquet(path)
+        # Apply query-time pool filters to existing disk caches that were
+        # written before the filter constants were introduced.  Rows for
+        # dropped expiry buckets / deltas are trimmed here so callers see
+        # only the kept subset regardless of when the parquet was written.
+        if dataset == "delta_match":
+            if "expiry_bucket" in df.columns:
+                df = df[df["expiry_bucket"].isin(_KEPT_EXPIRY_BUCKETS)]
+            if "delta_target" in df.columns:
+                df = df[df["delta_target"].isin(_KEPT_DELTAS)]
+        return df
     except Exception as e:
         log.warning("M7 exit cache (disk) read failed at %s: %s", path, e)
         return None

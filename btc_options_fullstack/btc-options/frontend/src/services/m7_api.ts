@@ -293,11 +293,6 @@ export interface M7IvBandBestComboRow {
   avg_pct_drop_peak_to_trough?: number | null;
   avg_pct_recovery_trough_to_peak?: number | null;
   avg_alt_net_if_exit_at_peak1?: number | null;
-  // v7 — 5-landmark zigzag intermediate landmarks (NaN on v6 fallback)
-  avg_peak_2_mid?: number | null;
-  avg_trough_2_mid?: number | null;
-  avg_rel_time_peak_2_mid?: number | null;
-  avg_rel_time_trough_2_mid?: number | null;
   // v6 — risk-adjusted (grid-load from stdev cols, NaN on v4)
   stdev_net_pnl?: number | null;
   stdev_losses_only?: number | null;

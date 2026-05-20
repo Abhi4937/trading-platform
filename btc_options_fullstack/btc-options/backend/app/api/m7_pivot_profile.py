@@ -12,8 +12,10 @@ instantly.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -25,11 +27,48 @@ from app.analytics.m7_pivot_profile import (
     MIN_TRADES_PER_BAND_CELL, aggregate_pivot_profile,
 )
 from app.api.m7_results import (
-    _derive_exits, _load_trades, _paths_glob_for_dataset,
+    M7_BASE_DIR, _TRADES_BY_DATASET, _derive_exits, _load_trades,
+    _paths_glob_for_dataset,
 )
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+
+_PIVOT_DISK_DIR = os.path.join(M7_BASE_DIR, "pivot_cache")
+
+
+def _pivot_cache_path(cache_key: tuple) -> str:
+    h = hashlib.sha1(repr(cache_key).encode()).hexdigest()
+    return os.path.join(_PIVOT_DISK_DIR, f"{h}.json")
+
+
+def _load_pivot_disk(cache_key: tuple, ds_mtime: float) -> Optional[dict]:
+    path = _pivot_cache_path(cache_key)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if data.get("_ds_mtime") != ds_mtime:
+            return None
+        data.pop("_ds_mtime", None)
+        return data
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Pivot disk cache read failed (%s): %s", path, exc)
+        return None
+
+
+def _save_pivot_disk(cache_key: tuple, result: dict, ds_mtime: float) -> None:
+    try:
+        os.makedirs(_PIVOT_DISK_DIR, exist_ok=True)
+        path = _pivot_cache_path(cache_key)
+        payload = {**result, "_ds_mtime": ds_mtime}
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Pivot disk cache write failed: %s", exc)
 
 
 # Cache key = (dataset, scope_signature). Each entry:
@@ -192,6 +231,8 @@ def _warm_cache_entry(
     entry_hours: tuple[int, ...],
     cells: list[dict],
     state: dict,
+    cache_key: tuple | None = None,
+    ds_mtime: float = 0.0,
 ) -> None:
     """Background worker — builds the pivot-profile and writes into `state`."""
     try:
@@ -225,6 +266,8 @@ def _warm_cache_entry(
                  dataset, len(cells), entry_hours,
                  (state["finished_at"] - state["started_at"]),
                  len(result.get("by_band", {})))
+        if cache_key is not None and ds_mtime > 0:
+            _save_pivot_disk(cache_key, result, ds_mtime)
     except Exception as exc:  # noqa: BLE001
         state["status"] = "error"
         state["error"] = repr(exc)
@@ -264,19 +307,33 @@ def pivot_profile(
     sig = _scope_signature(parsed_cells, hours)
     cache_key = (dataset, sig)
 
+    # Resolve ds_mtime for disk cache staleness check.
+    _load_trades(dataset)
+    _, ds_mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
+
     with _CACHE_LOCK:
         state = _CACHE.get(cache_key)
         if state is None or state["status"] == "error":
-            # Fresh slot — start a background warm.
-            state = _new_state()
-            _CACHE[cache_key] = state
-            t = threading.Thread(
-                target=_warm_cache_entry,
-                args=(dataset, hours, parsed_cells, state),
-                daemon=True,
-                name=f"pivot_profile-{dataset}-{sig[:32]}",
-            )
-            t.start()
+            # Check L2 disk cache before spawning a background thread.
+            disk_result = _load_pivot_disk(cache_key, ds_mtime)
+            if disk_result is not None:
+                state = {
+                    "status": "ready", "result": disk_result, "error": None,
+                    "progress": 1.0, "started_at": time.time(),
+                    "finished_at": time.time(),
+                }
+                _CACHE[cache_key] = state
+            else:
+                # Fresh slot — start a background warm.
+                state = _new_state()
+                _CACHE[cache_key] = state
+                t = threading.Thread(
+                    target=_warm_cache_entry,
+                    args=(dataset, hours, parsed_cells, state, cache_key, ds_mtime),
+                    daemon=True,
+                    name=f"pivot_profile-{dataset}-{sig[:32]}",
+                )
+                t.start()
 
     return {
         "status": state["status"],

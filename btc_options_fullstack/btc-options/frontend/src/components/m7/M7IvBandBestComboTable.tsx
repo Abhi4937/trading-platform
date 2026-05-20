@@ -1325,12 +1325,6 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
                     <th style={thR}>Peak-1 <InfoIcon text="Avg max gross_pnl_usd seen BEFORE the trough across all trades in cell (entry-slip-only). Negative when the typical trade never went positive." /></th>
                     <th style={thR}>Trough <InfoIcon text="Avg min MTM across all trades — worst unrealized point during the hold." /></th>
                     <th style={thR}>Peak-2 <InfoIcon text="Avg max gross_pnl_usd seen AFTER the trough (recovery peak). High = trades typically bounce after dipping." /></th>
-                    <th style={thR}>P2_mid <InfoIcon text="v7: avg intermediate post-trough peak — the morning recovery peak between the deepest drawdown and the exit-time peak. NaN when no intermediate landmark exists (trade was monotonic between trough and exit, or grid is pre-v7)." /></th>
-                    <th style={thR}>T2_mid <InfoIcon text="v7: avg intermediate trough between P2_mid and P3_exit — the small drawdown after the morning peak before the exit recovery." /></th>
-                    <th style={thR}>t(P2_mid) <InfoIcon text="v7: avg IST clock time of the morning intermediate peak." /></th>
-                    <th style={thR}>t(T2_mid) <InfoIcon text="v7: avg IST clock time of the intermediate trough." /></th>
-                    <th style={thR}>P2 vs Exit ($) <InfoIcon text="Derived: avg_peak_2_mid − avg_peak_after_trough. Positive = morning peak was higher on average than the exit peak → exit-at-morning beats ride-to-exit." /></th>
-                    <th style={thR}>P2 / Exit (×) <InfoIcon text="Derived: avg_peak_2_mid ÷ avg_peak_after_trough. >1 = morning peak wins. Color-coded green ≥1.0, yellow 0.7-1.0, red <0.7." /></th>
                     <th style={thR}>Δ P1→T <InfoIcon text="Avg (peak-1 − trough) ÷ max(peak-1, |trough|, $0.01). What fraction of the peak (or absolute trough) the trade typically gives back. Lower = less stress." /></th>
                     <th style={thR}>t(Peak-1) <InfoIcon text="Avg relative time of peak-1 within the hold (0=entry, 1=exit). Earlier means the trade typically tops out then turns." /></th>
                     <th style={thR}>t(Trough) <InfoIcon text="Avg relative time of trough within the hold (0=entry, 1=exit). Late means losers crater near the end." /></th>
@@ -1617,16 +1611,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
                     })();
                     // v7 — 5-landmark zigzag intermediate landmarks + derived
                     // comparison vs the exit peak.
-                    const p2mid    = sk(r.avg_peak_2_mid);
                     const p3exit   = sk(r.avg_peak_after_trough);
-                    const p2Advance = (p2mid != null && p3exit != null) ? p2mid - p3exit : null;
-                    const p2Ratio   = (p2mid != null && p3exit != null && p3exit !== 0)
-                      ? p2mid / p3exit : null;
-                    const ratioColor = (v: number | null | undefined) => {
-                      if (v == null || isNaN(v as number)) return '#7a9bb5';
-                      const x = v as number;
-                      return x >= 1.0 ? '#3fb950' : x >= 0.7 ? '#f0b300' : '#f85149';
-                    };
                     return (
                       <>
                         <td style={tdR}>{numFmt(r.sharpe_per_trade)}</td>
@@ -1638,15 +1623,6 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
                         <td style={{ ...tdR, color: pnlColor(sk(r.avg_peak_before_trough)) }}>{usd(sk(r.avg_peak_before_trough))}</td>
                         <td style={{ ...tdR, color: pnlColor(sk(r.avg_min_mtm)) }}>{usd(sk(r.avg_min_mtm))}</td>
                         <td style={{ ...tdR, color: pnlColor(p3exit) }}>{usd(p3exit)}</td>
-                        {/* v7 — intermediate landmarks (P2_mid, T2_mid) */}
-                        <td style={{ ...tdR, color: pnlColor(p2mid) }}>{usd(p2mid)}</td>
-                        <td style={{ ...tdR, color: pnlColor(sk(r.avg_trough_2_mid)) }}>{usd(sk(r.avg_trough_2_mid))}</td>
-                        <td style={tdR}>{relTime(r.avg_rel_time_peak_2_mid)}</td>
-                        <td style={tdR}>{relTime(r.avg_rel_time_trough_2_mid)}</td>
-                        <td style={{ ...tdR, color: pnlColor(p2Advance) }}>{usd(p2Advance)}</td>
-                        <td style={{ ...tdR, color: ratioColor(p2Ratio) }}>
-                          {p2Ratio == null ? '—' : `${p2Ratio.toFixed(2)}×`}
-                        </td>
                         <td style={{ ...tdR, color: dropColor(dropPct) }}>
                           {dropPct == null ? '—' : `${(dropPct * 100).toFixed(0)}%`}
                         </td>

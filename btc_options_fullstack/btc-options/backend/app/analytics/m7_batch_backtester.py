@@ -81,7 +81,11 @@ PATHS_OUT_DIR = os.path.join(M7_OUT_DIR, "m7_paths")
 FULL_ENRICHED_5M_PATH = os.path.join(DERIVED_DIR, "full_enriched_5m.parquet")
 SPOT_PATH = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
 
-TARGET_DELTAS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50)
+TARGET_DELTAS = (0.25, 0.30, 0.40, 0.50)  # 0.05-0.20 dropped; filtered at query time in m7_results.py
+# Only generate expiries within the 4 kept DTE buckets (≤10 days).
+# Biweekly/monthly/quarterly expiries are filtered at query time in m7_results.py
+# anyway, but skipping them here saves ~40% of per-friday work on future --append runs.
+MAX_EXPIRY_DTE_DAYS = 10
 QTY_LOTS = 100
 
 # Entry hours in IST. 21,22,23 fall on the same UTC date as the Friday;
@@ -992,7 +996,7 @@ def run(args: argparse.Namespace) -> None:
         # Expiry must be AFTER our entry start (otherwise no trade), and reasonable cap on far-future
         fri_expiries = [e for e in expiries_filt
                         if expiry_dt_unix(e) > fri_start + 60
-                        and expiry_dt_unix(e) < fri_end + 90 * 86400]
+                        and expiry_dt_unix(e) < fri_start + MAX_EXPIRY_DTE_DAYS * 86400]
 
         friday_paths: list[dict] = []
         friday_trades: list[dict] = []
