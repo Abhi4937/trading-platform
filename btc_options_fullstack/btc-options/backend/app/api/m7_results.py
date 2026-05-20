@@ -21,10 +21,14 @@ margin_pct / premium_sl_pct, with Sat 17:30 IST hard cap).
 
 from __future__ import annotations
 
+import glob
+import hashlib
 import json
 import logging
 import math
 import os
+import shutil
+import tempfile
 import threading
 from typing import Optional
 
@@ -91,6 +95,42 @@ _EXIT_CACHE: dict[tuple[str, str, float], pd.DataFrame] = {}
 # this lock around `_compute_all_exits` ensures one big scan at a time.
 # Cache hits in `_derive_exits` skip the lock entirely.
 _EXIT_COMPUTE_LOCK = threading.Lock()
+
+# On-disk L2 for `_EXIT_CACHE`. Each (dataset, exit_rule) pair persists as
+# one parquet under exit_cache/<dataset>/<sha1(canonical_rule_json)>.parquet.
+# A backend restart pre-populated this directory once means subsequent cold
+# starts read parquets (~150ms each) instead of running DuckDB scans over the
+# 1m path glob (~5-15s each). Wiped automatically when trades parquet mtime
+# changes (see _load_trades). Set M7_EXIT_CACHE_DISK=0 to disable.
+_EXIT_CACHE_DIR = os.path.join(M7_BASE_DIR, "exit_cache")
+_EXIT_CACHE_DISK_ENABLED = os.environ.get("M7_EXIT_CACHE_DISK", "1") != "0"
+
+
+def _rule_cache_path(dataset: str, exit_rule: dict) -> str:
+    """Return the on-disk parquet path for an (exit_rule) under `dataset`.
+
+    Key is sha1 of the canonicalized rule JSON so the same rule maps to the
+    same file across runs and across machines.
+    """
+    canonical = json.dumps(exit_rule or {}, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+    return os.path.join(_EXIT_CACHE_DIR, dataset, f"{digest}.parquet")
+
+
+def _wipe_exit_cache_disk(dataset: str) -> None:
+    """Delete the on-disk exit cache for one dataset. Called when trades
+    parquet mtime changes so the persisted exits can't drift from the
+    underlying trade data."""
+    if not _EXIT_CACHE_DISK_ENABLED:
+        return
+    dataset_dir = os.path.join(_EXIT_CACHE_DIR, dataset)
+    if not os.path.isdir(dataset_dir):
+        return
+    try:
+        shutil.rmtree(dataset_dir)
+        log.info("M7 exit cache (disk) wiped for dataset=%s", dataset)
+    except OSError as e:
+        log.warning("M7 exit cache (disk) wipe failed for %s: %s", dataset, e)
 
 # Per-rule async warmup state for cells-mode. A cells-mode request with N
 # unique rule_dicts on a cold cache would block for N × ~5–15s; if the
@@ -162,6 +202,12 @@ def _load_trades(dataset: str = "delta_match") -> pd.DataFrame:
         for k in list(_EXIT_CACHE.keys()):
             if k[0] == dataset:
                 _EXIT_CACHE.pop(k, None)
+        # …and wipe its L2 disk cache so persisted exits can't drift from
+        # the new trades. Only when mtime actually changed (cached_mtime>0
+        # means we had a prior load); on first-ever load there's nothing
+        # to wipe and the disk cache may already be populated by a build.
+        if cached_mtime > 0 and mtime != cached_mtime:
+            _wipe_exit_cache_disk(dataset)
         df = pd.read_parquet(path)
         # Derive expiry_bucket from dte_days (not stored by backtester)
         if "expiry_bucket" not in df.columns and "dte_days" in df.columns:
@@ -461,15 +507,21 @@ def _derive_exits(filters: dict, exit_rule: dict,
                    dataset: str = "delta_match") -> pd.DataFrame:
     """For every trade matching `filters`, derive the exit outcome under `exit_rule`.
 
-    Cached: the expensive DuckDB scan is computed once per (dataset, exit_rule)
-    for ALL trades, then filtered in pandas. Different exit_rules get separate
-    cache entries; first call for each new rule is slow (~5–15s), subsequent
-    calls with same rule + any filter combo are instant.
+    Two-level cache:
+      L1: in-memory `_EXIT_CACHE` keyed by (dataset, json(rule), mtime).
+      L2: on-disk parquet at exit_cache/<dataset>/<sha1(canonical_rule)>.parquet.
+
+    First call for a cold rule:
+      - L1 miss → check L2.
+      - L2 hit (file exists and mtime >= trades_mtime) → read parquet (~150ms),
+        populate L1, return.
+      - L2 miss → DuckDB scan (~5-15s), populate L1, atomically write L2,
+        return.
     """
     # Ensure trades cache is fresh before computing the cache key.
     _load_trades(dataset)
-    _, mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
-    rule_key = (dataset, json.dumps(exit_rule or {}, sort_keys=True), mtime)
+    _, trades_mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
+    rule_key = (dataset, json.dumps(exit_rule or {}, sort_keys=True), trades_mtime)
     full = _EXIT_CACHE.get(rule_key)
     if full is None:
         # Serialise heavy DuckDB scans across threads. Re-check the cache
@@ -477,13 +529,78 @@ def _derive_exits(filters: dict, exit_rule: dict,
         with _EXIT_COMPUTE_LOCK:
             full = _EXIT_CACHE.get(rule_key)
             if full is None:
-                full = _compute_all_exits(exit_rule, dataset=dataset)
+                # L2: try disk cache before paying for the DuckDB scan.
+                full = _load_exit_cache_disk(dataset, exit_rule, trades_mtime)
+                if full is None:
+                    full = _compute_all_exits(exit_rule, dataset=dataset)
+                    _save_exit_cache_disk(dataset, exit_rule, full)
+                    log.info("M7 exit cache populated for (%s, %s) (%d trades)",
+                             dataset, rule_key[1][:80], len(full))
+                else:
+                    log.info("M7 exit cache loaded from disk for (%s, %s) (%d trades)",
+                             dataset, rule_key[1][:80], len(full))
                 _EXIT_CACHE[rule_key] = full
-                log.info("M7 exit cache populated for (%s, %s) (%d trades)",
-                         dataset, rule_key[1][:80], len(full))
     if full.empty:
         return full
     return _apply_filters(full, filters)
+
+
+def _load_exit_cache_disk(dataset: str, exit_rule: dict,
+                           trades_mtime: float) -> Optional[pd.DataFrame]:
+    """L2 read. Returns None on miss or stale-vs-trades."""
+    if not _EXIT_CACHE_DISK_ENABLED:
+        return None
+    path = _rule_cache_path(dataset, exit_rule)
+    if not os.path.exists(path):
+        return None
+    try:
+        file_mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    # Stale guard: if trades parquet is newer than the cached exits, the
+    # exits could be wrong. _load_trades already wipes the directory on
+    # mtime change, but a stray file (e.g. from a previous trades version
+    # written by the build container before invalidation) would still be
+    # rejected here.
+    if file_mtime < trades_mtime:
+        return None
+    try:
+        return pd.read_parquet(path)
+    except Exception as e:
+        log.warning("M7 exit cache (disk) read failed at %s: %s", path, e)
+        return None
+
+
+def _save_exit_cache_disk(dataset: str, exit_rule: dict,
+                           df: pd.DataFrame) -> None:
+    """L2 write — atomic via tmp + os.replace. Failure logs a warning but
+    does not raise; the caller already has the dataframe and can proceed."""
+    if not _EXIT_CACHE_DISK_ENABLED:
+        return
+    if df is None or df.empty:
+        # An empty result usually means a misconfigured rule; don't
+        # persist or we'd cache a permanent "no trades" state.
+        return
+    path = _rule_cache_path(dataset, exit_rule)
+    dataset_dir = os.path.dirname(path)
+    try:
+        os.makedirs(dataset_dir, exist_ok=True)
+        # Atomic write: tempfile in the same directory, then os.replace.
+        # tempfile.NamedTemporaryFile + delete=False so we can write+rename.
+        fd, tmp_path = tempfile.mkstemp(suffix=".parquet.tmp", dir=dataset_dir)
+        os.close(fd)
+        try:
+            df.to_parquet(tmp_path, compression="zstd", index=False)
+            os.replace(tmp_path, path)
+        except Exception:
+            # Don't leave stray temp files around.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        log.warning("M7 exit cache (disk) write failed at %s: %s", path, e)
 
 
 def _compute_all_exits(exit_rule: dict,
