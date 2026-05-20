@@ -1,5 +1,53 @@
 # Handoff Log
 
+# 🚨 MIGRATION RESUMING (added 2026-05-20)
+
+The codebase was just moved from `C:\Users\Abhis\OneDrive\Desktop\Trading\Trading platform\btc_options_fullstack\btc-options\` to `C:\dev\btc-options\`. If you're a fresh Claude session reading this for the first time after the move — you have work to do. **Resume here:**
+
+1. **Sanity grep** from repo root (should hit ONLY `docs/memories/*` and `modify-codebase-for-deployment.md` — historical text):
+   ```
+   grep -rn --exclude-dir=.git --exclude-dir=node_modules "OneDrive" .
+   ```
+2. **Fix the non-historical hits**:
+   - `scripts/calibrate_loop.sh` line 8 → `PROJECT="/mnt/c/dev/btc-options"`
+   - `scripts/calibrate_loop_v2.sh` line 8 → same
+   - `CLAUDE.md` line 234 → `Project root: C:/dev/btc-options` (drop the space-in-path warning on line 235 too — new path has no spaces)
+   - `.claude/settings.local.json` line 106 → `'/c/dev/btc-options/docker'`
+   - `.claude/settings.local.json` line 112 → `'/mnt/c/dev/btc-options/frontend'`
+   - `.claude/settings.local.json` lines 8-9 → delete (stale Bash allowlist entries with OneDrive path)
+3. **Copy memory folder** to new Claude Code project key (memory files exist at the old OneDrive-keyed project dir):
+   ```powershell
+   Copy-Item `
+     "C:\Users\Abhis\.claude\projects\C--Users-Abhis-OneDrive-Desktop-Trading-Trading-platform-btc-options-fullstack-btc-options\memory" `
+     "C:\Users\Abhis\.claude\projects\C--dev-btc-options\memory" -Recurse -Force
+   ```
+4. **Free 67 GB** by unregistering the dead Ubuntu-24.04 WSL distro (from any PowerShell):
+   ```
+   wsl --unregister Ubuntu-24.04
+   ```
+5. **Apply new WSL idle-shutdown** config — `vmIdleTimeout=60000` was added to `C:\Users\Abhis\.wslconfig`:
+   ```
+   wsl --shutdown
+   ```
+   (Docker Desktop will restart WSL on next use, picking up the new config.)
+6. **Restart services** at the new location:
+   ```
+   cd C:\dev\btc-options\docker; docker compose up -d backend
+   cd C:\dev\btc-options\frontend; npm run dev
+   ```
+7. **Verify**: open `http://localhost:3000` → M7 sweep loads cleanly with no errors. Backend health: `curl http://localhost:8000/health`.
+8. **Resume OneDrive sync** (right-click OneDrive tray icon → Resume syncing). Optionally delete the OneDrive cloud copy of the old folder if you want it gone.
+9. **Commit and push** the migration cleanup (the path edits above).
+10. **Delete this entire `🚨 MIGRATION RESUMING` block** from HANDOFF.md when complete — it's a one-shot directive.
+
+**Full plan reference**: `C:\Users\Abhis\.claude\plans\for-what-mode-u-sprightly-umbrella.md`
+
+**Note on user-level hook scripts** (already done in the pre-move session):
+- `C:\Users\Abhis\.claude\scripts\session_start.sh` line 3 — already updated to `/c/dev/btc-options` ✓
+- `C:\Users\Abhis\.claude\scripts\session_end.sh` line 3 — if you opened this session and the SessionEnd hook fired without writing to `docs/memories/session_end_log.md`, this edit may not have been applied. Verify with: `head -3 /c/Users/Abhis/.claude/scripts/session_end.sh` (should show `PROJ="/c/dev/btc-options"`).
+
+---
+
 ## Last Session
 **Who:** Claude (Opus 4.7)
 **Date:** 2026-05-18 (Session 32 — 243-rule hybrid scaffolding committed; plans rewritten for strict separation)
