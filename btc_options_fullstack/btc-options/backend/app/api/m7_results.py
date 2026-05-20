@@ -594,6 +594,9 @@ def _load_exit_cache_disk(dataset: str, exit_rule: dict,
                 df = df[df["expiry_bucket"].isin(_KEPT_EXPIRY_BUCKETS)]
             if "delta_target" in df.columns:
                 df = df[df["delta_target"].isin(_KEPT_DELTAS)]
+        # Back-compat: parquets written before Part H don't have is_fallback.
+        if "is_fallback" not in df.columns:
+            df["is_fallback"] = False
         return df
     except Exception as e:
         log.warning("M7 exit cache (disk) read failed at %s: %s", path, e)
@@ -630,6 +633,295 @@ def _save_exit_cache_disk(dataset: str, exit_rule: dict,
             raise
     except Exception as e:
         log.warning("M7 exit cache (disk) write failed at %s: %s", path, e)
+
+
+# ── Part H: Deadline-fallback augmentation ────────────────────────────────────
+
+_IV_BANDS_FALLBACK = [
+    (0, 20), (20, 30), (30, 40), (40, 50), (50, 60),
+    (60, 70), (70, 80), (80, 90), (90, 100), (100, 100_000),
+]
+
+
+def _iv_band_label(iv_pct: float) -> str:
+    try:
+        v = float(iv_pct)
+    except (TypeError, ValueError):
+        return "nan"
+    if math.isnan(v):
+        return "nan"
+    for lo, hi in _IV_BANDS_FALLBACK:
+        if lo <= v < hi:
+            return f"{int(lo)}+" if hi >= 100_000 else f"{int(lo)}-{int(hi)}"
+    return "nan"
+
+
+def _build_fallback_row_for_friday(
+    friday_str: str,
+    exit_rule: dict,
+    trades_df: pd.DataFrame,
+    paths_glob: str,
+) -> Optional[dict]:
+    """Synthesise a single fallback trade row at Sat 12:00 IST for one friday
+    that has no strict exits in the rule's exit_cache.
+
+    Uses the IV-regime rule (ATM IV of next_to_next expiry at the deadline):
+      < 60 % → chosen expiry = next_to_next (Mon)
+      ≥ 60 % → chosen expiry = current (Sat)
+
+    The fallback trade's entry context (strikes, qty, margin) is copied from
+    a proxy trade on the same friday with the closest (expiry, delta) combo.
+    Entry marks and P&L are re-computed from the path data from the deadline
+    timestamp onward. Returns None if any required data is unavailable.
+    """
+    DEADLINE_HOUR_IST = 12
+    IV_THRESHOLD_PCT = 60.0
+
+    try:
+        friday_ts_utc = int(pd.Timestamp(friday_str, tz="UTC").timestamp())
+    except Exception:
+        return None
+
+    # Sat 12:00 IST = Friday midnight UTC + 109800 s
+    # (86400 for +1 day, 12*3600 - 19800 for IST→UTC offset: 43200 - 19800 = 23400;
+    #  86400 + 23400 = 109800)
+    ts_deadline = friday_ts_utc + 109800
+    # Sat 17:30 IST = Sat 12:00 UTC = Friday midnight UTC + 86400 + 43200 = + 129600
+    _hard_cap_ts = friday_ts_utc + 129600
+
+    # Try partition-specific path first (avoids scanning all friday dirs).
+    friday_path = paths_glob.replace("friday_date=*", f"friday_date={friday_str}")
+    use_path = friday_path if os.path.exists(friday_path) else paths_glob
+
+    friday_pool = trades_df[trades_df["friday_date_ist"].astype(str) == friday_str]
+    if friday_pool.empty:
+        return None
+
+    # --- ATM IV lookup at deadline from next_to_next expiry proxy ---
+    ntn_cands = (friday_pool[friday_pool["expiry_bucket"] == "next_to_next (Mon)"]
+                 if "expiry_bucket" in friday_pool.columns else pd.DataFrame())
+    iv_proxy_row = (ntn_cands if not ntn_cands.empty else friday_pool).iloc[0]
+    iv_proxy_tid = int(iv_proxy_row["trade_id"])
+
+    conn = _duckdb_conn()
+    try:
+        iv_df = conn.execute(f"""
+            SELECT atm_iv_now
+            FROM read_parquet('{use_path}', hive_partitioning=true)
+            WHERE trade_id = {iv_proxy_tid} AND ts >= {ts_deadline}
+            ORDER BY ts LIMIT 1
+        """).df()
+    except Exception as exc:
+        log.debug("fallback iv lookup failed (%s): %s", friday_str, exc)
+        return None
+    finally:
+        conn.close()
+
+    if iv_df.empty:
+        return None
+    raw_iv = iv_df.iloc[0]["atm_iv_now"]
+    try:
+        atm_iv_ntn = float(raw_iv)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(atm_iv_ntn):
+        return None
+
+    # --- Regime decision ---
+    chosen_expiry = ("next_to_next (Mon)" if atm_iv_ntn < IV_THRESHOLD_PCT
+                     else "current (Sat)")
+
+    # --- Proxy trade for (chosen_expiry, best available delta) ---
+    exp_pool = (friday_pool[friday_pool["expiry_bucket"] == chosen_expiry]
+                if "expiry_bucket" in friday_pool.columns else pd.DataFrame())
+    search_pool = exp_pool if not exp_pool.empty else friday_pool
+
+    proxy_row: Optional[pd.Series] = None
+    chosen_delta = 0.30
+    for delta in sorted(_KEPT_DELTAS):
+        cands = (search_pool[search_pool["delta_target"] == delta]
+                 if "delta_target" in search_pool.columns else pd.DataFrame())
+        if not cands.empty:
+            chosen_delta = float(delta)
+            proxy_row = cands.iloc[0]
+            break
+    if proxy_row is None:
+        proxy_row = search_pool.iloc[0]
+        chosen_delta = float(proxy_row.get("delta_target", 0.30) or 0.30)
+
+    proxy_tid = int(proxy_row["trade_id"])
+    qty = float(proxy_row.get("quantity_lots", 1) or 1)
+    margin_usd = float(proxy_row.get("margin_used_usd_at_entry", 0) or 0)
+
+    # --- Path data from ts_deadline onward ---
+    conn = _duckdb_conn()
+    try:
+        path_df = conn.execute(f"""
+            SELECT ts, atm_iv_now, call_mark, put_mark, spot
+            FROM read_parquet('{use_path}', hive_partitioning=true)
+            WHERE trade_id = {proxy_tid} AND ts >= {ts_deadline}
+            ORDER BY ts
+        """).df()
+    except Exception as exc:
+        log.debug("fallback path read failed (%s tid=%d): %s", friday_str, proxy_tid, exc)
+        return None
+    finally:
+        conn.close()
+
+    if path_df.empty:
+        return None
+
+    # Entry values at the deadline bar
+    first = path_df.iloc[0]
+    entry_call = float(first["call_mark"])
+    entry_put = float(first["put_mark"])
+    entry_spot = float(first["spot"])
+    entry_iv = float(first["atm_iv_now"])
+    credit_usd = (entry_call + entry_put) * qty * 0.001
+
+    # Respect fixed_exit_hour_ist cap if the rule has one (clamp path window)
+    fixed_hour_ist = exit_rule.get("fixed_exit_hour_ist")
+    if fixed_hour_ist is not None:
+        fh_ts = friday_ts_utc + 86400 + int(float(fixed_hour_ist)) * 3600 - 19800
+        fh_ts = max(fh_ts, ts_deadline)
+        path_df = path_df[path_df["ts"] <= fh_ts]
+        if path_df.empty:
+            return None
+
+    # --- Apply exit-rule conditions row-by-row ---
+    sl_pct = exit_rule.get("premium_sl_pct")
+    max_profit_pct = exit_rule.get("max_profit_pct")
+    margin_target_pct = exit_rule.get("margin_target_pct")
+    capital_sl_pct = exit_rule.get("capital_sl_pct")
+    sl_mult = (1.0 + float(sl_pct) / 100.0) if sl_pct is not None else None
+
+    exit_ts = int(path_df.iloc[-1]["ts"])
+    exit_call = float(path_df.iloc[-1]["call_mark"])
+    exit_put = float(path_df.iloc[-1]["put_mark"])
+    exit_reason = "fallback_hard_cap"
+
+    for _, pr in path_df.iterrows():
+        c = float(pr["call_mark"])
+        p = float(pr["put_mark"])
+        gross = (entry_call + entry_put - c - p) * qty * 0.001
+        fired = False
+        if sl_mult is not None and (c >= entry_call * sl_mult or p >= entry_put * sl_mult):
+            fired = True
+        if (not fired and max_profit_pct is not None and credit_usd > 0
+                and gross >= credit_usd * float(max_profit_pct) / 100.0):
+            fired = True
+        if (not fired and margin_target_pct is not None and margin_usd > 0
+                and gross >= margin_usd * float(margin_target_pct) / 100.0):
+            fired = True
+        if (not fired and capital_sl_pct is not None and margin_usd > 0
+                and gross <= -margin_usd * float(capital_sl_pct) / 100.0):
+            fired = True
+        if fired:
+            exit_ts = int(pr["ts"])
+            exit_call = c
+            exit_put = p
+            exit_reason = "fallback_rule_trigger"
+            break
+
+    gross_pnl = (entry_call + entry_put - exit_call - exit_put) * qty * 0.001
+    is_sl = (exit_reason == "fallback_rule_trigger" and sl_mult is not None
+             and (exit_call >= entry_call * sl_mult or exit_put >= entry_put * sl_mult))
+
+    # Synthetic trade_id: hour=12 never appears in real entries (hours 21,22,23,0,1,2,3)
+    expiry_iso = str(proxy_row.get("expiry_date", ""))
+    sid = f"{friday_str}|12|{expiry_iso}|{chosen_delta:.2f}"
+    synthetic_tid = (int.from_bytes(hashlib.sha256(sid.encode()).digest()[:8], "big")
+                     & ((1 << 63) - 1))
+
+    # Copy all trade-context columns from proxy_row, then override entry/exit
+    row: dict = {col: proxy_row[col] for col in proxy_row.index}
+    row.update({
+        "trade_id":                synthetic_tid,
+        "entry_ts_utc":            ts_deadline,
+        "entry_hour_ist":          DEADLINE_HOUR_IST,
+        "entry_time_label":        f"{DEADLINE_HOUR_IST:02d}:30",
+        "entry_atm_iv_pct":        entry_iv,
+        "entry_atm_iv_band":       _iv_band_label(entry_iv),
+        "call_entry_mark":         entry_call,
+        "put_entry_mark":          entry_put,
+        "credit_usd":              credit_usd,
+        "spot_at_entry":           entry_spot,
+        "total_entry_cost_usd":    0.0,
+        "entry_slippage_call_usd": 0.0,
+        "entry_slippage_put_usd":  0.0,
+        # Exit columns
+        "exit_ts":                 exit_ts,
+        "exit_reason":             exit_reason,
+        "exit_call_mark":          exit_call,
+        "exit_put_mark":           exit_put,
+        "exit_spot":               entry_spot,
+        "gross_pnl_usd":           gross_pnl,
+        "pnl_pct_of_credit":       (gross_pnl / credit_usd * 100) if credit_usd > 0 else 0.0,
+        "pnl_pct_of_margin":       (gross_pnl / margin_usd * 100) if margin_usd > 0 else 0.0,
+        "net_pnl_estimate_usd":    gross_pnl,
+        "is_win":                  bool(gross_pnl > 0),
+        "is_premium_sl_hit":       is_sl,
+        "is_fallback":             True,
+        "total_exit_cost_usd":     0.0,
+        "exit_slippage_call_usd":  0.0,
+        "exit_slippage_put_usd":   0.0,
+        "exit_brokerage_call_usd": 0.0,
+        "exit_brokerage_put_usd":  0.0,
+        # MTM placeholders (no intra-hold-period path scan for fallback rows)
+        "max_gross_pnl_usd":       gross_pnl,
+        "min_gross_pnl_usd":       gross_pnl,
+        "max_mtm_usd":             gross_pnl,
+        "min_mtm_usd":             gross_pnl,
+        "exit_mtm_usd":            gross_pnl,
+        "loss_cause":              None,
+    })
+    return row
+
+
+def _resolve_deadline_fallback_trades(
+    exit_rule: dict,
+    strict_exits_df: pd.DataFrame,
+    trades_df: pd.DataFrame,
+    paths_glob: str,
+) -> pd.DataFrame:
+    """Return fallback rows for fridays in trades_df with zero strict exit rows.
+
+    Fires only for *completely dark* fridays (no strict trades at all for the
+    rule), which is uncommon with a complete dataset but provides a safety net
+    for data gaps and future friday additions.  Fallback rows carry
+    is_fallback=True and are merged into the exit_cache parquet alongside the
+    strict rows so every downstream consumer (picker, Losses Explorer, Pivot
+    Profile) sees them transparently.
+    """
+    if strict_exits_df.empty or trades_df.empty:
+        return pd.DataFrame()
+    if "friday_date_ist" not in strict_exits_df.columns:
+        return pd.DataFrame()
+
+    covered = frozenset(strict_exits_df["friday_date_ist"].dropna().astype(str).unique())
+    all_fridays = sorted(trades_df["friday_date_ist"].dropna().astype(str).unique())
+    missing = [f for f in all_fridays if f not in covered]
+    if not missing:
+        return pd.DataFrame()  # fast path — all fridays have strict coverage
+
+    log.info("fallback resolver: %d/%d fridays uncovered (rule=%s)",
+             len(missing), len(all_fridays), list(exit_rule.items())[:2])
+
+    rows: list[dict] = []
+    for friday_str in missing:
+        r = _build_fallback_row_for_friday(friday_str, exit_rule, trades_df, paths_glob)
+        if r is not None:
+            rows.append(r)
+
+    if not rows:
+        return pd.DataFrame()
+
+    fb_df = pd.DataFrame(rows)
+    # Ensure every column present in strict_exits_df is present in fb_df too
+    for col in strict_exits_df.columns:
+        if col not in fb_df.columns:
+            fb_df[col] = np.nan
+    return fb_df
 
 
 def _compute_all_exits(exit_rule: dict,
@@ -1122,6 +1414,20 @@ def _compute_all_exits(exit_rule: dict,
 
     # Chunk 1 — auto-classify each loser into one of 6 causes.
     _classify_loss_cause(merged)
+
+    # Part H: tag all strict rows as non-fallback, then augment with any
+    # fallback trades for fridays that had zero strict coverage.
+    merged["is_fallback"] = False
+    fallback_df = _resolve_deadline_fallback_trades(
+        exit_rule, merged, trades, paths_glob_local)
+    if not fallback_df.empty:
+        for col in merged.columns:
+            if col not in fallback_df.columns:
+                fallback_df[col] = np.nan
+        fallback_df = fallback_df.reindex(columns=merged.columns)
+        merged = pd.concat([merged, fallback_df], ignore_index=True)
+        log.info("exit cache augmented with %d fallback rows (rule=%s)",
+                 len(fallback_df), list(exit_rule.items())[:2])
 
     return merged
 
