@@ -521,11 +521,12 @@ def _exit_rule_sql_predicate(rule: dict) -> str:
         )
     if rule.get("capital_sl_pct") is not None:
         pct = float(rule['capital_sl_pct'])
-        # Capital SL: fires when loss ≥ pct% of total allocated capital.
-        # Uses rule['capital_usd'] (not per-trade margin) as the basis.
         capital_usd = float(rule.get('capital_usd', 1000.0))
-        threshold = capital_usd * pct / 100.0
-        parts.append(f"({pnl_after_slip} <= -{threshold})")
+        parts.append(f"({pnl_after_slip} <= -{capital_usd * pct / 100.0})")
+    if rule.get("capital_target_pct") is not None:
+        pct = float(rule['capital_target_pct'])
+        capital_usd = float(rule.get('capital_usd', 1000.0))
+        parts.append(f"({pnl_after_slip} >= {capital_usd * pct / 100.0})")
     if not parts:
         return ""
     return " OR ".join(parts)
@@ -806,6 +807,8 @@ def _build_fallback_row_for_friday(
     max_profit_pct = exit_rule.get("max_profit_pct")
     margin_target_pct = exit_rule.get("margin_target_pct")
     capital_sl_pct = exit_rule.get("capital_sl_pct")
+    capital_target_pct = exit_rule.get("capital_target_pct")
+    _cap_usd = float(exit_rule.get('capital_usd', 1000.0))
     sl_mult = (1.0 + float(sl_pct) / 100.0) if sl_pct is not None else None
 
     exit_ts = int(path_df.iloc[-1]["ts"])
@@ -827,7 +830,10 @@ def _build_fallback_row_for_friday(
                 and gross >= margin_usd * float(margin_target_pct) / 100.0):
             fired = True
         if (not fired and capital_sl_pct is not None
-                and gross <= -float(exit_rule.get('capital_usd', 1000.0)) * float(capital_sl_pct) / 100.0):
+                and gross <= -_cap_usd * float(capital_sl_pct) / 100.0):
+            fired = True
+        if (not fired and capital_target_pct is not None
+                and gross >= _cap_usd * float(capital_target_pct) / 100.0):
             fired = True
         if fired:
             exit_ts = int(pr["ts"])
