@@ -90,7 +90,6 @@ def _price_match_no_data_payload(extra: Optional[dict] = None) -> dict:
 # max_profit_pct removed entirely — holding 11–15 hr makes 40%+ unreachable.
 _PREMIUM_SL_PCTS = [50, 75, 100, 150, 200]
 _MARGIN_TARGET_PCTS = [10, 15, 20, 25, 30, 40, 50]   # 60/75/100 removed — rarely hit intraday
-_CAPITAL_TARGET_PCTS = [10, 15, 20]                   # profit ≥ pct% of $1000 capital
 # Hourly Saturday exits 5 AM..5 PM IST + 5:29 PM (just before settlement).
 # 17.4833 = 17h + 29m / 60 — the engine accepts decimal hours.
 _FIXED_HOURS: list[float] = [5.0, 6.0, 7.0,
@@ -116,15 +115,13 @@ def _hour_label(h: float) -> str:
 def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
     """Rule label → rule_dict tuples for the grid sweep.
 
-    delta_match: 200 variants
-      = 125 premium_sl rules
-          5 baselines + 5×7 margin_target + 5×3 capital_target + 5×14 exit_hr
-      + 75  cap_sl rules
-          3 baselines + 3×7 margin_target + 3×3 capital_target + 3×14 exit_hr
-      = 200 total.
+    delta_match: 110 variants
+      = 5 baselines + 5×7 margin_target + 5×14 exit_hr
+      = 5 + 35 + 70 = 110 total.
 
-    Intentionally excluded (all time):  max_profit_pct (unreachable intraday).
-    Phase 3 (next session): cap_sl × premium_sl (15), 3-way hybrids.
+    Intentionally excluded: max_profit_pct (unreachable intraday),
+    capital_sl/capital_target (design deferred — cap basis vs. lot size incoherent).
+    Phase 3 (future session): capital-based rules with proper per-trade K sizing.
 
     price_match: 243 variants (unchanged for backwards compat).
     """
@@ -135,37 +132,9 @@ def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
         for p in _MARGIN_TARGET_PCTS:
             out.append((f"sl{sl}_margin_target_{p}",
                         {"premium_sl_pct": sl, "margin_target_pct": p}))
-        for p in _CAPITAL_TARGET_PCTS:
-            out.append((f"sl{sl}_capital_target_{p}",
-                        {"premium_sl_pct": sl, "capital_target_pct": p, "capital_usd": _CAPITAL_USD}))
         for h in _FIXED_HOURS:
             out.append((f"sl{sl}_exit_hr_{_hour_label(h)}",
                         {"premium_sl_pct": sl, "fixed_exit_hour_ist": h}))
-    # Standalone cap_sl baselines — both datasets.
-    for csl in _CAPITAL_SL_PCTS:
-        out.append((f"cap{csl}_baseline", {"capital_sl_pct": csl, "capital_usd": _CAPITAL_USD}))
-    if dataset == "delta_match":
-        # cap_sl × margin_target (3 × 7 = 21).
-        for csl in _CAPITAL_SL_PCTS:
-            for p in _MARGIN_TARGET_PCTS:
-                out.append((
-                    f"cap{csl}_margin_target_{p}",
-                    {"capital_sl_pct": csl, "capital_usd": _CAPITAL_USD, "margin_target_pct": p},
-                ))
-        # cap_sl × capital_target (3 × 3 = 9).
-        for csl in _CAPITAL_SL_PCTS:
-            for p in _CAPITAL_TARGET_PCTS:
-                out.append((
-                    f"cap{csl}_capital_target_{p}",
-                    {"capital_sl_pct": csl, "capital_usd": _CAPITAL_USD, "capital_target_pct": p},
-                ))
-        # cap_sl × exit_hr (3 × 14 = 42).
-        for csl in _CAPITAL_SL_PCTS:
-            for h in _FIXED_HOURS:
-                out.append((
-                    f"cap{csl}_exit_hr_{_hour_label(h)}",
-                    {"capital_sl_pct": csl, "capital_usd": _CAPITAL_USD, "fixed_exit_hour_ist": h},
-                ))
     if dataset == "price_match":
         # 3-way hybrid: cap_sl × premium_sl × exit_hr (3 × 3 × 14 = 126).
         for csl in _CAPITAL_SL_PCTS:
