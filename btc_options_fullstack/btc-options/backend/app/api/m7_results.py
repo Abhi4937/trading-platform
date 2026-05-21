@@ -55,13 +55,19 @@ PATHS_GLOB_PRICE_MATCHED = os.path.join(M7_BASE_DIR,
 
 def _trades_path_for_dataset(dataset: str) -> str:
     """Resolve the on-disk trades parquet for the requested dataset.
-    For delta_match: prefer enriched, fall back to plain.
+    For delta_match: prefer enriched when it is at least as fresh as plain
+    (mtime enriched ≥ mtime plain). After a backtester --append run the plain
+    file is newer → we fall back to it automatically until re-enrichment runs.
     For price_match: single canonical path (no enriched variant for v1).
     """
     if dataset == "price_match":
         return TRADES_PATH_PRICE_MATCHED
-    return (TRADES_ENRICHED_PATH
-            if os.path.exists(TRADES_ENRICHED_PATH) else TRADES_PATH)
+    if os.path.exists(TRADES_ENRICHED_PATH):
+        enriched_mtime = os.path.getmtime(TRADES_ENRICHED_PATH)
+        plain_mtime = os.path.getmtime(TRADES_PATH) if os.path.exists(TRADES_PATH) else 0.0
+        if enriched_mtime >= plain_mtime:
+            return TRADES_ENRICHED_PATH
+    return TRADES_PATH
 
 
 def _paths_glob_for_dataset(dataset: str) -> str:
