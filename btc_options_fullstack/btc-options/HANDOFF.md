@@ -1,6 +1,37 @@
 # Handoff Log
 
 ## Last Session
+**Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-21 (Session 36 — production bug fix, test suite cleanup, E2E data validation)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 36 — Shipped (committed + pushed)
+
+**Commit `1db114a`** — `fix(m7): fix _unflatten_after_load rule_label bug + add hashlib import + update tests for 110-rule grid`
+- **CRITICAL production bug**: `_unflatten_after_load` used `startswith("rule_")` which matched
+  `rule_label` column and silently dropped it from every grid loaded from parquet.
+  Result: `KeyError: 'rule_label'` in `losses_distribution?scope=best_combo`, `rule_comparison`, etc.
+  **Fix**: explicit whitelist `frozenset({"rule_premium_sl_pct", "rule_max_profit_pct", "rule_margin_target_pct", "rule_fixed_exit_hour_ist"})`
+- Fixed missing `import hashlib` in `m7_best_combo.py`
+- Tests updated in 6 files for Session 35 changes (110-rule grid, dataset= propagation, FastAPI Query defaults, _TRADES_BY_DATASET, _GRID_STATE_BY_DATASET)
+- Capital_sl test marked `@pytest.mark.skip` (deferred to Capital Mode session)
+
+**Commit `b278bd4`** — `chore(tests): remove orphaned test_m7_best_combo_hybrid.py`
+- Hybrid test imported `bc._PCT_GRID` which was removed → collection error blocked all 292 tests
+- Deleted since no hybrid routes are registered in the API
+
+### Session 36 — Test suite result: **292 passed, 17 skipped, 0 failed** ✅
+
+### Session 36 — E2E data validity: all clear ✅
+- Grid: 110 rules × 81,840 cells; all 10 IV bands serving data
+- `rule_label` confirmed present in: `iv_band_best_combo`, `rule_comparison` (110 rows, 0 null), `single_combo_simulation`, `cross_band_check`
+- `losses_distribution?scope=best_combo` ran to 100% completion without `KeyError`
+- Trade counts consistent: 13,703 across all endpoints
+- All 110 exit-cache parquets verified present (SHA1-keyed)
+
+---
+
+## Previous Session
 **Who:** Claude (Opus 4.7)
 **Date:** 2026-05-21 (Session 35 — cap_sl/capital_target stripped, 110-rule grid rebuilt, backend crash fixed)
 **Branch:** `mainbranch-gemini_claude`
