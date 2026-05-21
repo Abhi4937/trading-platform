@@ -256,6 +256,7 @@ Bash `export` or inline `VAR=value command` syntax — not PowerShell `$env:`.
 ### Model routing (opusplan)
 - **Plan mode** (`/plan`, `/opusplan`) → runs on **Opus** (planning + verification).
 - **Execute mode** (normal session, after plan approval) → runs on **Sonnet** (implement + tests).
+- **Error diagnosis / traceback analysis / root-cause investigation / issue solving** → always **Opus**. Do not delegate to subagents or switch to a lighter model for these tasks.
 - The model is selected by the harness automatically; do not try to switch mid-task.
 
 ### What counts as a non-trivial change (requires /plan first)
