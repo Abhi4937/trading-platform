@@ -70,10 +70,16 @@ def _trades_path_for_dataset(dataset: str) -> str:
     return TRADES_PATH
 
 
+PATHS_FLAT = os.path.join(M7_BASE_DIR, "m7_paths_flat.parquet")
+PATHS_FLAT_PRICE_MATCHED = os.path.join(M7_BASE_DIR, "m7_paths_price_matched_flat.parquet")
+
+
 def _paths_glob_for_dataset(dataset: str) -> str:
     if dataset == "price_match":
-        return PATHS_GLOB_PRICE_MATCHED
-    return PATHS_GLOB
+        flat = PATHS_FLAT_PRICE_MATCHED
+        return flat if os.path.exists(flat) else PATHS_GLOB_PRICE_MATCHED
+    flat = PATHS_FLAT
+    return flat if os.path.exists(flat) else PATHS_GLOB
 
 
 # Lazy module-level cache — auto-reloads when the parquet file changes on disk.
@@ -695,9 +701,13 @@ def _build_fallback_row_for_friday(
     # Sat 17:30 IST = Sat 12:00 UTC = Friday midnight UTC + 86400 + 43200 = + 129600
     _hard_cap_ts = friday_ts_utc + 129600
 
-    # Try partition-specific path first (avoids scanning all friday dirs).
-    friday_path = paths_glob.replace("friday_date=*", f"friday_date={friday_str}")
-    use_path = friday_path if os.path.exists(friday_path) else paths_glob
+    # Flat parquet has no partition dirs — use it directly with a WHERE clause.
+    # Hive-glob path: try the specific friday partition first for efficiency.
+    if "friday_date=*" not in paths_glob:
+        use_path = paths_glob  # flat parquet
+    else:
+        friday_path = paths_glob.replace("friday_date=*", f"friday_date={friday_str}")
+        use_path = friday_path if os.path.exists(friday_path) else paths_glob
 
     friday_pool = trades_df[trades_df["friday_date_ist"].astype(str) == friday_str]
     if friday_pool.empty:
