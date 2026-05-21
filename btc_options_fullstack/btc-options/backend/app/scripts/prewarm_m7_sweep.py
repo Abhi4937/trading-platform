@@ -1,7 +1,11 @@
 """One-shot pre-warm script for M7 Sweep exit caches (Part F).
 
-Warms the per-rule exit_cache for all 193 delta_match rules, then emits
+Warms the per-rule exit_cache for all delta_match rules, then emits
 exit_cache/delta_match/_INDEX.json for per-rule discoverability (Part E).
+
+Current delta_match grid: 295 rules
+  = 175 premium_sl + 3 cap_sl baselines + 15 cap_sl×premium_sl
+  + 30 cap_sl×max_profit + 30 cap_sl×margin_target + 42 cap_sl×exit_hr
 
 Coverage and pivot disk-caches (Parts A and B) warm on first user request
 and then persist automatically — no explicit pre-warm needed here.
@@ -21,7 +25,7 @@ Monitor progress:
     docker logs -f <container_name>
     tail -f /logs/prewarm_<timestamp>.log
 
-ETA: ~3-4 h on a shrunken 13k-row pool (193 rules × ~45-60s cold each).
+ETA: ~295 rules × ~2 min cold each ≈ 10 h total; incremental runs skip cached rules.
 """
 from __future__ import annotations
 
