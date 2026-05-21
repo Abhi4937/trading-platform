@@ -1,70 +1,98 @@
 # Handoff Log
 
 ## Last Session
-**Who:** Claude (Sonnet 4.6)
-**Date:** 2026-05-21 (Session 33 — M7 Sweep 193-rule expansion Parts H/E/F complete; Part G backfill running)
+**Who:** Claude (Opus 4.7)
+**Date:** 2026-05-21 (Session 35 — cap_sl/capital_target stripped, 110-rule grid rebuilt, backend crash fixed)
 **Branch:** `mainbranch-gemini_claude`
 
-### Session 33 — Shipped (committed)
+### Session 35 — Shipped (committed + pushed)
 
-**Commit `4223b51`** — `feat(m7): 193-rule grid + expiry/delta filters + disk caches + remove v7 zigzag`
-- Parts D, G, A, B, C of M7 Sweep expansion plan (see plan file for details)
+**Commit `ab4de74`** — `feat(m7): drop cap_sl/capital_target from delta_match grid (110 rules) + remove hybrid module`
+- Removed `_CAPITAL_TARGET_PCTS`, `_CAPITAL_SL_PCTS`, `_CAPITAL_USD` constants from `m7_best_combo.py`
+- Rewrote `_rule_variants("delta_match")` from 200 → 110 rules:
+  - Kept: 5 baselines + 35 margin_target (5×7) + 70 exit_hr (5×14)
+  - Removed: 15 capital_target + 90 cap_sl variants (all combinations)
+- Removed `m7_hybrid_results, m7_best_combo_hybrid` from `backend/app/main.py`
+  (hybrid module imported `bc._PCT_GRID` which was removed → caused boot AttributeError crash)
+- **Capital Mode deferred**: cap_sl was semantically incoherent — $1000 capital basis
+  vs 100-lot position using ~$132 margin. Thresholds never represent realistic deploy.
+  Proper fix: K-scaled per-trade lot sizing (`K_i = floor(capital × deploy_pct/margin_i)`)
+  with re-scanned paths. Deferred to future session.
 
-**Commit `7b12bfb`** — `feat(m7): Part H deadline-fallback augmentation + Part E/F index + prewarm`
-- Part H: `_resolve_deadline_fallback_trades()` + `_build_fallback_row_for_friday()` added to `m7_results.py`. Tags all strict rows `is_fallback=False`. Synthesizes fallback trades at Sat 12:00 IST for completely dark fridays (rare; fast-paths when all covered). Back-compat: `_load_exit_cache_disk` adds `is_fallback=False` for old parquets.
-- Part E: `_emit_index()` in prewarm script writes `exit_cache/<dataset>/_INDEX.json`
-- Part F: `backend/app/scripts/prewarm_m7_sweep.py` — checkpoint-safe prewarm for 193 delta_match rules with skip-if-exists
+**Commit `9169548`** — `fix(m7): fix _flatten_for_parquet to handle fixed_exit_hour_ist + pure-NaN column`
+- Root cause of "Failed to persist M7 best-combo grid: invalid error value specified":
+  `rule_max_profit_pct` was all-None after removing max_profit → PyArrow couldn't infer schema
+- Added `rule_fixed_exit_hour_ist` column (was missing — exit_hr rules couldn't round-trip)
+- All 3 rule columns cast to `float64` explicitly (None → NaN, pyarrow handles cleanly)
+- `_unflatten_after_load` made schema-agnostic (reads whatever `rule_*` columns exist)
 
-**Part G backfill RUNNING** (container `backfill_may_1779305520`):
-- `python -m app.analytics.m7_batch_backtester --since 2026-04-24 --append`
-- 4 new fridays: 2026-04-24 through 2026-05-15
-- Uses restricted TARGET_DELTAS (0.25, 0.30, 0.40, 0.50) + MAX_EXPIRY_DTE_DAYS=10
-- Monitor: `docker logs -f backfill_may_1779305520`
-- ETA: ~20-30 min
+**Commit `c1283ba`** — `docs(claude): add Opus rule for error diagnosis + traceback analysis`
+- CLAUDE.md updated: error diagnosis / traceback / root-cause investigation → always Opus
+- Memory `feedback_model_per_task.md` updated with same rule
 
-### NEXT STEPS (in order — do NOT start Part I or F until backfill completes)
+### 110-rule grid — COMPLETE ✅
 
-1. **Wait for backfill**: `docker logs -f backfill_may_1779305520` until it exits
-2. **Verify backfill**: `docker exec docker-backend-1 python -c "from app.api.m7_results import _load_trades; df=_load_trades('delta_match'); print(len(df), df['friday_date_ist'].nunique())"`
-   Expected: ~16,576 rows (4 new fridays × ~1,120 cells), 125 fridays, latest=2026-05-15
-3. **Launch Part I grid rebuild** (~4-5h unattended):
+- **110 rules, 81,840 cells**, 14 MB parquet at `m7_best_combo_grid_v6.parquet`
+- Zero cap/capital_target labels
+- API live and serving data
+
+### NEXT STEPS (in order)
+
+1. **Prewarm exit caches** (optional but recommended — eliminates ~30s cold start on first rule click):
    ```bash
-   docker compose run -d --rm --name grid_rebuild_$(date +%s) backend python -m app.scripts.build_m7_best_combo_grid
+   cd /c/dev/trading_platform/btc_options_fullstack/btc-options/docker
+   MSYS_NO_PATHCONV=1 docker compose run -d --rm \
+     --name prewarm_$(date +%s) \
+     -v "C:/Users/Abhis/btc-data/logs:/logs" \
+     backend sh -c "python -m app.scripts.prewarm_m7_sweep > /logs/prewarm_$(date +%s).log 2>&1"
    ```
-4. **After grid rebuild finishes**, launch Part F prewarm (~3-4h unattended):
-   ```bash
-   docker compose run -d --rm --name prewarm_$(date +%s) backend python -m app.scripts.prewarm_m7_sweep
-   ```
-5. **Verify** (after prewarm):
-   - 193 exit_caches: `docker exec docker-backend-1 ls /home/abhis/btc-data/derived/m7/exit_cache/delta_match/*.parquet | wc -l`
-   - Grid freshness: grid mtime > trades mtime
-   - Cold-start < 500ms for iv_band_best_combo
+   Expected: 110 exit-cache parquets at `exit_cache/delta_match/`. ~30-60 min.
+
+2. **Capital Mode design (future session)** — proper K-scaled per-trade lot sizing:
+   - `K_i = floor(capital_usd × deploy_pct/100 / (margin_used_usd_at_entry_i / 100)) / 100`
+   - Requires re-scanning per-minute paths with K-adjusted thresholds per trade (cap_sl changes exit timestamps — can't just scale post-hoc)
+   - `margin_used_usd_at_entry` already in `keep_trade_cols` at `m7_results.py:1105`
+
+3. **Phase 3 hybrids (future session)** — cap_sl × premium_sl (15 rules) + 3-way combos
 
 ### Verification commands
 ```bash
 # Rule count
 docker exec docker-backend-1 python -c "from app.api.m7_best_combo import _rule_variants; print(len(_rule_variants('delta_match')))"
-# Expected: 193
+# Expected: 110
 
-# Trade count after backfill
+# Grid stats
+docker exec docker-backend-1 python -c "
+import pandas as pd
+g = pd.read_parquet('/home/abhis/btc-data/derived/m7/m7_best_combo_grid_v6.parquet')
+print('cells:', len(g), 'rules:', g['rule_label'].nunique(), 'cap_labels:', g['rule_label'].str.contains('cap').sum())
+"
+# Expected: cells=81840, rules=110, cap_labels=0
+
+# Trade pool (post-filter)
 docker exec docker-backend-1 python -c "
 from app.api.m7_results import _load_trades
 df = _load_trades('delta_match')
-print('rows:', len(df), 'fridays:', df['friday_date_ist'].nunique())
-print('latest:', df['friday_date_ist'].max())
+print('rows:', len(df), 'fridays:', df['friday_date_ist'].nunique(), 'latest:', df['friday_date_ist'].max())
 "
-# Expected: ~16576 rows, 125 fridays, latest=2026-05-15
-
-# is_fallback column present
-docker exec docker-backend-1 python -c "
-from app.api.m7_results import _derive_exits
-from app.api.m7_best_combo import _rule_variants
-_, rule = _rule_variants('delta_match')[0]
-df = _derive_exits({}, rule)
-print('is_fallback present:', 'is_fallback' in df.columns)
-print('n_fallback:', df['is_fallback'].sum())
-"
+# Expected: 13703 rows, 125 fridays, latest=2026-05-15
 ```
+
+---
+
+### Session 34 — Shipped (committed)
+
+**Commit `1147679`** — `fix(m7): prefer newer parquet (mtime) in _trades_path_for_dataset after --append backfill`
+- After `--append` backtester run, `m7_trades.parquet` (plain, 125 fridays) was newer than `m7_trades_enriched.parquet` (121 fridays). Old code always preferred enriched when it existed. Fix compares mtime: use enriched only when `enriched_mtime >= plain_mtime`.
+- Verified: `_load_trades('delta_match')` now returns 13,703 rows, 125 fridays, latest=2026-05-15.
+
+### Session 33 — Already completed
+
+**Commit `4223b51`** — Parts D, G, A, B, C of M7 Sweep expansion plan (193 rules, filters, disk caches, no v7 zigzag)
+
+**Commit `7b12bfb`** — Parts H (deadline-fallback), E (_INDEX.json), F (prewarm script)
+
+**Part G backfill** — COMPLETE. 4 new fridays (2026-04-24 → 2026-05-15), 125 total. Trades: 13,703 rows (filtered pool with _KEPT_EXPIRY_BUCKETS + _KEPT_DELTAS).
 
 ---
 
