@@ -63,7 +63,7 @@ def patched_derive(monkeypatch):
     becomes the synthetic universe scale too."""
     df_holder = {"df": None}
 
-    def _stub(filters: dict, exit_rule: dict) -> pd.DataFrame:
+    def _stub(filters: dict, exit_rule: dict, **kwargs) -> pd.DataFrame:
         return df_holder["df"].copy()
 
     monkeypatch.setattr(m7_results, "_derive_exits", _stub)

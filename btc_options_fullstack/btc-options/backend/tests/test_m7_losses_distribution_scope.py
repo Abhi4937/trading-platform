@@ -32,7 +32,7 @@ def _call(**kwargs):
         loss_cause=None,
         include_trades=False, trades_limit=50, trades_offset=0,
         trades_sort="pnl_asc", only_sl_hits=False,
-        cells=None,
+        cells=None, dataset="delta_match",
     )
     defaults.update(kwargs)
     return m7_results.get_losses_distribution(**defaults)
@@ -112,7 +112,7 @@ def patched_derive(monkeypatch):
     The cold-cache warming path has its own dedicated test below."""
     state = {"df": _make_universe()}
 
-    def _stub(filters: dict, exit_rule: dict) -> pd.DataFrame:
+    def _stub(filters: dict, exit_rule: dict, **kwargs) -> pd.DataFrame:
         df = state["df"].copy()
         for col, raw in (filters or {}).items():
             if raw in (None, ""):
@@ -183,6 +183,7 @@ def patched_best_combo(monkeypatch):
         "started_at": 0, "finished_at": 0, "error": None,
     }
     monkeypatch.setattr(bc, "_GRID_STATE", state)
+    monkeypatch.setattr(bc, "_GRID_STATE_BY_DATASET", {"delta_match": state, "price_match": bc._new_grid_state()})
     return state
 
 
@@ -310,6 +311,7 @@ def test_scope_best_combo_warming_returns_empty_with_progress(monkeypatch,
         "started_at": 0, "finished_at": None, "error": None,
     }
     monkeypatch.setattr(bc, "_GRID_STATE", state)
+    monkeypatch.setattr(bc, "_GRID_STATE_BY_DATASET", {"delta_match": state, "price_match": bc._new_grid_state()})
     out = _call(scope="best_combo",
                                               ranking="credit")
     assert out["n_total"] == 0
@@ -421,7 +423,7 @@ def test_cells_param_cold_cache_returns_warming(monkeypatch):
     # rule_dict without actually spawning threads in the test.
     seen: list[dict] = []
     monkeypatch.setattr(m7_results, "_warmup_rule_async",
-                        lambda rd: seen.append(dict(rd)))
+                        lambda rd, **kwargs: seen.append(dict(rd)))
     # Stub `_derive_exits` defensively — should NOT be called on the cold
     # path because the precheck short-circuits before the per-cell loop.
     def _no_derive(*_a, **_k):

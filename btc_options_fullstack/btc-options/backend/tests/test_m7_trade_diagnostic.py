@@ -124,7 +124,7 @@ def patched_derive(monkeypatch):
     Tests overwrite `state['rows']` with their own list."""
     state = {"rows": [_row()]}
 
-    def _stub(filters: dict, exit_rule: dict) -> pd.DataFrame:
+    def _stub(filters: dict, exit_rule: dict, **kwargs) -> pd.DataFrame:
         return pd.DataFrame(state["rows"])
 
     monkeypatch.setattr(m7_results, "_derive_exits", _stub)

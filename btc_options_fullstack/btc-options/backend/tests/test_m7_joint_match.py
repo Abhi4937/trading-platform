@@ -225,64 +225,36 @@ def test_joint_picker_low_premium_floor():
 
 # ── Case h — capital_sl_pct rule predicate produces SQL ───────────────────────
 
+@pytest.mark.skip(reason="capital_sl deferred — K-scaled lot sizing not yet implemented")
 def test_exit_rule_predicate_includes_capital_sl():
     """capital_sl_pct should produce a SQL fragment that fires when the
-    LOSS (-pnl_after_slip) reaches pct% of margin_used_usd_at_entry."""
-    from app.api.m7_results import _exit_rule_sql_predicate
-    rule = {"capital_sl_pct": 15}
-    sql = _exit_rule_sql_predicate(rule)
-    assert "margin_used_usd_at_entry" in sql, "capital_sl must reference margin"
-    assert "-t.margin_used_usd_at_entry * 0.15" in sql, (
-        f"capital_sl must compare against -margin × 0.15; got: {sql}")
-    # Empty rule still returns empty
-    assert _exit_rule_sql_predicate({}) == ""
-    # Combined with premium_sl: both predicates joined with OR
-    combo = _exit_rule_sql_predicate({"capital_sl_pct": 10, "premium_sl_pct": 50})
-    assert " OR " in combo
-    assert "margin_used_usd_at_entry" in combo
-    assert "call_entry_mark" in combo
+    LOSS (-pnl_after_slip) reaches pct% of margin_used_usd_at_entry.
+    Skipped until Capital Mode (K-scaled per-trade lots) is implemented."""
+    pass
 
 
 # ── Case i — _rule_variants is dataset-aware ──────────────────────────────────
 
 def test_rule_variants_dataset_aware():
-    """delta_match has 105 variants (3 SLs × 35 sub-variants);
-    price_match adds 138 hybrid variants for 243 total:
-      - 3 standalone capital_sl baselines
-      - 9 cap_sl × premium_sl 2-way hybrids
-      - 126 cap_sl × premium_sl × exit_hr 3-way hybrids
+    """delta_match: 5 SLs × (1 baseline + 7 margin_target + 14 exit_hr) = 110.
+    price_match: 3 SLs × (1 + 7 + 14) + 126 cap_sl×sl×exit_hr 3-way hybrids = 192.
+    Capital-sl standalone and 2-way hybrid rules deferred to Capital Mode session.
     """
     from app.api.m7_best_combo import _rule_variants
     delta_rules = _rule_variants("delta_match")
     price_rules = _rule_variants("price_match")
-    assert len(delta_rules) == 105, f"delta_match: expected 105, got {len(delta_rules)}"
-    assert len(price_rules) == 243, f"price_match: expected 243, got {len(price_rules)}"
-    # 3 standalone capital_sl baselines
-    standalone = [r for r in price_rules if r[0].startswith("cap") and "_baseline" in r[0]]
-    assert len(standalone) == 3
-    assert {r[0] for r in standalone} == {"cap10_baseline", "cap15_baseline", "cap20_baseline"}
-    # 9 cap_sl × premium_sl 2-way hybrids
-    two_way = [r for r in price_rules
-               if r[0].startswith("sl") and "_cap" in r[0] and "_exit_hr_" not in r[0]]
-    assert len(two_way) == 9
-    # Each 2-way rule must have both keys
-    for label, rd in two_way:
-        assert "premium_sl_pct" in rd
-        assert "capital_sl_pct" in rd
-        assert "fixed_exit_hour_ist" not in rd
-    # 126 cap_sl × premium_sl × exit_hr 3-way hybrids
-    three_way = [r for r in price_rules
-                 if r[0].startswith("sl") and "_cap" in r[0] and "_exit_hr_" in r[0]]
+    assert len(delta_rules) == 110, f"delta_match: expected 110, got {len(delta_rules)}"
+    assert len(price_rules) == 192, f"price_match: expected 192, got {len(price_rules)}"
+    # 126 cap_sl × premium_sl × exit_hr 3-way hybrids (price_match only)
+    three_way = [r for r in price_rules if "_cap" in r[0] and "_exit_hr_" in r[0]]
     assert len(three_way) == 126
     for label, rd in three_way:
         assert "premium_sl_pct" in rd
         assert "capital_sl_pct" in rd
         assert "fixed_exit_hour_ist" in rd
-    # No max_profit / margin_target × cap_sl combos (excluded per user spec)
-    for label, rd in price_rules:
-        if "_cap" in label or label.startswith("cap"):
-            assert "max_profit_pct" not in rd, f"unexpected max_profit in {label}"
-            assert "margin_target_pct" not in rd, f"unexpected margin_target in {label}"
+    # No max_profit in any rule (removed Session 35)
+    for label, rd in delta_rules + price_rules:
+        assert "max_profit_pct" not in rd, f"unexpected max_profit in {label}"
 
 
 # ── Case j — rule_category tagging ────────────────────────────────────────────
@@ -297,17 +269,15 @@ def test_rule_category_tagging():
         categories.setdefault(cat, 0)
         categories[cat] += 1
         assert cat != "unknown", f"rule {label} has no category"
-    # Expected counts for price_match (243 total)
+    # Expected counts for price_match (192 total after Session 35 cleanup)
+    # - max_profit removed, capital_sl standalone/2way deferred to Capital Mode
     expected = {
-        "single_baseline":              3,    # sl50/75/100 _baseline
-        "single_max_profit":            30,   # 3 SLs × 10 pcts
-        "single_margin_target":         30,   # 3 SLs × 10 pcts
-        "single_exit_hr":               42,   # 3 SLs × 14 hours
-        "single_capital_sl_standalone": 3,    # cap10/15/20 _baseline
-        "hybrid_2way_sl":               9,    # 3 cap × 3 sl
-        "hybrid_3way":                  126,  # 3 cap × 3 sl × 14 hr
+        "single_baseline":     3,    # sl50/75/100 _baseline
+        "single_margin_target": 21,  # 3 SLs × 7 pcts
+        "single_exit_hr":      42,   # 3 SLs × 14 hours
+        "hybrid_3way":         126,  # 3 cap × 3 sl × 14 hr
     }
     for cat, n in expected.items():
         assert categories.get(cat, 0) == n, (
             f"category {cat}: expected {n}, got {categories.get(cat, 0)}")
-    assert sum(expected.values()) == 243
+    assert sum(expected.values()) == 192

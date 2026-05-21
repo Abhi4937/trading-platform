@@ -23,6 +23,7 @@ process lifetime; backend restart re-warms.
 from __future__ import annotations
 
 from typing import Optional
+import hashlib
 import json
 import logging
 import math
@@ -497,8 +498,13 @@ def _unflatten_after_load(df: pd.DataFrame) -> pd.DataFrame:
     """Inverse of `_flatten_for_parquet` — reconstruct nested rule dict."""
     if df.empty:
         return df
-    # Support both old schema (rule_max_profit_pct) and new (rule_fixed_exit_hour_ist)
-    rule_cols = [c for c in df.columns if c.startswith("rule_")]
+    # Support both old schema (rule_max_profit_pct) and new (rule_fixed_exit_hour_ist).
+    # Exclude rule_label — it's a plain string column, not a rule-dict field.
+    _RULE_FIELD_COLS = frozenset({
+        "rule_premium_sl_pct", "rule_max_profit_pct",
+        "rule_margin_target_pct", "rule_fixed_exit_hour_ist",
+    })
+    rule_cols = [c for c in df.columns if c in _RULE_FIELD_COLS]
     if not rule_cols:
         return df
     out = df.copy()

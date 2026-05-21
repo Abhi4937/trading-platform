@@ -191,8 +191,8 @@ def test_endpoint_warming_returns_immediately(monkeypatch):
     monkeypatch.setattr(bc, "_COVERAGE_CACHE", {})
     monkeypatch.setattr(bc, "_COVERAGE_WARMUP_TASKS", {})
     # Force trades-mtime stable across calls so cache_key matches.
-    monkeypatch.setattr(m7r, "_TRADES_MTIME", 1234.0)
-    monkeypatch.setattr(m7r, "_load_trades", lambda: pd.DataFrame())
+    monkeypatch.setattr(m7r, "_TRADES_BY_DATASET", {"delta_match": (None, 1234.0)})
+    monkeypatch.setattr(m7r, "_load_trades", lambda dataset: pd.DataFrame())
 
     # Record warmup calls without spawning real threads.
     seen: list[tuple] = []
@@ -208,7 +208,7 @@ def test_endpoint_warming_returns_immediately(monkeypatch):
         max_drop_peak_to_trough_pct=None,
         min_n_trades=5, min_win_rate=None, max_losing_streak=None,
         pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
-        entry_hours=None, coverage_mode="force_fit",
+        entry_hours=None, coverage_mode="force_fit", dataset="delta_match",
     )
     assert out["status"] == "warming"
     assert out["rows"] == []
@@ -231,7 +231,7 @@ def test_endpoint_warming_returns_immediately(monkeypatch):
         max_drop_peak_to_trough_pct=None,
         min_n_trades=5, min_win_rate=None, max_losing_streak=None,
         pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
-        entry_hours=None, coverage_mode="force_fit",
+        entry_hours=None, coverage_mode="force_fit", dataset="delta_match",
     )
     assert out2["status"] == "warming"
 
@@ -248,12 +248,13 @@ def test_endpoint_cache_hit_returns_cached_payload(monkeypatch):
          "entry_hour_ist": 23, "rule_label": "sl100_baseline",
          "rule": {"premium_sl_pct": 100}, "avg_net_pnl": 50.0, "n_trades": 10},
     ])
-    monkeypatch.setattr(m7r, "_TRADES_MTIME", 9999.0)
-    monkeypatch.setattr(m7r, "_load_trades", lambda: pd.DataFrame())
+    monkeypatch.setattr(m7r, "_TRADES_BY_DATASET", {"delta_match": (None, 9999.0)})
+    monkeypatch.setattr(m7r, "_load_trades", lambda dataset: pd.DataFrame())
 
     sentinel = {"status": "ready", "rows": [{"_cached": True}],
                 "coverage_mode": "force_fit"}
     cache_key = (
+        "delta_match",
         "force_fit", "avg_net_pnl", None, 5.0, "all",
         None, 100.0, None, None, None, None, 50.0, None, None, 5, None,
         None, "by_hour", None, None, None, 9999.0,
@@ -273,7 +274,7 @@ def test_endpoint_cache_hit_returns_cached_payload(monkeypatch):
         max_drop_peak_to_trough_pct=None,
         min_n_trades=5, min_win_rate=None, max_losing_streak=None,
         pick_mode="by_hour", expiry_buckets=None, delta_targets=None,
-        entry_hours=None, coverage_mode="force_fit",
+        entry_hours=None, coverage_mode="force_fit", dataset="delta_match",
     )
     assert out is sentinel
     assert spawned == []
