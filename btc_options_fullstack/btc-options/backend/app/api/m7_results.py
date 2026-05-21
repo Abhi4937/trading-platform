@@ -521,14 +521,11 @@ def _exit_rule_sql_predicate(rule: dict) -> str:
         )
     if rule.get("capital_sl_pct") is not None:
         pct = float(rule['capital_sl_pct'])
-        # Capital SL: fires when LOSS reaches pct% of margin deployed for the
-        # trade (margin = capital-deployed per trade, used as a proxy for the
-        # trader's at-risk capital). Mirror of margin_target_pct on the loss
-        # side. pnl_after_slip is signed (negative = loss).
-        parts.append(
-            f"({pnl_after_slip} <= -t.margin_used_usd_at_entry * {pct / 100.0} "
-            f"AND t.margin_used_usd_at_entry > 0)"
-        )
+        # Capital SL: fires when loss ≥ pct% of total allocated capital.
+        # Uses rule['capital_usd'] (not per-trade margin) as the basis.
+        capital_usd = float(rule.get('capital_usd', 1000.0))
+        threshold = capital_usd * pct / 100.0
+        parts.append(f"({pnl_after_slip} <= -{threshold})")
     if not parts:
         return ""
     return " OR ".join(parts)
@@ -829,8 +826,8 @@ def _build_fallback_row_for_friday(
         if (not fired and margin_target_pct is not None and margin_usd > 0
                 and gross >= margin_usd * float(margin_target_pct) / 100.0):
             fired = True
-        if (not fired and capital_sl_pct is not None and margin_usd > 0
-                and gross <= -margin_usd * float(capital_sl_pct) / 100.0):
+        if (not fired and capital_sl_pct is not None
+                and gross <= -float(exit_rule.get('capital_usd', 1000.0)) * float(capital_sl_pct) / 100.0):
             fired = True
         if fired:
             exit_ts = int(pr["ts"])

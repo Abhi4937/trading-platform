@@ -95,11 +95,11 @@ _FIXED_HOURS: list[float] = [5.0, 6.0, 7.0,
                               8.0, 9.0, 10.0, 11.0, 12.0, 13.0,
                               14.0, 15.0, 16.0, 17.0, 17.4833]
 
-# Capital-based SL (LOSS-side): fires when -pnl_after_slip ≥ margin × pct/100.
-# Symmetric to margin_target_pct (which is profit-side). Only added to the
-# price_match grid for now — keeps the existing 105-rule delta-match v6
-# grid valid (no rebuild needed).
+# Capital-based SL: fires when loss ≥ pct% of total allocated capital.
+# Capital basis is fixed at _CAPITAL_USD (not per-trade margin).
+# cap10 → fires at $100 loss, cap15 → $150, cap20 → $200.
 _CAPITAL_SL_PCTS = [10, 15, 20]
+_CAPITAL_USD = 1000.0  # total capital allocated to this strategy
 
 
 def _hour_label(h: float) -> str:
@@ -147,13 +147,13 @@ def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
                         {"premium_sl_pct": sl, "fixed_exit_hour_ist": h}))
     # Standalone cap_sl baselines — both datasets.
     for csl in _CAPITAL_SL_PCTS:
-        out.append((f"cap{csl}_baseline", {"capital_sl_pct": csl}))
+        out.append((f"cap{csl}_baseline", {"capital_sl_pct": csl, "capital_usd": _CAPITAL_USD}))
     # 2-way hybrid: cap_sl × premium_sl — both datasets.
     for csl in _CAPITAL_SL_PCTS:
         for sl in sl_grid:
             out.append((
                 f"sl{sl}_cap{csl}",
-                {"premium_sl_pct": sl, "capital_sl_pct": csl},
+                {"premium_sl_pct": sl, "capital_sl_pct": csl, "capital_usd": _CAPITAL_USD},
             ))
     if dataset == "price_match":
         # 3-way hybrid: cap_sl × premium_sl × exit_hr (3 × 3 × 14 = 126).
@@ -164,6 +164,7 @@ def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
                         f"sl{sl}_cap{csl}_exit_hr_{_hour_label(h)}",
                         {"premium_sl_pct": sl,
                          "capital_sl_pct": csl,
+                         "capital_usd": _CAPITAL_USD,
                          "fixed_exit_hour_ist": h},
                     ))
     return out
