@@ -470,16 +470,25 @@ def _build_grid(
 
 def _flatten_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
     """The grid stores `rule` as a dict — pyarrow can't write nested dicts
-    natively. Flatten to three rule_* numeric columns before persisting."""
+    natively. Flatten to explicit float columns before persisting.
+
+    Columns written (all float64, NaN when not applicable):
+      rule_premium_sl_pct, rule_margin_target_pct, rule_fixed_exit_hour_ist
+    max_profit_pct is intentionally omitted — removed from all rule variants.
+    """
     if df.empty or "rule" not in df.columns:
         return df
+    import numpy as np
     out = df.copy()
-    out["rule_premium_sl_pct"] = out["rule"].apply(
-        lambda r: (r or {}).get("premium_sl_pct"))
-    out["rule_max_profit_pct"] = out["rule"].apply(
-        lambda r: (r or {}).get("max_profit_pct"))
-    out["rule_margin_target_pct"] = out["rule"].apply(
-        lambda r: (r or {}).get("margin_target_pct"))
+    _RULE_FIELDS = [
+        ("rule_premium_sl_pct",       "premium_sl_pct"),
+        ("rule_margin_target_pct",     "margin_target_pct"),
+        ("rule_fixed_exit_hour_ist",   "fixed_exit_hour_ist"),
+    ]
+    for col, key in _RULE_FIELDS:
+        out[col] = out["rule"].apply(
+            lambda r, k=key: (r or {}).get(k)
+        ).astype(float)  # None → NaN; pyarrow handles float64 NaN cleanly
     out = out.drop(columns=["rule"])
     return out
 
@@ -488,17 +497,27 @@ def _unflatten_after_load(df: pd.DataFrame) -> pd.DataFrame:
     """Inverse of `_flatten_for_parquet` — reconstruct nested rule dict."""
     if df.empty:
         return df
-    rule_cols = ["rule_premium_sl_pct", "rule_max_profit_pct", "rule_margin_target_pct"]
-    if not all(c in df.columns for c in rule_cols):
+    # Support both old schema (rule_max_profit_pct) and new (rule_fixed_exit_hour_ist)
+    rule_cols = [c for c in df.columns if c.startswith("rule_")]
+    if not rule_cols:
         return df
     out = df.copy()
 
-    def _build_rule(r):
+    _COL_TO_KEY = {
+        "rule_premium_sl_pct":       "premium_sl_pct",
+        "rule_max_profit_pct":       "max_profit_pct",
+        "rule_margin_target_pct":    "margin_target_pct",
+        "rule_fixed_exit_hour_ist":  "fixed_exit_hour_ist",
+    }
+
+    def _build_rule(row):
         d = {}
-        for src, dst in zip(rule_cols, ["premium_sl_pct", "max_profit_pct", "margin_target_pct"]):
-            v = r.get(src)
-            if v is not None and not (isinstance(v, float) and math.isnan(v)):
-                d[dst] = int(v) if dst != "premium_sl_pct" or v == int(v) else v
+        for col in rule_cols:
+            v = row.get(col)
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                continue
+            key = _COL_TO_KEY.get(col, col.replace("rule_", ""))
+            d[key] = v
         return d
 
     out["rule"] = out[rule_cols].to_dict(orient="records")
