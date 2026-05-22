@@ -496,6 +496,9 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
   useEffect(() => {
     let active = true;
     const ac = new AbortController();
+    // 300ms debounce: rapid filter changes restart the timer; only the last stable
+    // state actually triggers a fetch. Prevents 10 requests during a slider drag.
+    const DEBOUNCE_MS = 300;
 
     const tick = () => {
       if (!active) return;
@@ -571,9 +574,15 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
         })
         .finally(() => { if (active) setLoading(false); });
     };
-    tick();
+    // Debounce: wait 300ms; if deps change again within that window, clearTimeout
+    // and start over (no fetch fires until filters settle).
+    const debounceTimer = window.setTimeout(tick, DEBOUNCE_MS);
 
-    return () => { active = false; ac.abort(); };
+    return () => {
+      active = false;
+      window.clearTimeout(debounceTimer);
+      ac.abort();
+    };
   }, [primary, family, mode, secondary, tolerancePct,
       sizingMode, fixedLots,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
