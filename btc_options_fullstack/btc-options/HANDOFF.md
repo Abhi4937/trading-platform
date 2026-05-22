@@ -1,6 +1,138 @@
 # Handoff Log
 
 ## Last Session
+**Who:** Claude (Opus 4.7)
+**Date:** 2026-05-22 (Session 40 — Pivot Profile: 24min → 7s + per-band drill-downs)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 40 — UNCOMMITTED changes
+
+```
+backend/app/analytics/m7_pivot_profile.py   ← MAJOR rewrite (inline simulator + per-band drill-downs)
+backend/app/api/m7_pivot_profile.py         ← dropped _classify_winners_losers call, added version guard
+frontend/src/services/m7_api.ts             ← extended M7PivotProfileResult with 6 new fields
+frontend/src/components/m7/M7PivotProfilePanel.tsx ← 6-way toggle, per-band Spotlight grids, stacked mini-charts
+```
+
+### Session 40 — What was fixed
+
+#### 1. Pivot Profile speed bug (24min → 7s on cold rules, ~210× speedup)
+
+**Root cause**: `_classify_winners_losers` (in `m7_pivot_profile.py` API) called
+`_derive_exits({}, rule, dataset)` for every cell's rule. `_derive_exits` is
+keyed by rule alone — it always runs `_compute_all_exits` across ALL 13,703
+trades to populate the L2 cache parquet at `exit_cache/<dataset>/<sha1>.parquet`.
+For a non-grid rule (e.g. `sl100 + exit_hr 10`, not in the M7 Sweep's 110-rule
+pre-warm set), cold cost is 24+ minutes. The pivot panel only needs to classify
+the cell's ~5-130 trades, not all 13,703.
+
+**Fix**: New `_simulate_exit(...)` function in
+`backend/app/analytics/m7_pivot_profile.py` replicates the SQL predicate in
+`_exit_rule_sql_predicate` (m7_results.py:484) in Python — applied per-trade
+during the existing pivot partition walk. Uses path columns `gross_pnl_usd`,
+`call_mark`, `put_mark`, `spot` + per-trade trades-side meta (`call_entry_mark`,
+`credit_usd`, `margin_used_usd_at_entry`, `entry_slippage_call/put_usd`,
+`total_entry_cost_usd`, etc.) to find the first SL/profit/margin trigger or
+hour cap, then compute exit costs via the same `slippage_dollars_per_side` +
+`compute_brokerage_one_side` helpers `_add_exit_costs` uses.
+`is_win = net_pnl_estimate_usd > 0`.
+
+**Measured**:
+- 1-cell cold rule `sl100 + exit_hr 10`: 24m 28s → **7.0s**
+- 10-cell standard Best Combo payload: 222s/1527s → **67.3s**
+- Cache hit (in-memory): **69 ms**
+- Disk JSON persists; old-shape entries auto-rejected via
+  `_PIVOT_RESPONSE_VERSION = 2` guard in `_load_pivot_disk`.
+
+`_classify_winners_losers` is now unused (dead code at
+`backend/app/api/m7_pivot_profile.py:163-238`) — left in for one session in
+case the inline simulator drifts from canonical engine; safe to delete later.
+
+#### 2. Per-band drill-downs (replaces global Spotlight + global losers list)
+
+User requested: best winner **per band** (not global), worst-DD winner **per
+band**, losers **per band** — and chart views for each.
+
+**New response fields** (in `aggregate_pivot_profile` return dict):
+- `by_band_best_winner` — `{band: SegmentBlob}` for the best-net-PnL winner per band (degenerate 1-trade aggregate that the existing chart can render)
+- `by_band_worst_drawdown_winner` — same shape for the worst-min-MTM winner per band
+- `by_band_losers_individual` — `{band: [LoserSegmentBlob]}` where each blob = `{trade_id, friday, net_pnl, min/max_mtm, lots, segments: {Seg1..Seg5}}`. Used to render N mini-charts per band.
+- `best_winners_by_band` — `{band: TradeRecord}` for Spotlight cards
+- `worst_dd_winners_by_band` — same for the 10 worst-DD cards
+- `losers_list_by_band` — `{band: [TradeRecord]}` for the grouped losers table
+
+**Dropped** (old shape): `losers_list`, `best_winner`, `winner_worst_drawdown`.
+
+#### 3. Frontend UI (6-way toggle + per-band layouts)
+
+`M7PivotProfilePanel.tsx`:
+- View toggle expanded: `All | Winners | Losers | Best Win | Worst-DD Win | All Lose`
+- `PerBandSpotlight` component: grid of 10 cards (one per band) for each of the two spotlight kinds. Shown across all chart views. Click → diagnostic modal.
+- `LosersStackedMiniCharts` (used by `All Lose` view): each band gets its own section with a grid of mini-charts (one per losing trade). Each mini-chart = scaled-down `M7PivotProfileChart` rendering that single trade's 5-segment data.
+- `LosersListGrouped` (replaces the old global `LosersListTable`): the existing Losers view now shows the losers table grouped by band with a header per band.
+
+### Session 40 — UI verification PENDING
+
+UI was NOT visually verified this session — Playwright MCP got disconnected when
+I killed 4 leftover Node MCP processes from yesterday's session that were
+holding a stuck singleton lockfile. Killing those processes (PIDs 14888, 25024,
+28144, 32716) also took down the active Playwright MCP server for this session.
+
+**Next session must verify in UI:**
+1. Load M7 Sweep → scroll to Pivot Profile.
+2. Confirm 6 view buttons render (`All | Winners | Losers | Best Win | Worst-DD Win | All Lose`).
+3. `All` view → existing band-aggregate charts + "Best Winner per Band" + "Worst-DD Winner per Band" Spotlight grids visible above charts (10 cards each).
+4. `Best Win` view → each band's panel shows the band's best winner's actual segment markers (degenerate 1-trade aggregate).
+5. `Worst-DD Win` view → same with the band's worst-DD winner.
+6. `All Lose` view → stacked sections, one per band, each with grid of per-trade mini-charts (scaled-down M7PivotProfileChart).
+7. `Losers` view → `LosersListGrouped` table with per-band sections.
+8. Click any Spotlight card or loser row → `M7TradeDiagnosticModal` opens with correct trade.
+9. Change a cell in Best Combo table → Pivot Profile re-warms with new cell scope; <100ms after disk cache exists.
+
+### Session 40 — Verified via curl (no UI yet)
+
+| Check | Result |
+|---|---|
+| Backend rebuild + startup | ✅ |
+| 1-cell cold rule (`sl100 + exit_hr 10`, 28 trades) | ✅ 7.0s, n_w=26, n_l=2 |
+| 10-cell standard Best Combo (129 trades) | ✅ 67.3s, n_w=112, n_l=17 |
+| Cache hit in-memory | ✅ 69 ms |
+| Disk cache file written | ✅ 2 JSONs in `pivot_cache/` |
+| `best_winners_by_band` populated for all 10 bands | ✅ |
+| `worst_dd_winners_by_band` populated for all 10 bands | ✅ |
+| `losers_list_by_band` matches expected per-band counts (30-40=9, 20-30=7, 40-50=1) | ✅ |
+| `by_band_losers_individual` keys = 10 bands | ✅ |
+| Frontend type-check on `M7PivotProfilePanel.tsx` + `m7_api.ts` | ✅ (pre-existing errors elsewhere unrelated) |
+
+### Session 40 — Pre-existing known issues (unchanged)
+
+1. **`ds_mtime` NameError** in coverage warmup at `m7_best_combo.py:1734`
+2. **Cells-mode warming stuck at 0/8** on cold backend (resolves once DuckDB warms)
+3. **`missed_fridays` ERR_EMPTY_RESPONSE** — transient during backend warmup
+
+### Session 40 — Important context for next session
+
+- **Branch has uncommitted Gemini-cleanup changes** from a previous session in
+  addition to the Session 40 Pivot Profile changes. `git status` shows both.
+  Consider committing the Pivot Profile work separately from the Gemini cleanup.
+- **The other Claude session running stage1 analysis** (visible in
+  `docker events` as `docker-backend-run-*` containers) may still be running.
+  Coordinate before restarting `docker-backend-1` (RULE #4).
+- **Playwright MCP needs `/restart`** to come back online — killing the
+  yesterday-leftover Node processes also disconnected this session's
+  Playwright tools.
+
+### Session 40 — Next session priorities
+
+1. **Visual UI verification** of all 6 Pivot Profile views (steps 1-9 above) via Playwright after `/restart`
+2. **Commit the Pivot Profile work** (4 files: `m7_pivot_profile.py` analytics + API, `m7_api.ts`, `M7PivotProfilePanel.tsx`)
+3. **Delete dead code**: `_classify_winners_losers` in `backend/app/api/m7_pivot_profile.py:163-238` once UI verification confirms no regression
+4. **Fix `ds_mtime` NameError** — `m7_best_combo.py:1734`
+5. **Stage-1 Partial Exit script** — create `per_band_rules.json`, run sweep, analyze 5 CSVs (deferred from Session 39)
+
+---
+
+## Previous Session
 **Who:** Claude (Sonnet 4.6)
 **Date:** 2026-05-22 (Session 39 — Stage-1 Partial Exit script + Pivot Profile UI verified)
 **Branch:** `mainbranch-gemini_claude`

@@ -1,5 +1,64 @@
 # Claude's Work Log
 
+## Session 40 (2026-05-22) — Pivot Profile: 24min → 7s + per-band drill-downs (UNCOMMITTED)
+
+### Speed bug fix (~210× faster cold-rule case)
+
+Root cause: `_classify_winners_losers` called `_derive_exits({}, rule, dataset)`
+for each cell's rule. `_derive_exits` is keyed by rule alone and runs
+`_compute_all_exits` across all 13,703 trades to populate the L2 cache
+parquet. For a non-grid rule (e.g. `sl100 + exit_hr 10`), cold cost is
+~24 minutes. The pivot panel only needs the cell's ~5-130 trades.
+
+Fix: New `_simulate_exit(...)` function in
+`backend/app/analytics/m7_pivot_profile.py` replicates `_exit_rule_sql_predicate`
+in Python and runs per-trade inside the existing partition walk. Uses the
+same `slippage_dollars_per_side` + `compute_brokerage_one_side` helpers as
+`_add_exit_costs` so net P&L parity is preserved.
+
+Measured (delta_match dataset):
+- 1-cell cold rule (28 trades): 24m 28s → **7.0 s**
+- 10-cell standard (129 trades): 222s/1527s → **67.3 s**
+- Cache hit in-memory: **69 ms**
+- Disk JSON persists; version guard `_PIVOT_RESPONSE_VERSION = 2` auto-rejects
+  old-shape entries.
+
+### Per-band drill-downs (replaces global Spotlight + global losers list)
+
+New response fields from `aggregate_pivot_profile`:
+- `by_band_best_winner` — best-net-PnL winner per band (segment data for chart)
+- `by_band_worst_drawdown_winner` — worst-min-MTM winner per band
+- `by_band_losers_individual` — per-trade segment blobs, grouped by band, for the stacked mini-chart view
+- `best_winners_by_band`, `worst_dd_winners_by_band` — `{band: TradeRecord}` for spotlight cards
+- `losers_list_by_band` — `{band: [TradeRecord]}` for the grouped losers table
+
+### Frontend UI
+
+`M7PivotProfilePanel.tsx`:
+- View toggle now 6-way: `All | Winners | Losers | Best Win | Worst-DD Win | All Lose`
+- `PerBandSpotlight` grids: 10 cards each for best-winner + worst-DD-winner, always visible
+- `LosersStackedMiniCharts`: `All Lose` view → grid of mini-charts per band, one per losing trade
+- `LosersListGrouped`: `Losers` view shows the losers table grouped per band
+
+### Status
+
+- Backend & cache verified via curl (all metrics above).
+- Frontend type-check clean for my files (pre-existing errors elsewhere unrelated).
+- UI visual verification PENDING — Playwright MCP got disconnected when I
+  killed 4 leftover Node MCP processes (PIDs 14888, 25024, 28144, 32716) from
+  yesterday's session that were holding a stuck singleton lockfile.
+- All changes UNCOMMITTED — branch already had Gemini-cleanup changes from
+  prior session; consider committing Pivot Profile work separately.
+
+### Next session
+
+1. `/restart` Claude Code to restore Playwright MCP.
+2. Drive UI through all 6 views; capture screenshots.
+3. Commit (4 files: `m7_pivot_profile.py` analytics + API, `m7_api.ts`, `M7PivotProfilePanel.tsx`).
+4. Delete dead `_classify_winners_losers` function in `backend/app/api/m7_pivot_profile.py:163-238` after UI verification.
+
+---
+
 ## Session 39 (2026-05-22) — Stage-1 Partial Exit script + Pivot Profile UI verified
 
 ### Stage-1 Partial Exit 2D Sweep Script

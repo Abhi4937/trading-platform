@@ -260,6 +260,19 @@ function fmtRuleLabel(label: string): string {
   return label;
 }
 
+// ── Premium-SL sweep dimension ──────────────────────────────────────────────
+// Mirrors `_PREMIUM_SL_PCTS` in backend/app/api/m7_best_combo.py — the union of
+// SL pct values across datasets. delta_match uses all five; price_match uses
+// the first three. Chip toggles in/out of `slFilter` below; empty selection =
+// no filter (server sweeps every SL).
+const SL_OPTIONS = [50, 75, 100, 150, 200] as const;
+// Per-SL variant count = 1 baseline + 7 margin_target + 14 exit_hr = 22.
+// Family filter narrows what's counted: max_profit is 0 because the family
+// was removed from the 110-rule grid (kept in the UI for backward compat).
+const FAMILY_VARIANTS_PER_SL: Record<M7RuleFamily, number> = {
+  all: 22, max_profit: 0, margin_target: 7,
+};
+
 // ── localStorage persistence ────────────────────────────────────────────────
 
 const LS_PREFIX = 'm7:bestcombo:';
@@ -420,6 +433,15 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
     () => loadLS('ivrv_bucket_filter', '') as 'rich' | 'fair' | 'cheap' | '');
   const [slopeBucket, setSlopeBucket] = useState<'backwardation' | 'neutral' | 'contango' | ''>(
     () => loadLS('slope_bucket_filter', '') as 'backwardation' | 'neutral' | 'contango' | '');
+  // Premium-SL whitelist — chip group below the Family selector. Empty array
+  // means "all SLs" (server-side default). Values must be ⊆ SL_OPTIONS;
+  // legacy/unknown entries are filtered out on load.
+  const [slFilter, setSlFilter] = useState<number[]>(
+    () => {
+      const saved = (loadLS('sl_filter', []) as number[]) || [];
+      const allowed = new Set<number>(SL_OPTIONS);
+      return saved.filter(x => allowed.has(x));
+    });
 
   const [resp, setResp] = useState<M7IvBandBestComboResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -464,6 +486,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
   useEffect(() => { saveLS('bucket_tab',        bucketTab);       }, [bucketTab]);
   useEffect(() => { saveLS('ivrv_bucket_filter', ivrvBucket);     }, [ivrvBucket]);
   useEffect(() => { saveLS('slope_bucket_filter', slopeBucket);   }, [slopeBucket]);
+  useEffect(() => { saveLS('sl_filter',           slFilter);      }, [slFilter]);
 
   useEffect(() => {
     let active = true;
@@ -513,6 +536,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
       if (hourFilter.length > 0) args.entry_hours = hourFilter;
       if (bandFilter.length > 0) args.iv_bands = bandFilter;
       if (exitHourFilter.length > 0) args.exit_hours = exitHourFilter;
+      if (slFilter.length > 0) args.premium_sl_pcts = slFilter;
       // Phase B — bucketed tabs. 'band' is the default no-tab path.
       args.tab = bucketTab;
       if (ivrvBucket) args.ivrv_bucket = ivrvBucket;
@@ -551,7 +575,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
       JSON.stringify(ddCaps),
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, maxLosingStreak, pickMode,
       JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter), JSON.stringify(bandFilter),
-      JSON.stringify(exitHourFilter),
+      JSON.stringify(exitHourFilter), JSON.stringify(slFilter),
       bucketTab, ivrvBucket, slopeBucket]);
 
   // Same args we send to /iv_band_best_combo so the missed-Fridays panel
@@ -578,13 +602,14 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
     if (hourFilter.length > 0) a.entry_hours = hourFilter;
     if (bandFilter.length > 0) a.iv_bands = bandFilter;
     if (exitHourFilter.length > 0) a.exit_hours = exitHourFilter;
+    if (slFilter.length > 0) a.premium_sl_pcts = slFilter;
     return a;
   }, [primary, family, mode, secondary, tolerancePct, sizingMode,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
       JSON.stringify(ddCaps),
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, maxLosingStreak, pickMode,
       JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter), JSON.stringify(bandFilter),
-      JSON.stringify(exitHourFilter)]);
+      JSON.stringify(exitHourFilter), JSON.stringify(slFilter)]);
 
   const isWarming = resp?.status === 'warming';
   const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
@@ -711,11 +736,12 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
         marginBottom: 8, gap: 12, flexWrap: 'wrap',
       }}>
         <div style={{ fontSize: 14, color: '#cfd9e3', fontWeight: 700 }}>
-          Best combo per IV band — premium SL ∈ &#123;50, 75, 100&#125;
+          Best combo per IV band — premium SL ∈ &#123;{(slFilter.length > 0 ? slFilter : [...SL_OPTIONS]).join(', ')}&#125;
           <span style={{
             fontSize: 11, fontWeight: 400, color: '#7a9bb5', marginLeft: 10,
           }}>
-            105 rule variants × 7 expiries × 8 deltas. Pick the (expiry · Δ ·
+            {((slFilter.length > 0 ? slFilter.length : SL_OPTIONS.length) * FAMILY_VARIANTS_PER_SL[family])} rule
+            variants × 7 expiries × 8 deltas. Pick the (expiry · Δ ·
             exit rule) that wins per IV band on the chosen score.
           </span>
         </div>
@@ -757,6 +783,49 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
                 {label}
               </button>
             ))}
+          </div>
+          {/* SL whitelist — multi-select chips. Empty selection = no filter
+              (server sweeps all five SLs). Click "All" to clear; click an
+              SL value to toggle it in/out. */}
+          <span style={{ fontSize: 11, color: '#7a9bb5' }}
+                title="Restrict the picker to a subset of premium-SL pct values. Each chip toggles independently — empty selection means all five SLs are in play.">
+            SL %:
+          </span>
+          <div style={{
+            display: 'inline-flex', border: '1px solid #1a2d42', borderRadius: 4,
+            overflow: 'hidden',
+          }}>
+            <button key="sl-all"
+              onClick={() => setSlFilter([])}
+              style={{
+                padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+                background: slFilter.length === 0 ? '#1f6feb' : 'transparent',
+                color: slFilter.length === 0 ? '#fff' : '#cfd9e3',
+                border: 'none',
+              }}>
+              All
+            </button>
+            {SL_OPTIONS.map(sl => {
+              const active = slFilter.includes(sl);
+              return (
+                <button key={`sl-${sl}`}
+                  onClick={() => {
+                    setSlFilter(prev =>
+                      prev.includes(sl)
+                        ? prev.filter(x => x !== sl)
+                        : [...prev, sl].sort((a, b) => a - b),
+                    );
+                  }}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+                    background: active ? '#1f6feb' : 'transparent',
+                    color: active ? '#fff' : '#cfd9e3',
+                    border: 'none',
+                  }}>
+                  {sl}
+                </button>
+              );
+            })}
           </div>
           {/* Pure ⇄ Tiebreak toggle */}
           <div style={{

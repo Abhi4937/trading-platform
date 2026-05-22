@@ -2,6 +2,29 @@
 
 ## Active Projects
 
+- **Pivot Profile speedup + per-band drill-downs (Session 40, 2026-05-22, UNCOMMITTED):**
+  - `_compute_all_exits` cold-rule cost (~24 min for non-grid rules) was the
+    Pivot Profile bottleneck. Fixed via inline rule simulator in
+    `backend/app/analytics/m7_pivot_profile.py` (`_simulate_exit`), scoped to
+    cell trades only. Measured: 24m 28s → 7.0s (1-cell), 222s → 67.3s (10-cell),
+    69ms cache hit. `_classify_winners_losers` (m7_pivot_profile.py API) now
+    dead code — left in for one session safety net; delete after UI verification.
+  - **Per-band drill-downs added**: `best_winners_by_band` /
+    `worst_dd_winners_by_band` (10 spotlight cards each), `losers_list_by_band`
+    (grouped losers table), `by_band_best_winner` / `by_band_worst_drawdown_winner`
+    (single-trade-per-band chart views), `by_band_losers_individual` (stacked
+    per-trade mini-charts).
+  - **Frontend**: `M7PivotProfilePanel.tsx` view toggle expanded to 6 buttons
+    (`All | Winners | Losers | Best Win | Worst-DD Win | All Lose`).
+    New components: `PerBandSpotlight`, `LosersStackedMiniCharts`,
+    `LosersListGrouped`. Dropped legacy `SpotlightStrip` + `LosersListTable`.
+  - **Cache**: disk persistence preserved at `pivot_cache/`. Bumped response
+    version `_PIVOT_RESPONSE_VERSION = 2`; old-shape JSONs auto-rejected by
+    `_load_pivot_disk`.
+  - **UI verification pending**: Playwright MCP got disconnected when I
+    killed leftover Node MCP processes from yesterday's session. Needs
+    `/restart` next session.
+
 - **M7 243-rule hybrid scaffolding (Session 32, 2026-05-18, COMMITTED `501699b`):**
   - 4 new files + scoped `main.py` router include. 243 rules =
     105 existing singles + 3 standalone cap_sl + 9 cap_sl×premium_sl

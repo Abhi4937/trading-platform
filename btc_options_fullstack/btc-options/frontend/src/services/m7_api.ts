@@ -377,6 +377,9 @@ export interface FetchBestComboArgs {
   // Exit-hour suffixes from rule_label (sl{X}_exit_hr_{h}). Values match the
   // backend's _hour_label output: '8'..'17' and '1729' for 17:29.
   exit_hours?: string[];                  // e.g. ['14', '15', '1729']
+  // Premium-SL pct whitelist — restricts to rules whose label starts with
+  // sl{X}_ for X in this list. Empty/undefined = all SLs (no filter).
+  premium_sl_pcts?: number[];             // e.g. [50, 75]
   // Multi-dim bucketing tab (Phase B). Default 'band' = legacy single grid.
   tab?: 'band' | 'band_ivrv' | 'band_ivrv_slope_cn' | 'band_ivrv_slope_nn'
       | 'band_ivrv_slope_cnn' | 'band_ivrv_ts_legacy';
@@ -465,6 +468,9 @@ export function fetchM7IvBandBestCombo(
   if (opts.exit_hours && opts.exit_hours.length > 0) {
     params.set('exit_hours', opts.exit_hours.join(','));
   }
+  if (opts.premium_sl_pcts && opts.premium_sl_pcts.length > 0) {
+    params.set('premium_sl_pcts', opts.premium_sl_pcts.map(s => String(s)).join(','));
+  }
   if (opts.tab && opts.tab !== 'band') {
     params.set('tab', opts.tab);
   }
@@ -545,6 +551,9 @@ export function fetchM7IvBandBestComboCoverage(
   if (args.expiry_buckets && args.expiry_buckets.length > 0) params.set('expiry_buckets', args.expiry_buckets.join(','));
   if (args.delta_targets && args.delta_targets.length > 0) params.set('delta_targets', args.delta_targets.map(d => String(d)).join(','));
   if (args.entry_hours && args.entry_hours.length > 0) params.set('entry_hours', args.entry_hours.map(h => String(h)).join(','));
+  if (args.premium_sl_pcts && args.premium_sl_pcts.length > 0) {
+    params.set('premium_sl_pcts', args.premium_sl_pcts.map(s => String(s)).join(','));
+  }
   params.set('coverage_mode', args.coverage_mode ?? 'force_fit');
   appendDatasetParam(params, dataset);
   return jsonFetch<M7BestComboCoverageResponse>(
@@ -915,6 +924,9 @@ export function fetchM7BestComboMissedFridays(
   }
   if (args.entry_hours && args.entry_hours.length > 0) {
     p.set('entry_hours', args.entry_hours.map(h => String(h)).join(','));
+  }
+  if (args.premium_sl_pcts && args.premium_sl_pcts.length > 0) {
+    p.set('premium_sl_pcts', args.premium_sl_pcts.map(s => String(s)).join(','));
   }
   appendDatasetParam(p, dataset);
   return jsonFetch<M7MissedFridaysForceFitResponse>(

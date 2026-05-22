@@ -1677,6 +1677,11 @@ def _records(df: pd.DataFrame) -> list[dict]:
 
 _VALID_RANKINGS = set(_METRIC_DIRECTIONS.keys()) | {"credit", "margin"}
 _VALID_RULE_FAMILIES = {"all", "max_profit", "margin_target"}
+# Union of premium-SL pct values across all datasets. delta_match uses all
+# five; price_match uses the first three. Validation accepts any of the five —
+# a request for an SL that isn't in the active dataset just yields zero rows
+# for that SL (no exception), which is friendlier than 400'ing the request.
+_VALID_PREMIUM_SLS = {50, 75, 100, 150, 200}
 
 
 def _apply_dimension_filters(
@@ -1686,6 +1691,7 @@ def _apply_dimension_filters(
     entry_hours: Optional[str],
     iv_bands: Optional[str] = None,
     exit_hours: Optional[str] = None,
+    premium_sl_pcts: Optional[str] = None,
 ) -> pd.DataFrame:
     """Pre-filter the grid by IV band / expiry / delta / hour before per-band picking.
 
@@ -1702,6 +1708,10 @@ def _apply_dimension_filters(
     hour-suffix is in the CSV (suffix matches `_hour_label()`: '8'..'17' and
     '1729' for 17:29). When set, non-fixed-hour rule families (baseline,
     max_profit, margin_target) are excluded by construction.
+
+    premium_sl_pcts restricts to rule variants whose label starts with
+    `sl{X}_` for X in the CSV (e.g. "50,75" keeps only the SL=50 and SL=75
+    variants across every family). Unknown values are dropped silently.
     """
     if iv_bands:
         keep_b = {s.strip() for s in iv_bands.split(",") if s.strip()}
@@ -1733,6 +1743,16 @@ def _apply_dimension_filters(
             suffix_pat = "|".join(re.escape(s) for s in keep_eh)
             grid = grid[grid["rule_label"].astype(str).str.contains(
                 rf"_exit_hr_({suffix_pat})$", regex=True, na=False)]
+    if premium_sl_pcts:
+        try:
+            keep_sl = {int(s.strip()) for s in premium_sl_pcts.split(",") if s.strip()}
+        except ValueError:
+            keep_sl = set()
+        keep_sl &= _VALID_PREMIUM_SLS
+        if keep_sl and "rule_label" in grid.columns:
+            prefix_pat = "|".join(f"sl{x}" for x in sorted(keep_sl))
+            grid = grid[grid["rule_label"].astype(str).str.contains(
+                rf"^({prefix_pat})_", regex=True, na=False)]
     return grid
 
 
@@ -1822,6 +1842,8 @@ def get_iv_band_best_combo(
         description="CSV whitelist of IV bands (e.g. '30-40,40-50'). Empty/absent = all 10 bands. Useful to focus the picker on one band for per-band best-fit testing."),
     exit_hours: Optional[str] = Query(None,
         description="CSV whitelist of fixed-exit hour suffixes (e.g. '14,15,1729'). Values match _hour_label() output. When set, the picker restricts to sl{X}_exit_hr_{h} rule variants whose hour matches — non-fixed-hour rule families (baseline, max_profit, margin_target) are dropped."),
+    premium_sl_pcts: Optional[str] = Query(None,
+        description="CSV whitelist of premium-SL pct values (e.g. '50,75'). When set, only rule variants whose label starts with sl{X}_ for X in the list are kept. Composes with rule_family. Unknown values silently dropped. Empty/absent = all SLs (no filter)."),
     tab: str = Query("band",
         description="Multi-dim bucketing tab. 'band' (default — legacy single grid) | 'band_ivrv' | 'band_ivrv_slope_cn' | 'band_ivrv_slope_nn' | 'band_ivrv_slope_cnn' | 'band_ivrv_ts_legacy'. Bucketed tabs lazy-build their grid on first request (~5-30s, persisted on disk)."),
     ivrv_bucket: Optional[str] = Query(None,
@@ -1919,6 +1941,7 @@ def get_iv_band_best_combo(
     family_grid = _apply_dimension_filters(
         family_grid, expiry_buckets, delta_targets, entry_hours,
         iv_bands=iv_bands, exit_hours=exit_hours,
+        premium_sl_pcts=premium_sl_pcts,
     )
     # Bucketed-tab dimension filters — narrow to a specific IVRV / slope
     # bucket so the user can drill into "rich+contango" cells, etc.
@@ -2006,6 +2029,7 @@ def get_iv_band_best_combo(
         "secondary": secondary,
         "tolerance_pct": tolerance_pct,
         "rule_family": rule_family,
+        "premium_sl_pcts": premium_sl_pcts,
         "total_capital_usd": total_capital_usd,
         "pct_deploy": pct_deploy,
         "dd_metric": dd_metric,
@@ -2728,6 +2752,8 @@ def get_missed_fridays_for_best_combo(
     expiry_buckets: Optional[str] = Query(None),
     delta_targets: Optional[str] = Query(None),
     entry_hours: Optional[str] = Query(None),
+    premium_sl_pcts: Optional[str] = Query(None,
+        description="CSV whitelist of premium-SL pct values (e.g. '50,75'). Mirrors /iv_band_best_combo so the missed-Fridays panel stays in sync with the table."),
     dataset: str = Query("delta_match",
         description="'delta_match' (default) or 'price_match'."),
 ):
@@ -2754,6 +2780,7 @@ def get_missed_fridays_for_best_combo(
     family_grid = _filter_grid_by_family(grid, rule_family)
     family_grid = _apply_dimension_filters(
         family_grid, expiry_buckets, delta_targets, entry_hours,
+        premium_sl_pcts=premium_sl_pcts,
     )
     if pick_mode == "aggregate_hours":
         family_grid = _aggregate_across_hours(family_grid)
@@ -2882,6 +2909,8 @@ def get_iv_band_best_combo_coverage(
     expiry_buckets: Optional[str] = Query(None),
     delta_targets: Optional[str] = Query(None),
     entry_hours: Optional[str] = Query(None),
+    premium_sl_pcts: Optional[str] = Query(None,
+        description="CSV whitelist of premium-SL pct values (e.g. '50,75'). Mirrors /iv_band_best_combo so coverage stays in sync with the table."),
     coverage_mode: str = Query(
         "force_fit",
         description="Friday-dedup mode: 'force_fit' (any (h,e,Δ) match across bands + closest-fallback) or 'touched_band' (only bands the Friday's IV touched; no closest-fallback)."),
@@ -2932,6 +2961,7 @@ def get_iv_band_best_combo_coverage(
         max_drop_peak_to_trough_pct, min_n_trades, min_win_rate,
         max_losing_streak, pick_mode,
         expiry_buckets, delta_targets, entry_hours,
+        premium_sl_pcts,
         ds_mtime,
     )
     cached = _COVERAGE_CACHE.get(cache_key)
@@ -2980,7 +3010,8 @@ def get_iv_band_best_combo_coverage(
         min_n_trades=min_n_trades, min_win_rate=min_win_rate,
         max_losing_streak=max_losing_streak, pick_mode=pick_mode,
         expiry_buckets=expiry_buckets, delta_targets=delta_targets,
-        entry_hours=entry_hours, coverage_mode=coverage_mode,
+        entry_hours=entry_hours, premium_sl_pcts=premium_sl_pcts,
+        coverage_mode=coverage_mode,
         dataset=dataset,
     )
     return {
@@ -3038,7 +3069,8 @@ def _compute_coverage_payload(
     min_n_trades: int, min_win_rate: Optional[float],
     max_losing_streak: Optional[int], pick_mode: str,
     expiry_buckets: Optional[str], delta_targets: Optional[str],
-    entry_hours: Optional[str], coverage_mode: str,
+    entry_hours: Optional[str],
+    premium_sl_pcts: Optional[str], coverage_mode: str,
     dataset: str = "delta_match",
 ) -> dict:
     """The heavy lifting: picker + classifier + row assembly. Called from
@@ -3052,6 +3084,7 @@ def _compute_coverage_payload(
     family_grid = _filter_grid_by_family(grid, rule_family)
     family_grid = _apply_dimension_filters(
         family_grid, expiry_buckets, delta_targets, entry_hours,
+        premium_sl_pcts=premium_sl_pcts,
     )
     if pick_mode == "aggregate_hours":
         family_grid = _aggregate_across_hours(family_grid)
