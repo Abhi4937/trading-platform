@@ -1442,6 +1442,19 @@ function CellDetail({
   // hyp_max_mtm = exit_frac × trigger + (1-exit_frac) × actual_max_mtm  (for fired trades)
   // Classify hyp-winner/hyp-loser by hyp_net_pnl.
   const mtmCmpRows: CmpRow[] = [];
+  // Hyp aggregates derived from bandTrades — used to fill in client-side computable rows
+  // for the P&L-splits section. Null until trades load.
+  let hypAggs: {
+    n_winners_hyp: number; n_losers_hyp: number;
+    avg_win_hyp: number | null; avg_loss_hyp: number | null;
+    max_win_hyp: number | null;
+    avg_net_hyp: number | null;
+    avg_net_winners_hyp: number | null;
+    n_w_below_avg_min_hyp: number;
+    n_l_above_avg_max_hyp: number;
+    n_w_below_avg_min_base: number;
+    n_l_above_avg_max_base: number;
+  } | null = null;
   if (bandTrades && bandTrades.length > 0 && cell.trigger_mtm != null && bm) {
     const trig = cell.trigger_mtm;
     const ef = cell.exit_frac;
@@ -1462,6 +1475,25 @@ function CellDetail({
     const mean = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
     const minOf = (arr: number[]) => arr.length ? Math.min(...arr) : null;
     const maxOf = (arr: number[]) => arr.length ? Math.max(...arr) : null;
+
+    // Populate hypAggs for the P&L-splits section below
+    const avgMinW_hyp = mean(winnersHyp.map(t => t.hyp_min)) ?? 0;
+    const avgMaxL_hyp = mean(losersHyp.map(t => t.hyp_max)) ?? 0;
+    const avgMinW_base = mean(winnersBase.map(t => t.minM)) ?? 0;
+    const avgMaxL_base = mean(losersBase.map(t => t.maxM)) ?? 0;
+    hypAggs = {
+      n_winners_hyp: winnersHyp.length,
+      n_losers_hyp: losersHyp.length,
+      avg_win_hyp: mean(winnersHyp.map(t => t.hyp_net)),
+      avg_loss_hyp: mean(losersHyp.map(t => t.hyp_net)),
+      max_win_hyp: maxOf(winnersHyp.map(t => t.hyp_net)),
+      avg_net_hyp: mean(enr.map(t => t.hyp_net)),
+      avg_net_winners_hyp: mean(winnersHyp.map(t => t.hyp_net)),
+      n_w_below_avg_min_hyp: winnersHyp.filter(t => t.hyp_min < avgMinW_hyp).length,
+      n_l_above_avg_max_hyp: losersHyp.filter(t => t.hyp_max > avgMaxL_hyp).length,
+      n_w_below_avg_min_base: winnersBase.filter(t => t.minM < avgMinW_base).length,
+      n_l_above_avg_max_base: losersBase.filter(t => t.maxM > avgMaxL_base).length,
+    };
 
     const mtmRow = (label: string, baseVal: number | null, stageVal: number | null, isPositiveBetter: boolean) => {
       if (baseVal == null || stageVal == null) return;
@@ -1538,51 +1570,110 @@ function CellDetail({
         section: isFirst ? 'Exit MTMs (no stage-1 equivalent — dual-exit semantics)' : undefined,
       });
     };
-    exitStub('Avg exit MTM', bm.avg_exit_mtm, true);
-    exitStub('Avg win MTM', bm.avg_win_mtm);
-    exitStub('Avg loss MTM', bm.avg_loss_mtm);
+    exitStub('Avg exit MTM (overall)', bm.avg_exit_mtm, true);
+    exitStub('Avg exit MTM (Winners)', bm.avg_win_mtm);
+    exitStub('Largest exit MTM (Winners)', bm.largest_win_mtm);
+    exitStub('Total exit MTM (Winners)', bm.total_win_mtm);
+    exitStub('Avg exit MTM (Losers)', bm.avg_loss_mtm);
+    exitStub('Largest exit MTM (Losers)', bm.largest_loss_mtm);
+    exitStub('Total exit MTM (Losers)', bm.total_loss_mtm);
 
-    // W<avg min, L>avg max — counts derivable from trades but stage-1 split needs F14
+    // W<avg min, L>avg max — counts. Hyp versions computed client-side from bandTrades (F14).
+    const fmtArrowCount = (baseN: number, hypN: number | null, lowerIsBetter: boolean) => {
+      if (hypN == null) return { delta: '—', arrow: '', color: '#7a9bb5' };
+      const d = hypN - baseN;
+      if (d === 0) return { delta: '+0', arrow: '−', color: '#7a9bb5' };
+      const better = lowerIsBetter ? d < 0 : d > 0;
+      return { delta: `${d > 0 ? '+' : ''}${d}`, arrow: d > 0 ? '↑' : '↓', color: better ? '#4ade80' : '#f87171' };
+    };
+    const baseWBelow = bm.n_winners_below_avg_min_mtm ?? 0;
+    const baseLAbove = bm.n_losers_above_avg_max_mtm ?? 0;
+    const wAr = fmtArrowCount(baseWBelow, hypAggs?.n_w_below_avg_min_hyp ?? null, true);  // fewer = better
+    const lAr = fmtArrowCount(baseLAbove, hypAggs?.n_l_above_avg_max_hyp ?? null, true);  // fewer = better
     unifiedRows.push({
       label: 'W < avg min MTM',
       baseline: String(bm.n_winners_below_avg_min_mtm ?? '—'),
-      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-      note: 'F-tracked: count of winners below band\'s avg-min-MTM; hyp version needs F14',
+      stage1: hypAggs ? String(hypAggs.n_w_below_avg_min_hyp) : (bandTrades ? '⋯' : '—'),
+      delta: wAr.delta, arrow: wAr.arrow, deltaColor: wAr.color,
+      note: hypAggs ? 'F14: count using hyp_min_mtm vs hyp-winners\' avg' : 'loads when band trades load',
     });
     unifiedRows.push({
       label: 'L > avg max MTM',
       baseline: String(bm.n_losers_above_avg_max_mtm ?? '—'),
-      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-      note: 'F-tracked: hyp version needs F14',
+      stage1: hypAggs ? String(hypAggs.n_l_above_avg_max_hyp) : (bandTrades ? '⋯' : '—'),
+      delta: lAr.delta, arrow: lAr.arrow, deltaColor: lAr.color,
+      note: hypAggs ? 'F14: count using hyp_max_mtm vs hyp-losers\' avg' : 'loads when band trades load',
     });
     unifiedRows.push({
       label: 'Peak %',
       baseline: bm.avg_pct_max_mtm_on_credit != null ? `${(bm.avg_pct_max_mtm_on_credit * 100).toFixed(2)}%` : '—',
       stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-      note: 'F-tracked: hyp Peak% needs F14',
+      note: 'F-tracked: needs per-trade entry_credit_usd in trades API (~30 min backend)',
     });
     unifiedRows.push({
       label: 'Trough %',
       baseline: bm.avg_pct_min_mtm_on_credit != null ? `${(bm.avg_pct_min_mtm_on_credit * 100).toFixed(2)}%` : '—',
       stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-      note: 'F-tracked: hyp Trough% needs F14',
+      note: 'F-tracked: needs per-trade entry_credit_usd in trades API',
     });
   }
 
-  // P&L extremes (win/loss splits) — F-tracked
+  // P&L splits — most now F14-computable from bandTrades
   if (bm) {
-    const baselineOnly = (label: string, val: string, note: string, isFirst = false) =>
+    // Helper: build a row with baseline → stage-1 → Δ when hyp value is available
+    const pnlRow = (
+      label: string,
+      baseVal: number | null,
+      hypVal: number | null,
+      isPositiveBetter: boolean,
+      isPct = false,
+      isFirst = false,
+    ) => {
+      const baseStr = baseVal != null ? (isPct ? `${(baseVal * 100).toFixed(2)}%` : `$${(baseVal * totalScale).toFixed(2)}`) : '—';
+      if (hypVal == null) {
+        unifiedRows.push({
+          label, baseline: baseStr, stage1: bandTrades ? '⋯' : '—',
+          delta: '—', arrow: '', deltaColor: '#7a9bb5',
+          note: bandTrades ? 'computing…' : 'F14: stage-1 hyp from band trades (loads on cell expand)',
+          section: isFirst ? 'P&L splits · F14 hyp (computed from band trades)' : undefined,
+        });
+        return;
+      }
+      const baseScaled = isPct ? baseVal! * 100 : baseVal! * totalScale;
+      const hypScaled = isPct ? hypVal * 100 : hypVal * totalScale;
+      const delta = hypScaled - baseScaled;
+      const same = Math.abs(delta) < 1e-6;
+      const better = isPositiveBetter ? delta > 0 : delta < 0;
+      const stageStr = isPct ? `${hypScaled.toFixed(2)}%` : `$${hypScaled.toFixed(2)}`;
+      const deltaStr = isPct
+        ? `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}%`
+        : `${delta >= 0 ? '+' : ''}$${delta.toFixed(2)}`;
       unifiedRows.push({
-        label, baseline: val, stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5', note,
-        section: isFirst ? 'P&L splits · baseline only (F-tracked F2–F5)' : undefined,
+        label, baseline: baseStr, stage1: stageStr,
+        delta: deltaStr,
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        note: 'F14: hyp values from bandTrades (linear approx)',
+        section: isFirst ? 'P&L splits · F14 hyp (computed from band trades)' : undefined,
       });
-    baselineOnly('Avg win (per trade)', sx(bm.avg_win_usd), noteNoHyp, true);
-    baselineOnly('Avg loss (per trade)', sx(bm.avg_loss_usd), noteNoHyp);
-    baselineOnly('Largest win', sx(bm.max_win_usd), noteNoHyp);
-    baselineOnly('Ret / margin', bm.avg_pct_return_on_margin != null ? `${(bm.avg_pct_return_on_margin * 100).toFixed(2)}%` : '—', noteNoHyp);
-    baselineOnly('Ret / credit', bm.avg_pct_return_on_credit != null ? `${(bm.avg_pct_return_on_credit * 100).toFixed(2)}%` : '—', noteNoHyp);
-    baselineOnly('Ret / margin (W)', bm.avg_pct_return_on_margin_winners != null ? `${(bm.avg_pct_return_on_margin_winners * 100).toFixed(2)}%` : '—', noteNoHyp);
-    baselineOnly('Ret / credit (W)', bm.avg_pct_return_on_credit_winners != null ? `${(bm.avg_pct_return_on_credit_winners * 100).toFixed(2)}%` : '—', noteNoHyp);
+    };
+
+    pnlRow('Avg win (per trade)', bm.avg_win_usd, hypAggs?.avg_win_hyp ?? null, true, false, true);
+    pnlRow('Avg loss (per trade)', bm.avg_loss_usd, hypAggs?.avg_loss_hyp ?? null, true);  // less-negative=better still positive-direction
+    pnlRow('Largest win', bm.max_win_usd, hypAggs?.max_win_hyp ?? null, true);
+
+    // Ret/margin and Ret/credit — use band-level denominators (per-trade not exposed)
+    const margin = bm.avg_margin ?? null;
+    const credit = bm.avg_credit ?? null;
+    const retMarginHyp = margin && hypAggs?.avg_net_hyp != null ? (hypAggs.avg_net_hyp * totalScale) / margin : null;
+    const retCreditHyp = credit && hypAggs?.avg_net_hyp != null ? (hypAggs.avg_net_hyp * totalScale) / credit : null;
+    const retMarginWHyp = margin && hypAggs?.avg_net_winners_hyp != null ? (hypAggs.avg_net_winners_hyp * totalScale) / margin : null;
+    const retCreditWHyp = credit && hypAggs?.avg_net_winners_hyp != null ? (hypAggs.avg_net_winners_hyp * totalScale) / credit : null;
+
+    pnlRow('Ret / margin', bm.avg_pct_return_on_margin, retMarginHyp, true, true);
+    pnlRow('Ret / credit', bm.avg_pct_return_on_credit, retCreditHyp, true, true);
+    pnlRow('Ret / margin (W)', bm.avg_pct_return_on_margin_winners, retMarginWHyp, true, true);
+    pnlRow('Ret / credit (W)', bm.avg_pct_return_on_credit_winners, retCreditWHyp, true, true);
   }
 
   // Rule firing stats — baseline only (rule still fires for surviving portion; semantics ambiguous)
