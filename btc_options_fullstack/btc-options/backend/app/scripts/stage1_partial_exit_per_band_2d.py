@@ -35,7 +35,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -278,15 +278,68 @@ def _cell_metrics(
     # Total delta P&L (actual → hypothetical) — must equal ev_total_audited.
     total_delta_pnl = float(np.sum(hyp - pnl))
 
+    # ── C sub-case split (trigger-level-dependent, exit_frac-independent) ──────
+    # C_deeper: net_pnl < trigger_MTM → stage-1 saves (loss ended deeper than trigger).
+    # C_recovered: trigger_MTM ≤ net_pnl < 0 → stage-1 hurts (position partially recovered).
+    c_pnl = pnl[c_idx.to_numpy()]
+    c_deeper_mask   = c_pnl < trigger_mtm_val
+    c_recovered_mask = c_pnl >= trigger_mtm_val  # net_pnl is still <0 by Case C definition
+
+    n_C_deeper    = int(c_deeper_mask.sum())
+    n_C_recovered = int(c_recovered_mask.sum())
+    c_recovered_share = n_C_recovered / max(n_C, 1)
+    c_recovered_warn_level = (
+        "red"    if c_recovered_share >= 0.50
+        else "yellow" if c_recovered_share >= 0.30
+        else "none"
+    )
+
+    avg_save_per_c_deeper = (
+        float((exit_frac * (trigger_mtm_val - c_pnl[c_deeper_mask])).mean())
+        if n_C_deeper > 0 else float("nan")
+    )
+    avg_hurt_per_c_recovered = (
+        float((exit_frac * (trigger_mtm_val - c_pnl[c_recovered_mask])).mean())
+        if n_C_recovered > 0 else float("nan")
+    )
+
+    # ── Actual baseline stats (for comparison deltas) ──────────────────────────
+    actual_avg_pnl   = float(np.nanmean(pnl))
+    actual_wr        = float(np.mean(pnl >= 0))
+    actual_cvar_95   = _cvar_95(pnl)
+    actual_max_loss  = float(np.nanmin(pnl))
+    loser_actual = pnl[pnl < 0]
+    actual_stdev_losses = float(np.std(loser_actual, ddof=1)) if len(loser_actual) >= 2 else float("nan")
+    if "friday_date_ist" in df.columns:
+        order_act = df["friday_date_ist"].argsort(kind="stable").to_numpy()
+        actual_max_consec = _max_consec_losses_sorted(pnl[order_act] >= 0)
+    else:
+        actual_max_consec = 0
+
+    delta_avg_pnl          = avg_hyp - actual_avg_pnl
+    delta_win_rate         = wr_hyp - actual_wr
+    delta_cvar_95          = cvar_hyp - actual_cvar_95
+    delta_max_loss         = max_loss - actual_max_loss  # positive = max loss improved (less bad)
+    delta_max_consec_losses = max_consec - actual_max_consec
+
+    worst_trade_actual = actual_max_loss
+    worst_trade_hypo   = max_loss   # same var, renamed for clarity
+
     return {
         "n_total":          n_total,
         "n_A":              n_A,
         "n_B_reliable":     n_B_reliable,
         "n_B_unreliable":   n_B_unreliable,
         "n_C":              n_C,
+        "n_C_deeper":       n_C_deeper,
+        "n_C_recovered":    n_C_recovered,
         "pct_B_unreliable": pct_B_unreliable,
-        "avg_saved":        avg_saved,
-        "avg_given_up":     avg_given_up,
+        "c_recovered_share":      c_recovered_share,
+        "c_recovered_warn_level": c_recovered_warn_level,
+        "avg_saved":              avg_saved,
+        "avg_given_up":           avg_given_up,
+        "avg_save_per_c_deeper":     avg_save_per_c_deeper,
+        "avg_hurt_per_c_recovered":  avg_hurt_per_c_recovered,
         "ev_per_trade":     ev_per_trade,
         "ev_total":         ev_total,
         "ev_total_audited": ev_total_audited,
@@ -301,8 +354,16 @@ def _cell_metrics(
         "avg_pct_return_on_margin": avg_rom,
         "avg_credit":               avg_credit,
         "max_consec_losses":        max_consec,
-        # Actual baseline avg (for delta_from_actual reporting).
-        "actual_avg_net_pnl":       float(np.nanmean(pnl)),
+        # Actual baseline stats.
+        "actual_avg_net_pnl":       actual_avg_pnl,
+        "worst_trade_actual":       worst_trade_actual,
+        "worst_trade_hypo":         worst_trade_hypo,
+        # Comparison deltas (hypothetical − actual).
+        "delta_avg_pnl":            delta_avg_pnl,
+        "delta_win_rate":           delta_win_rate,
+        "delta_cvar_95":            delta_cvar_95,
+        "delta_max_loss":           delta_max_loss,
+        "delta_max_consec_losses":  delta_max_consec_losses,
     }
 
 
@@ -374,14 +435,23 @@ def _process_band(
                 row["status"] = "trigger_undefined"
                 row["warning"] = f"{tname}: reference level undefined (n < {LOW_N_THRESHOLD})"
                 # Fill NaN for all metric columns.
-                for col in ("n_total", "n_A", "n_B_reliable", "n_B_unreliable", "n_C",
-                             "pct_B_unreliable", "avg_saved", "avg_given_up",
-                             "ev_per_trade", "ev_total", "ev_total_audited", "total_delta_pnl",
-                             "avg_net_pnl", "stdev_net_pnl", "stdev_losses_only", "max_loss_usd",
-                             "win_rate", "cvar_95_net", "avg_pct_return_on_margin", "avg_credit",
-                             "max_consec_losses", "actual_avg_net_pnl"):
+                for col in (
+                    "n_total", "n_A", "n_B_reliable", "n_B_unreliable", "n_C",
+                    "n_C_deeper", "n_C_recovered",
+                    "pct_B_unreliable", "c_recovered_share", "avg_saved", "avg_given_up",
+                    "avg_save_per_c_deeper", "avg_hurt_per_c_recovered",
+                    "ev_per_trade", "ev_total", "ev_total_audited", "total_delta_pnl",
+                    "avg_net_pnl", "stdev_net_pnl", "stdev_losses_only", "max_loss_usd",
+                    "win_rate", "cvar_95_net", "avg_pct_return_on_margin", "avg_credit",
+                    "max_consec_losses", "actual_avg_net_pnl",
+                    "worst_trade_actual", "worst_trade_hypo",
+                    "delta_avg_pnl", "delta_win_rate", "delta_cvar_95",
+                    "delta_max_loss", "delta_max_consec_losses",
+                ):
                     row[col] = float("nan") if col not in ("n_total",) else n_total
                 row["n_total"] = n_total
+                row["c_recovered_warn_level"] = "none"
+                row["band_verdict"] = "SKIP_INSUFFICIENT"
                 all_cells_rows.append(row)
                 continue
 
@@ -476,6 +546,29 @@ def _process_band(
         and best_avg_idx == best_comp_idx
     )
 
+    # ── Per-band verdict (computed from best-by-avg-pnl cell) ─────────────────
+    def _band_verdict() -> str:
+        if n_total < 30 or best_avg_idx is None:
+            return "SKIP_INSUFFICIENT"
+        r_v = cells_df.loc[best_avg_idx]
+        if pd.isna(r_v.get("composite_score_v2", float("nan"))):
+            return "SKIP_INSUFFICIENT"
+        d = float(r_v.get("delta_avg_pnl", float("nan")))
+        if pd.isna(d) or d <= 0:
+            return "SKIP_NEGATIVE"
+        if float(r_v.get("exit_frac", 1.0)) == 1.00:
+            return "SKIP_TIGHTER_SL_WINS"
+        cr = float(r_v.get("c_recovered_share", 0.0))
+        cr_rank = r_v.get("rank_in_band", None)
+        cr_rank_ok = cr_rank is None or pd.isna(cr_rank) or int(cr_rank) <= 3
+        if d > 0.50 and cr < 0.30 and cr_rank_ok:
+            return "WORTH_IT"
+        return "MARGINAL"
+
+    verdict = _band_verdict()
+    # Denormalise: every row in this band carries the band-level verdict.
+    cells_df["band_verdict"] = verdict
+
     # Store band-level summary as side-channel (returned via mutation of cells_df).
     cells_df.attrs["best_avg_idx"]              = best_avg_idx
     cells_df.attrs["best_comp_idx"]             = best_comp_idx
@@ -544,13 +637,24 @@ def _run_validation(
     all_cells_df: pd.DataFrame,
     per_band_dfs: dict[str, pd.DataFrame],
     per_band_frames: dict[str, pd.DataFrame],
-) -> None:
-    """Fail loudly on any gate miss."""
-    print("\n── Phase 7: Validation gates ──────────────────────────────────────")
+    *,
+    verbose: bool = True,
+) -> dict:
+    """Run all 4 validation gates. Returns {gate1..4: bool, all_pass: bool, messages: list[str]}.
+    When verbose=True, also prints to stdout (CLI path). Caller decides whether to fail loudly."""
+    messages: list[str] = []
+    gate_results: dict[str, bool] = {}
+
+    def _log(msg: str) -> None:
+        messages.append(msg)
+        if verbose:
+            print(msg)
+
+    if verbose:
+        print("\n── Phase 7: Validation gates ──────────────────────────────────────")
 
     # Gate 1: case count identity per (band, trigger_level).
-    # per_band_dfs contains the 20-cell cells_df; n_total is in the row itself.
-    ok = True
+    g1_ok = True
     for band in per_band_dfs:
         band_cells = all_cells_df[all_cells_df["band"] == band].copy()
         for tname in TRIGGER_NAMES:
@@ -563,30 +667,33 @@ def _run_validation(
             total    = int(r["n_A"]) + int(r["n_B_reliable"]) + int(r["n_B_unreliable"]) + int(r["n_C"])
             expected = int(r["n_total"])
             if total != expected:
-                print(f"  FAIL gate 1: band={band} trigger={tname}: "
-                      f"A+B_rel+B_unrel+C={total} != n_total={expected}")
-                ok = False
-    if ok:
-        print("  PASS gate 1: n_A + n_B_reliable + n_B_unreliable + n_C == n_total (all bands)")
+                _log(f"  FAIL gate 1: band={band} trigger={tname}: "
+                     f"A+B_rel+B_unrel+C={total} != n_total={expected}")
+                g1_ok = False
+    if g1_ok:
+        _log("  PASS gate 1: n_A + n_B_reliable + n_B_unreliable + n_C == n_total (all bands)")
+    gate_results["gate1"] = g1_ok
 
     # Gate 2: |total_delta_pnl − ev_total_audited| < $1 per ranked cell.
+    g2_ok = True
     ranked = all_cells_df[all_cells_df["status"] == "ok"].copy()
     for col in ("total_delta_pnl", "ev_total_audited"):
         ranked[col] = pd.to_numeric(ranked[col], errors="coerce")
     diff = (ranked["total_delta_pnl"] - ranked["ev_total_audited"]).abs()
     bad = diff[diff > 1.0]
     if len(bad) == 0:
-        print("  PASS gate 2: |total_delta_pnl − ev_total_audited| < $1 for all ranked cells")
+        _log("  PASS gate 2: |total_delta_pnl − ev_total_audited| < $1 for all ranked cells")
     else:
         for idx in bad.index:
             r = ranked.loc[idx]
-            print(f"  FAIL gate 2: band={r['band']} trigger={r['trigger_level']} "
-                  f"ef={r['exit_frac']}: delta_pnl={r['total_delta_pnl']:.2f} "
-                  f"ev_audited={r['ev_total_audited']:.2f} diff={bad[idx]:.2f}")
-        ok = False
+            _log(f"  FAIL gate 2: band={r['band']} trigger={r['trigger_level']} "
+                 f"ef={r['exit_frac']}: delta_pnl={r['total_delta_pnl']:.2f} "
+                 f"ev_audited={r['ev_total_audited']:.2f} diff={bad[idx]:.2f}")
+        g2_ok = False
+    gate_results["gate2"] = g2_ok
 
-    # Gate 3: at exit_frac=1.00, every fired trade's hypothetical == trigger_MTM.
-    # Verify via manual recomputation for the first (band, trigger_level) with n_fired ≥ 20.
+    # Gate 3: degenerate-edge spot check at exit_frac=1.00.
+    g3_ok = True
     spot_done = False
     for band, df in per_band_frames.items():
         for tname in TRIGGER_NAMES:
@@ -604,51 +711,179 @@ def _run_validation(
             n_fired = int(fired.sum())
             if n_fired < 20:
                 continue
-            # total_delta_pnl = Σ over fired trades of (trigger_MTM − net_pnl)
             manual_tdp = float(np.sum((tmtm - pnl[fired])))
             cell_tdp   = float(r["total_delta_pnl"])
             diff_spot  = abs(manual_tdp - cell_tdp)
-            print(f"  Degenerate-edge spot check (exit_frac=1.00, band={band}, trigger={tname}, "
-                  f"n_fired={n_fired}):")
-            print(f"    manual total_delta_pnl = ${manual_tdp:.4f}")
-            print(f"    cell   total_delta_pnl = ${cell_tdp:.4f}")
-            print(f"    diff                   = ${diff_spot:.4f}")
+            _log(f"  Degenerate-edge spot check (exit_frac=1.00, band={band}, trigger={tname}, "
+                 f"n_fired={n_fired}):")
+            _log(f"    manual total_delta_pnl = ${manual_tdp:.4f}")
+            _log(f"    cell   total_delta_pnl = ${cell_tdp:.4f}")
+            _log(f"    diff                   = ${diff_spot:.4f}")
             if diff_spot < 0.01:
-                print("  PASS gate 3: degenerate-edge manual reconciliation")
+                _log("  PASS gate 3: degenerate-edge manual reconciliation")
             else:
-                print("  FAIL gate 3: degenerate-edge spot check exceeds $0.01")
-                ok = False
+                _log("  FAIL gate 3: degenerate-edge spot check exceeds $0.01")
+                g3_ok = False
             spot_done = True
             break
         if spot_done:
             break
     if not spot_done:
-        print("  SKIP gate 3: no (band, trigger_level) at exit_frac=1.00 has n_fired ≥ 20")
+        _log("  SKIP gate 3: no (band, trigger_level) at exit_frac=1.00 has n_fired ≥ 20")
+    gate_results["gate3"] = g3_ok
 
     # Gate 4: flags consistent in all_cells.csv.
+    g4_ok = True
     for band in all_cells_df["band"].unique():
         band_df = all_cells_df[all_cells_df["band"] == band]
-        best_avg_rows = band_df[band_df["is_best_by_avg_pnl"]]
+        best_avg_rows  = band_df[band_df["is_best_by_avg_pnl"]]
         best_comp_rows = band_df[band_df["is_best_by_composite_v2"]]
         if len(best_avg_rows) == 1 and len(best_comp_rows) == 1:
             if best_avg_rows.index[0] == best_comp_rows.index[0]:
-                # They agree — verify both flags are True on the same row.
                 idx = best_avg_rows.index[0]
                 if not (all_cells_df.loc[idx, "is_best_by_avg_pnl"]
                         and all_cells_df.loc[idx, "is_best_by_composite_v2"]):
-                    print(f"  FAIL gate 4: band={band} cells agree but flags inconsistent")
-                    ok = False
+                    _log(f"  FAIL gate 4: band={band} cells agree but flags inconsistent")
+                    g4_ok = False
+    if g4_ok:
+        _log("  PASS gate 4: best-cell flags consistent in all_cells.csv")
+    gate_results["gate4"] = g4_ok
 
-    if ok:
-        print("  PASS gate 4: best-cell flags consistent in all_cells.csv")
+    all_pass = all(gate_results.values())
+    gate_results["all_pass"] = all_pass
+    gate_results["messages"] = messages
 
-    if ok:
-        print("  All validation gates passed.\n")
-    else:
-        print("\n  !! One or more validation gates FAILED — results may be incorrect !!\n")
+    if verbose:
+        if all_pass:
+            print("  All validation gates passed.\n")
+        else:
+            print("\n  !! One or more validation gates FAILED — results may be incorrect !!\n")
+
+    return gate_results
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Library entry point ──────────────────────────────────────────────────────
+
+def run_stage1_sweep(
+    per_band_rules: dict,
+    dataset: str = "delta_match",
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
+) -> dict:
+    """Run the full Stage-1 2D sweep and return results as in-memory dataframes.
+
+    Args:
+        per_band_rules: {band_label: {rule_label, rule_dict, expiry_bucket,
+                         delta_target, entry_hour_ist}} — same shape as JSON.
+        dataset: 'delta_match' | 'price_match'.
+        progress_cb: optional callable(float 0.0–1.0) for warming progress.
+
+    Returns:
+        {all_cells, best_cells, distribution, band_summaries, per_band_frames,
+         per_band_dfs, validation, caveats, params_echo}
+    """
+    bands = per_band_rules
+    n_bands_total = max(len(bands), 1)
+
+    if progress_cb:
+        progress_cb(0.0)
+
+    # ── Load baseline frames ──────────────────────────────────────────────────
+    per_band_frames: dict[str, pd.DataFrame] = {}
+    for i, (band, cfg) in enumerate(bands.items()):
+        rule_dict = {k: v for k, v in cfg["rule_dict"].items() if v is not None}
+        filters: dict = {"entry_atm_iv_band": band}
+        for fkey in ("expiry_bucket", "delta_target", "entry_hour_ist"):
+            if cfg.get(fkey) is not None:
+                filters[fkey] = cfg[fkey]
+        df = _derive_exits(filters=filters, exit_rule=rule_dict, dataset=dataset)
+        if not df.empty:
+            per_band_frames[band] = df.reset_index(drop=True)
+        if progress_cb:
+            progress_cb(0.05 + 0.35 * (i + 1) / n_bands_total)
+
+    if not per_band_frames:
+        raise ValueError(
+            "run_stage1_sweep: no bands returned any data. "
+            "Check per_band_rules filters and dataset."
+        )
+
+    # ── Per-band sweep ────────────────────────────────────────────────────────
+    all_cells_rows: list[dict] = []
+    all_distribution_rows: list[dict] = []
+    band_summaries: list[dict] = []
+    per_band_dfs: dict[str, pd.DataFrame] = {}
+
+    for i, (band, df) in enumerate(per_band_frames.items()):
+        cfg = bands[band]
+        ref = _compute_reference_levels(df)
+        cells_df, distribution_rows = _process_band(band, df, cfg, ref)
+        per_band_dfs[band] = cells_df
+
+        all_cells_rows.extend(cells_df.drop(columns=["iv_band"], errors="ignore").to_dict("records"))
+        all_distribution_rows.extend(distribution_rows)
+
+        attrs         = cells_df.attrs
+        best_avg_idx  = attrs.get("best_avg_idx")
+        best_comp_idx = attrs.get("best_comp_idx")
+        cells_agree   = attrs.get("cells_agree", False)
+        actual_avg    = attrs.get("actual_avg_net_pnl", float("nan"))
+
+        def _cell_coord(cidx_) -> Optional[dict]:
+            if cidx_ is None:
+                return None
+            r_ = cells_df.loc[cidx_]
+            return {
+                "exit_frac":     float(r_["exit_frac"]),
+                "trigger_level": str(r_["trigger_level"]),
+                "avg_pnl":       float(r_["avg_net_pnl"]),
+                "delta_avg_pnl": float(r_.get("delta_avg_pnl", float("nan"))),
+                "composite_v2":  float(r_["composite_score_v2"]) if pd.notna(r_["composite_score_v2"]) else None,
+            }
+
+        best_summaries: dict = {
+            "band":                      band,
+            "baseline_rule_label":       cfg["rule_label"],
+            "n_total":                   len(df),
+            "actual_avg_net_pnl":        actual_avg,
+            "cells_agree":               cells_agree,
+            "band_verdict":              str(cells_df["band_verdict"].iloc[0]) if "band_verdict" in cells_df.columns and len(cells_df) > 0 else "SKIP_INSUFFICIENT",
+            "best_avg_pnl_composite_rank": attrs.get("best_avg_composite_rank"),
+            "best_composite_avg_pnl_rank": attrs.get("best_comp_avg_pnl_rank"),
+        }
+        for prefix, cidx in [("best_avg", best_avg_idx), ("best_composite", best_comp_idx)]:
+            coord = _cell_coord(cidx)
+            if coord:
+                for k, v in coord.items():
+                    best_summaries[f"{prefix}_{k}"] = v
+        band_summaries.append(best_summaries)
+
+        if progress_cb:
+            progress_cb(0.40 + 0.55 * (i + 1) / len(per_band_frames))
+
+    all_cells_df = pd.DataFrame(all_cells_rows).drop(columns=["iv_band"], errors="ignore")
+    best_cells_df = pd.DataFrame(band_summaries)
+    dist_df = pd.DataFrame(all_distribution_rows) if all_distribution_rows else pd.DataFrame()
+
+    validation = _run_validation(all_cells_df, per_band_dfs, per_band_frames, verbose=False)
+
+    if progress_cb:
+        progress_cb(1.0)
+
+    return {
+        "all_cells":       all_cells_df,
+        "best_cells":      best_cells_df,
+        "distribution":    dist_df,
+        "band_summaries":  band_summaries,
+        "per_band_frames": per_band_frames,
+        "per_band_dfs":    per_band_dfs,
+        "validation":      validation,
+        "caveats":         CAVEATS.strip().splitlines(),
+        "params_echo":     {"dataset": dataset, "bands": list(per_band_frames.keys())},
+    }
+
+
+# ─── Main (CLI) ───────────────────────────────────────────────────────────────
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -660,7 +895,6 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ── Load and validate JSON ────────────────────────────────────────────────
     data    = _load_and_validate_json(args.input_json)
     dataset = str(data["dataset"])
     bands   = data["per_band_rules"]
@@ -673,7 +907,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"Triggers   : {TRIGGER_NAMES}")
     print()
 
-    # ── Phase 2: Load baseline frames ────────────────────────────────────────
+    # ── Phase 2: Load baseline frames (with stdout) ───────────────────────────
     per_band_frames: dict[str, pd.DataFrame] = {}
     print("── Phase 2: Loading baseline frames ────────────────────────────────")
     for band, cfg in bands.items():
@@ -682,7 +916,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         for fkey in ("expiry_bucket", "delta_target", "entry_hour_ist"):
             if cfg.get(fkey) is not None:
                 filters[fkey] = cfg[fkey]
-
         df = _derive_exits(filters=filters, exit_rule=rule_dict, dataset=dataset)
         if df.empty:
             print(f"  SKIP band={band}: _derive_exits returned 0 rows for filters={filters}")
@@ -694,12 +927,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("\nERROR: no bands returned any data. Check JSON filters and dataset.")
         sys.exit(1)
 
-    # ── Phase 3/4: Per-band sweep ─────────────────────────────────────────────
+    # ── Phase 3/4: Per-band sweep (with verbose stdout) ───────────────────────
     print("\n── Phase 3/4: Per-band reference levels & 2D sweep ─────────────────")
     all_cells_rows: list[dict] = []
     all_distribution_rows: list[dict] = []
     band_summaries: list[dict] = []
-    per_band_dfs: dict[str, pd.DataFrame] = {}  # band → cells_df (with attrs)
+    per_band_dfs: dict[str, pd.DataFrame] = {}
 
     for band, df in per_band_frames.items():
         cfg = bands[band]
@@ -709,7 +942,6 @@ def main(argv: Optional[list[str]] = None) -> None:
             / max(int((df["net_pnl_estimate_usd"] < 0).sum()), 1)
         )
 
-        # Stdout: per-band input mapping.
         print(f"\n  band={band}  n={len(df)}")
         print(f"    rule        : {cfg['rule_label']}")
         print(f"    n_sl_hit    : {ref['n_sl_hit']}  n_losers={ref['n_losers']}  "
@@ -731,7 +963,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         all_cells_rows.extend(cells_df.drop(columns=["iv_band"], errors="ignore").to_dict("records"))
         all_distribution_rows.extend(distribution_rows)
 
-        # ── per-band best-cell stdout ─────────────────────────────────────────
         attrs         = cells_df.attrs
         best_avg_idx  = attrs.get("best_avg_idx")
         best_comp_idx = attrs.get("best_comp_idx")
@@ -744,6 +975,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                   f"— 75_of_sl cells may be biased upward by SL censoring")
 
         print(f"    actual_avg_net_pnl = ${actual_avg:.2f}")
+        verdict = str(cells_df["band_verdict"].iloc[0]) if "band_verdict" in cells_df.columns else "?"
+        print(f"    band_verdict = {verdict}")
 
         for selector, cidx, label in [
             ("best_by_avg_pnl", best_avg_idx, "Best by avg P&L"),
@@ -753,17 +986,19 @@ def main(argv: Optional[list[str]] = None) -> None:
                 print(f"    {label}: no ranked cells")
                 continue
             r = cells_df.loc[cidx]
+            delta_avg = float(r.get("delta_avg_pnl", float("nan")))
+            c_rec = float(r.get("c_recovered_share", float("nan")))
             print(
                 f"    {label}: ef={r['exit_frac']} trigger={r['trigger_level']} "
                 f"avg_hyp=${float(r['avg_net_pnl']):.2f} "
-                f"(Δ=${float(r['avg_net_pnl']) - actual_avg:+.2f}) "
+                f"(Δ=${delta_avg:+.2f}) "
+                f"c_recovered={c_rec:.0%} "
                 f"composite={float(r['composite_score_v2']):.3f}"
                 if pd.notna(r["composite_score_v2"]) else
                 f"    {label}: ef={r['exit_frac']} trigger={r['trigger_level']} "
                 f"avg_hyp=${float(r['avg_net_pnl']):.2f} "
-                f"(Δ=${float(r['avg_net_pnl']) - actual_avg:+.2f}) composite=NaN"
+                f"(Δ=${delta_avg:+.2f}) c_recovered={c_rec:.0%} composite=NaN"
             )
-            # Print B_unreliable rate per (band, best trigger).
             tname = str(r["trigger_level"])
             for ef_row in cells_df[cells_df["trigger_level"] == tname].itertuples():
                 if ef_row.status == "ok":
@@ -772,51 +1007,43 @@ def main(argv: Optional[list[str]] = None) -> None:
 
         print(f"    cells_agree={cells_agree}")
 
-        # Accumulate band summary row for best_cells.csv.
         def _cell_coord(cidx_) -> Optional[dict]:
             if cidx_ is None:
                 return None
             r_ = cells_df.loc[cidx_]
-            actual_avg_ = attrs["actual_avg_net_pnl"]
             return {
-                "exit_frac": float(r_["exit_frac"]),
+                "exit_frac":     float(r_["exit_frac"]),
                 "trigger_level": str(r_["trigger_level"]),
-                "avg_pnl": float(r_["avg_net_pnl"]),
-                "delta_avg_pnl": float(r_["avg_net_pnl"]) - actual_avg_,
-                "composite_v2": float(r_["composite_score_v2"]) if pd.notna(r_["composite_score_v2"]) else None,
+                "avg_pnl":       float(r_["avg_net_pnl"]),
+                "delta_avg_pnl": float(r_.get("delta_avg_pnl", float("nan"))),
+                "composite_v2":  float(r_["composite_score_v2"]) if pd.notna(r_["composite_score_v2"]) else None,
             }
 
         best_summaries: dict = {
-            "band": band,
-            "baseline_rule_label": cfg["rule_label"],
-            "n_total": len(df),
-            "actual_avg_net_pnl": actual_avg,
-            "cells_agree": cells_agree,
+            "band":                      band,
+            "baseline_rule_label":       cfg["rule_label"],
+            "n_total":                   len(df),
+            "actual_avg_net_pnl":        actual_avg,
+            "cells_agree":               cells_agree,
+            "band_verdict":              verdict,
             "best_avg_pnl_composite_rank": attrs.get("best_avg_composite_rank"),
             "best_composite_avg_pnl_rank": attrs.get("best_comp_avg_pnl_rank"),
         }
-        avg_coord  = _cell_coord(best_avg_idx)
-        comp_coord = _cell_coord(best_comp_idx)
-        if avg_coord:
-            for k, v in avg_coord.items():
-                best_summaries[f"best_avg_{k}"] = v
-        if comp_coord:
-            for k, v in comp_coord.items():
-                best_summaries[f"best_composite_{k}"] = v
+        for prefix, cidx in [("best_avg", best_avg_idx), ("best_composite", best_comp_idx)]:
+            coord = _cell_coord(cidx)
+            if coord:
+                for k, v in coord.items():
+                    best_summaries[f"{prefix}_{k}"] = v
         band_summaries.append(best_summaries)
 
     # ── Phase 5: Write CSVs ───────────────────────────────────────────────────
     print("\n── Phase 5: Writing CSVs ─────────────────────────────────────────────")
-    all_cells_df = pd.DataFrame(all_cells_rows)
-    # Drop internal iv_band alias if it leaked through.
-    all_cells_df = all_cells_df.drop(columns=["iv_band"], errors="ignore")
+    all_cells_df = pd.DataFrame(all_cells_rows).drop(columns=["iv_band"], errors="ignore")
 
-    # CSV 1: all_cells (long format).
     p1 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__all_cells.csv")
     all_cells_df.to_csv(p1, index=False)
     print(f"  [1] {p1}  ({len(all_cells_df)} rows)")
 
-    # CSV 2: heatmap_ev (wide).
     heatmap_ev_rows: list[dict] = []
     for band in per_band_frames.keys():
         band_cells = all_cells_df[all_cells_df["band"] == band]
@@ -824,17 +1051,13 @@ def main(argv: Optional[list[str]] = None) -> None:
         for ef in EXIT_FRACS:
             ef_pct = int(ef * 100)
             for tname in TRIGGER_NAMES:
-                col_name = f"ev_{ef_pct}exit_{tname}"
-                sub = band_cells[
-                    (band_cells["exit_frac"] == ef) & (band_cells["trigger_level"] == tname)
-                ]
-                row[col_name] = float(sub["ev_per_trade"].iloc[0]) if not sub.empty else float("nan")
+                sub = band_cells[(band_cells["exit_frac"] == ef) & (band_cells["trigger_level"] == tname)]
+                row[f"ev_{ef_pct}exit_{tname}"] = float(sub["ev_per_trade"].iloc[0]) if not sub.empty else float("nan")
         heatmap_ev_rows.append(row)
     p2 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__heatmap_ev.csv")
     pd.DataFrame(heatmap_ev_rows).to_csv(p2, index=False)
     print(f"  [2] {p2}  ({len(heatmap_ev_rows)} bands × 20 trigger/ef combos)")
 
-    # CSV 3: heatmap_composite (wide).
     heatmap_comp_rows: list[dict] = []
     for band in per_band_frames.keys():
         band_cells = all_cells_df[all_cells_df["band"] == band]
@@ -842,36 +1065,29 @@ def main(argv: Optional[list[str]] = None) -> None:
         for ef in EXIT_FRACS:
             ef_pct = int(ef * 100)
             for tname in TRIGGER_NAMES:
-                col_name = f"composite_{ef_pct}exit_{tname}"
-                sub = band_cells[
-                    (band_cells["exit_frac"] == ef) & (band_cells["trigger_level"] == tname)
-                ]
+                sub = band_cells[(band_cells["exit_frac"] == ef) & (band_cells["trigger_level"] == tname)]
                 val = sub["composite_score_v2"].iloc[0] if not sub.empty else float("nan")
-                row[col_name] = float(val) if pd.notna(val) else float("nan")
+                row[f"composite_{ef_pct}exit_{tname}"] = float(val) if pd.notna(val) else float("nan")
         heatmap_comp_rows.append(row)
     p3 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__heatmap_composite.csv")
     pd.DataFrame(heatmap_comp_rows).to_csv(p3, index=False)
     print(f"  [3] {p3}  ({len(heatmap_comp_rows)} bands × 20 trigger/ef combos)")
 
-    # CSV 4: best_cells.
-    p4 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__best_cells.csv")
     best_cells_df = pd.DataFrame(band_summaries)
+    p4 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__best_cells.csv")
     best_cells_df.to_csv(p4, index=False)
     print(f"  [4] {p4}  ({len(best_cells_df)} bands)")
 
-    # CSV 5: distribution.
-    p5 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__distribution.csv")
     dist_df = pd.DataFrame(all_distribution_rows) if all_distribution_rows else pd.DataFrame()
+    p5 = os.path.join(OUTPUT_DIR, "stage1_2d__by_iv_band__distribution.csv")
     dist_df.to_csv(p5, index=False)
     print(f"  [5] {p5}  ({len(dist_df)} rows)")
 
     # ── Phase 6: Cross-band observations ──────────────────────────────────────
     print("\n── Phase 6: Cross-band observations ─────────────────────────────────")
-
-    # Globally-good combo: best in ≥ half the bands.
     combo_counts: dict[tuple, int] = {}
     for bs in band_summaries:
-        ef  = bs.get("best_avg_exit_frac")
+        ef   = bs.get("best_avg_exit_frac")
         trig = bs.get("best_avg_trigger_level")
         if ef is not None and trig is not None:
             key = (ef, trig)
@@ -885,45 +1101,43 @@ def main(argv: Optional[list[str]] = None) -> None:
     else:
         print("  No single (exit_frac, trigger_level) combo is best in ≥50% of bands.")
 
-    # Bands where stage-1 hurts (best-by-avg-pnl has delta < 0).
     negative_bands = [
         bs["band"] for bs in band_summaries
-        if bs.get("best_avg_delta_avg_pnl") is not None
-        and bs["best_avg_delta_avg_pnl"] < 0
+        if bs.get("best_avg_delta_avg_pnl") is not None and bs["best_avg_delta_avg_pnl"] < 0
     ]
     if negative_bands:
-        print(f"  Bands where best stage-1 cell HURTS avg P&L (disable stage-1 there): "
-              f"{negative_bands}")
+        print(f"  Bands where best stage-1 cell HURTS avg P&L: {negative_bands}")
     else:
         print("  All bands have a stage-1 cell that improves avg P&L.")
 
-    # Degenerate: exit_frac=1.00 wins.
-    degenerate_wins = 0
-    for band in per_band_frames.keys():
-        best_avg_idx = per_band_dfs[band].attrs.get("best_avg_idx")
-        if best_avg_idx is not None:
-            r = per_band_dfs[band].loc[best_avg_idx]
-            if float(r["exit_frac"]) == 1.00:
-                degenerate_wins += 1
+    degenerate_wins = sum(
+        1 for band in per_band_frames
+        if (idx := per_band_dfs[band].attrs.get("best_avg_idx")) is not None
+        and float(per_band_dfs[band].loc[idx, "exit_frac"]) == 1.00
+    )
     print(f"  exit_frac=1.00 (tighter SL) is best-by-avg-pnl in {degenerate_wins}/{n_bands} bands.")
 
-    # Disagreement bands.
     disagree = [bs["band"] for bs in band_summaries if not bs.get("cells_agree", True)]
     if disagree:
-        print(f"  Bands where best-by-avg-pnl ≠ best-by-composite (risk/return tension): "
-              f"{disagree}")
+        print(f"  Bands where best-by-avg-pnl ≠ best-by-composite: {disagree}")
         for band in disagree:
             bs = next(b for b in band_summaries if b["band"] == band)
             print(f"    {band}: avg_pnl_composite_rank={bs.get('best_avg_pnl_composite_rank')} "
                   f"composite_avg_pnl_rank={bs.get('best_composite_avg_pnl_rank')}")
 
+    # Verdict summary.
+    verdict_counts: dict[str, int] = {}
+    for bs in band_summaries:
+        v = bs.get("band_verdict", "?")
+        verdict_counts[v] = verdict_counts.get(v, 0) + 1
+    print(f"\n  Verdict summary: {verdict_counts}")
+
     # ── Validation ────────────────────────────────────────────────────────────
-    _run_validation(all_cells_df, per_band_dfs, per_band_frames)
+    validation = _run_validation(all_cells_df, per_band_dfs, per_band_frames, verbose=True)
+    if not validation.get("all_pass", False):
+        sys.exit(1)
 
-    # ── Caveats ───────────────────────────────────────────────────────────────
     print(CAVEATS)
-
-    # ── Head of best_cells.csv ───────────────────────────────────────────────
     print("── Head of best_cells.csv ────────────────────────────────────────────")
     print(best_cells_df.to_string(index=False))
     print("\nDone. All CSVs written to", OUTPUT_DIR)
