@@ -35,6 +35,33 @@ If anything looks off, the code lives at:
 - `frontend/src/services/m7_api.ts:FetchBestComboArgs` (`premium_sl_pcts` arg + serialisation)
 
 ## Last Session
+**Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-22 (Session 43 — Stage-1 per-trade modals)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 43 — Shipped
+
+| Commit | What |
+|--------|------|
+| `a7e500c` | Stage-1 per-trade modals — `band_trades` + `all_trades` endpoints + `Stage1BandTradesModal` + `Stage1AllTradesModal` + wiring into `M7Stage1Panel` |
+
+### Session 43 — What was done
+
+- **Backend** (`m7_stage1_analysis.py`): Two new POST endpoints:
+  - `POST /stage1_analysis/band_trades` — all trades for one band's baseline rule; SL_avg/L_avg/W_avg computed with NO minimum-n threshold
+  - `POST /stage1_analysis/all_trades` — all trades across all bands; each row carries `band_sl_avg/band_l_avg/band_w_avg` so UI applies per-band triggers
+- **Frontend** (`m7_api.ts`): `Stage1TradeRow`, `Stage1BandTradesResponse`, `Stage1AllTradeRow`, `Stage1AllTradesResponse` interfaces + fetch functions
+- **Frontend** (`M7Stage1Panel.tsx`):
+  - `Stage1BandTradesModal` — per-band per-trade drill-down; SL-avg/L-avg/W-avg/Custom trigger; 25/50/75/100% exit frac; All/Losers/SL-hit/Fired filter; case-tagged rows with hypothetical P&L
+  - `Stage1AllTradesModal` — cross-band view; per-band trigger (each trade uses its own band's trigger); Band+Rule columns; All/Losses/Best-win/Worst-DD-win filters; future-work note
+  - "View N trades →" button on each band card; "View all trades" button in panel header
+
+### Session 43 — Pending
+
+- **SL-chip Playwright verification** — see open follow-up at top of this file (Session 40, commit `3f3a145`)
+- **Pivot Profile UI verification** — commit `5f78994` (Session 40); Playwright screenshot still needed
+
+## Previous Session
 **Who:** Claude (Opus 4.7)
 **Date:** 2026-05-22 (Session 42 — Per-session backend isolation + strike-index cache)
 **Branch:** `mainbranch-gemini_claude`
