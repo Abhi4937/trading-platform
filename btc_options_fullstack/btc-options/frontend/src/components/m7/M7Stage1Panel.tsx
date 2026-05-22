@@ -862,6 +862,9 @@ function Stage1BandCard({
   summary,
   lots,
   baselineMetrics,
+  ruleDict,
+  ruleFilters,
+  dataset,
   onViewTrades,
 }: {
   band: string;
@@ -870,10 +873,26 @@ function Stage1BandCard({
   summary: Stage1BandSummary | null;
   lots: number;
   baselineMetrics?: Stage1PerBandRule['baseline_metrics'];
+  ruleDict?: Record<string, unknown>;
+  ruleFilters?: { expiry_bucket?: string; delta_target?: number; entry_hour_ist?: number };
+  dataset?: M7Dataset;
   onViewTrades?: () => void;
 }) {
   const [selector, setSelector] = useState<'avg_pnl' | 'composite'>('avg_pnl');
   const [expandedCell, setExpandedCell] = useState<string | null>(null);
+
+  // Lazy-fetched trades for this band — used to compute hyp MTM aggregates per cell
+  // (F14 linear approximation, client-side).
+  const [bandTrades, setBandTrades] = useState<Stage1TradeRow[] | null>(null);
+  useEffect(() => {
+    if (expandedCell && !bandTrades && ruleDict && dataset) {
+      const ac = new AbortController();
+      fetchM7Stage1BandTrades(band, ruleDict, ruleFilters ?? {}, dataset, ac.signal)
+        .then(d => setBandTrades(d.trades))
+        .catch(() => {});
+      return () => ac.abort();
+    }
+  }, [expandedCell, bandTrades, band, dataset]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lotsScale = lots / 100;
   const sc = (v: number | null | undefined) => v != null ? v * lotsScale : v;
@@ -1097,6 +1116,7 @@ function Stage1BandCard({
           baseline={baseline}
           baselineMetrics={baselineMetrics}
           lots={lots}
+          bandTrades={bandTrades}
         />
       )}
     </div>
@@ -1106,13 +1126,14 @@ function Stage1BandCard({
 // ─── CellDetail ───────────────────────────────────────────────────────────────
 
 function CellDetail({
-  cell, lotsScale = 1, baseline, baselineMetrics, lots,
+  cell, lotsScale = 1, baseline, baselineMetrics, lots, bandTrades,
 }: {
   cell: Stage1Cell;
   lotsScale?: number;
   baseline?: { actualAvg: number | null; actualWinRate: number | null; actualMaxLoss: number | null; actualCvar: number | null };
   baselineMetrics?: Stage1PerBandRule['baseline_metrics'];
   lots?: number;
+  bandTrades?: Stage1TradeRow[] | null;
 }) {
   const sc = (v: number | null | undefined) => v != null ? v * lotsScale : v;
   const triggerStr = `${fmtAbs$(sc(cell.trigger_mtm))}`;
@@ -1275,7 +1296,7 @@ function CellDetail({
 
   // ── Comparison rows: baseline → stage-1 → Δ ──
   // direction: 'pos' = positive Δ is better (green ↑), 'neg' = negative Δ is better (green ↓), 'neutral' = no preference
-  type CmpRow = { label: string; baseline: string; stage1: string; delta: string; deltaColor: string; arrow: string; note?: string };
+  type CmpRow = { label: string; baseline: string; stage1: string; delta: string; deltaColor: string; arrow: string; note?: string; section?: string };
   const cmpRows: CmpRow[] = [];
 
   if (bm) {
@@ -1368,10 +1389,33 @@ function CellDetail({
         arrow: dwins > 0 ? '↑' : dwins < 0 ? '↓' : '−',
       });
     }
+
+    // 7) Composite v2 (baseline composite vs stage-1 within-band composite)
+    if (bm.composite_score != null && cell.composite_score_v2 != null) {
+      const dCmp = cell.composite_score_v2 - bm.composite_score;
+      cmpRows.push({
+        label: 'Composite v2',
+        baseline: bm.composite_score.toFixed(4),
+        stage1: cell.composite_score_v2.toFixed(4),
+        delta: `${dCmp >= 0 ? '+' : ''}${dCmp.toFixed(4)}`,
+        deltaColor: dCmp > 0 ? '#4ade80' : dCmp < 0 ? '#f87171' : '#7a9bb5',
+        arrow: dCmp > 0 ? '↑' : dCmp < 0 ? '↓' : '−',
+        note: 'baseline = full-grid normalised; stage-1 = within-band normalised — not strictly apples-to-apples',
+      });
+    }
   }
+
+  // Tag first cmpRow with "Core P&L" section
+  if (cmpRows.length > 0) cmpRows[0].section = 'Core P&L';
 
   // ── Baseline reference data, split by reason it lacks a stage-1 equivalent ──
   const sx = (v: number | null | undefined) => v != null ? `$${(v * totalScale).toFixed(2)}` : '—';
+  const noteMtmApprox = 'F14: linear approx (exit_frac × trigger + (1−exit_frac) × actual)';
+  const noteEntryUnchanged = 'entry-time, unchanged';
+  const noteNoHyp = 'F-tracked (F2–F5): backend doesn\'t aggregate hyp version yet';
+  const notePathBlocked = 'no stage-1 equivalent: requires dual-exit modeling';
+  const noteStage1Only = 'stage-1 specific (no baseline analog)';
+  const noteRuleAmbig = 'stage-1 partial exit doesn\'t change rule firing — surviving portion still triggers original rule';
 
   // A. TRULY UNCHANGED — set at trade entry, before stage-1 can fire
   const baselineEntryOnly: [string, string][] = bm ? [
@@ -1392,6 +1436,241 @@ function CellDetail({
     ['Avg winner exit', bm.avg_winner_exit_offset_minutes != null ? `${Math.floor(bm.avg_winner_exit_offset_minutes/60)}h ${Math.round(bm.avg_winner_exit_offset_minutes%60)}m` : '—'],
     ['Avg loser exit', bm.avg_loser_exit_offset_minutes != null ? `${Math.floor(bm.avg_loser_exit_offset_minutes/60)}h ${Math.round(bm.avg_loser_exit_offset_minutes%60)}m` : '—'],
   ] : [];
+
+  // ── F14: compute hyp MTM aggregates from bandTrades using linear approximation ──
+  // hyp_min_mtm = exit_frac × trigger + (1-exit_frac) × actual_min_mtm  (for fired trades)
+  // hyp_max_mtm = exit_frac × trigger + (1-exit_frac) × actual_max_mtm  (for fired trades)
+  // Classify hyp-winner/hyp-loser by hyp_net_pnl.
+  const mtmCmpRows: CmpRow[] = [];
+  if (bandTrades && bandTrades.length > 0 && cell.trigger_mtm != null && bm) {
+    const trig = cell.trigger_mtm;
+    const ef = cell.exit_frac;
+    const enr = bandTrades.map(t => {
+      const minM = t.min_mtm_usd ?? 0;
+      const maxM = t.max_mtm_usd ?? 0;
+      const net = t.net_pnl_estimate_usd ?? 0;
+      const fired = minM <= trig;
+      const hyp_min = fired ? ef * trig + (1 - ef) * minM : minM;
+      const hyp_max = fired ? ef * trig + (1 - ef) * maxM : maxM;
+      const hyp_net = fired ? ef * trig + (1 - ef) * net : net;
+      return { minM, maxM, net, hyp_min, hyp_max, hyp_net };
+    });
+    const winnersHyp = enr.filter(t => t.hyp_net >= 0);
+    const losersHyp = enr.filter(t => t.hyp_net < 0);
+    const winnersBase = enr.filter(t => t.net >= 0);
+    const losersBase = enr.filter(t => t.net < 0);
+    const mean = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+    const minOf = (arr: number[]) => arr.length ? Math.min(...arr) : null;
+    const maxOf = (arr: number[]) => arr.length ? Math.max(...arr) : null;
+
+    const mtmRow = (label: string, baseVal: number | null, stageVal: number | null, isPositiveBetter: boolean) => {
+      if (baseVal == null || stageVal == null) return;
+      const baseScaled = baseVal * totalScale;
+      const stageScaled = stageVal * totalScale;
+      const delta = stageScaled - baseScaled;
+      const same = Math.abs(delta) < 1e-9;
+      const better = isPositiveBetter ? delta > 0 : delta < 0;
+      mtmCmpRows.push({
+        label,
+        baseline: `$${baseScaled.toFixed(2)}`,
+        stage1: `$${stageScaled.toFixed(2)}`,
+        delta: `${delta >= 0 ? '+' : ''}$${delta.toFixed(2)}`,
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+      });
+    };
+
+    // Winners side — positive Δ on max_mtm = bigger peak = better; positive Δ on min_mtm = less negative trough = better
+    mtmRow('Avg max MTM (Winners)', mean(winnersBase.map(t => t.maxM)), mean(winnersHyp.map(t => t.hyp_max)), true);
+    mtmRow('Avg min MTM (Winners)', mean(winnersBase.map(t => t.minM)), mean(winnersHyp.map(t => t.hyp_min)), true);
+    mtmRow('Max MTM (Winners)',     maxOf(winnersBase.map(t => t.maxM)), maxOf(winnersHyp.map(t => t.hyp_max)), true);
+    mtmRow('Min MTM (Winners)',     minOf(winnersBase.map(t => t.minM)), minOf(winnersHyp.map(t => t.hyp_min)), true);
+
+    // Losers side
+    mtmRow('Avg max MTM (Losers)', mean(losersBase.map(t => t.maxM)), mean(losersHyp.map(t => t.hyp_max)), true);
+    mtmRow('Avg min MTM (Losers)', mean(losersBase.map(t => t.minM)), mean(losersHyp.map(t => t.hyp_min)), true);
+    mtmRow('Max MTM (Losers)',     maxOf(losersBase.map(t => t.maxM)), maxOf(losersHyp.map(t => t.hyp_max)), true);
+    mtmRow('Min MTM (Losers)',     minOf(losersBase.map(t => t.minM)), minOf(losersHyp.map(t => t.hyp_min)), true);
+
+    // Largest loss MTM (most negative trough among losers)
+    mtmRow('Largest loss MTM', minOf(losersBase.map(t => t.minM)), minOf(losersHyp.map(t => t.hyp_min)), true);
+    // Largest win MTM (highest peak among winners)
+    mtmRow('Largest win MTM', maxOf(winnersBase.map(t => t.maxM)), maxOf(winnersHyp.map(t => t.hyp_max)), true);
+  }
+
+  // ── Build UNIFIED row list: cmpRows + MTM + baseline-only + entry-time + stage-1-only ──
+  const unifiedRows: CmpRow[] = [...cmpRows];
+
+  // MTM trajectory (F14) — only if trades loaded
+  if (mtmCmpRows.length > 0) {
+    mtmCmpRows.forEach((r, i) => {
+      unifiedRows.push({ ...r, section: i === 0 ? 'MTM trajectory (F14 linear approx)' : undefined, note: r.note ?? noteMtmApprox });
+    });
+  } else if (bm) {
+    // bandTrades not yet loaded — show baseline only with placeholder note
+    const mtmStub = (label: string, baseVal: number | null) => {
+      unifiedRows.push({
+        label, baseline: baseVal != null ? `$${(baseVal * totalScale).toFixed(2)}` : '—',
+        stage1: '⋯ loading', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+        note: 'stage-1 hyp computes when trades load',
+        section: label === 'Avg max MTM (Winners)' ? 'MTM trajectory (F14 — loading)' : undefined,
+      });
+    };
+    mtmStub('Avg max MTM (Winners)', bm.avg_max_mtm_winners);
+    mtmStub('Avg min MTM (Winners)', bm.avg_min_mtm_winners);
+    mtmStub('Max MTM (Winners)', bm.max_mtm_winners);
+    mtmStub('Min MTM (Winners)', bm.min_mtm_winners);
+    mtmStub('Avg max MTM (Losers)', bm.avg_max_mtm_losers);
+    mtmStub('Avg min MTM (Losers)', bm.avg_min_mtm_losers);
+    mtmStub('Max MTM (Losers)', bm.max_mtm_losers);
+    mtmStub('Min MTM (Losers)', bm.min_mtm_losers);
+    mtmStub('Largest loss MTM', bm.largest_loss_mtm);
+    mtmStub('Largest win MTM', bm.largest_win_mtm);
+  }
+
+  // Exit MTMs — baseline-only (no F14 equivalent; the "exit" under stage-1 is dual)
+  if (bm) {
+    const exitStub = (label: string, baseVal: number | null, isFirst = false) => {
+      unifiedRows.push({
+        label, baseline: baseVal != null ? `$${(baseVal * totalScale).toFixed(2)}` : '—',
+        stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+        note: notePathBlocked,
+        section: isFirst ? 'Exit MTMs (no stage-1 equivalent — dual-exit semantics)' : undefined,
+      });
+    };
+    exitStub('Avg exit MTM', bm.avg_exit_mtm, true);
+    exitStub('Avg win MTM', bm.avg_win_mtm);
+    exitStub('Avg loss MTM', bm.avg_loss_mtm);
+
+    // W<avg min, L>avg max — counts derivable from trades but stage-1 split needs F14
+    unifiedRows.push({
+      label: 'W < avg min MTM',
+      baseline: String(bm.n_winners_below_avg_min_mtm ?? '—'),
+      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+      note: 'F-tracked: count of winners below band\'s avg-min-MTM; hyp version needs F14',
+    });
+    unifiedRows.push({
+      label: 'L > avg max MTM',
+      baseline: String(bm.n_losers_above_avg_max_mtm ?? '—'),
+      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+      note: 'F-tracked: hyp version needs F14',
+    });
+    unifiedRows.push({
+      label: 'Peak %',
+      baseline: bm.avg_pct_max_mtm_on_credit != null ? `${(bm.avg_pct_max_mtm_on_credit * 100).toFixed(2)}%` : '—',
+      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+      note: 'F-tracked: hyp Peak% needs F14',
+    });
+    unifiedRows.push({
+      label: 'Trough %',
+      baseline: bm.avg_pct_min_mtm_on_credit != null ? `${(bm.avg_pct_min_mtm_on_credit * 100).toFixed(2)}%` : '—',
+      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+      note: 'F-tracked: hyp Trough% needs F14',
+    });
+  }
+
+  // P&L extremes (win/loss splits) — F-tracked
+  if (bm) {
+    const baselineOnly = (label: string, val: string, note: string, isFirst = false) =>
+      unifiedRows.push({
+        label, baseline: val, stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5', note,
+        section: isFirst ? 'P&L splits · baseline only (F-tracked F2–F5)' : undefined,
+      });
+    baselineOnly('Avg win (per trade)', sx(bm.avg_win_usd), noteNoHyp, true);
+    baselineOnly('Avg loss (per trade)', sx(bm.avg_loss_usd), noteNoHyp);
+    baselineOnly('Largest win', sx(bm.max_win_usd), noteNoHyp);
+    baselineOnly('Ret / margin', bm.avg_pct_return_on_margin != null ? `${(bm.avg_pct_return_on_margin * 100).toFixed(2)}%` : '—', noteNoHyp);
+    baselineOnly('Ret / credit', bm.avg_pct_return_on_credit != null ? `${(bm.avg_pct_return_on_credit * 100).toFixed(2)}%` : '—', noteNoHyp);
+    baselineOnly('Ret / margin (W)', bm.avg_pct_return_on_margin_winners != null ? `${(bm.avg_pct_return_on_margin_winners * 100).toFixed(2)}%` : '—', noteNoHyp);
+    baselineOnly('Ret / credit (W)', bm.avg_pct_return_on_credit_winners != null ? `${(bm.avg_pct_return_on_credit_winners * 100).toFixed(2)}%` : '—', noteNoHyp);
+  }
+
+  // Rule firing stats — baseline only (rule still fires for surviving portion; semantics ambiguous)
+  if (bm) {
+    const ruleStub = (label: string, val: string, isFirst = false) =>
+      unifiedRows.push({
+        label, baseline: val, stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+        note: noteRuleAmbig,
+        section: isFirst ? 'Rule firing (no clean stage-1 equivalent)' : undefined,
+      });
+    ruleStub('Hit % (rule)', bm.n_rule_trigger != null && bm.n_trades ? `${((bm.n_rule_trigger / bm.n_trades) * 100).toFixed(0)}%` : '—', true);
+    ruleStub('Rule hits', String(bm.n_rule_trigger ?? '—'));
+    ruleStub('SL hits', String(bm.n_premium_sl_hit ?? '—'));
+    ruleStub('Hard cap', String(bm.n_hard_cap ?? '—'));
+    ruleStub('Max winning streak', String(bm.max_consec_wins ?? '—'));
+    ruleStub('Max losing streak', String(bm.max_consec_losses ?? '—'));
+  }
+
+  // Exit timing — baseline only
+  if (bm) {
+    const timing = (m: number | null | undefined) => m != null ? `${Math.floor(m/60)}h ${Math.round(m%60)}m` : '—';
+    unifiedRows.push({
+      section: 'Exit timing (no stage-1 equivalent — dual exit)',
+      label: 'Avg exit time',
+      baseline: timing(bm.avg_exit_offset_minutes), stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+      note: notePathBlocked,
+    });
+    unifiedRows.push({ label: 'Avg winner exit', baseline: timing(bm.avg_winner_exit_offset_minutes), stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5', note: notePathBlocked });
+    unifiedRows.push({ label: 'Avg loser exit', baseline: timing(bm.avg_loser_exit_offset_minutes), stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5', note: notePathBlocked });
+  }
+
+  // Entry-time values (truly unchanged: same in both columns, Δ = 0)
+  if (bm) {
+    const entryRow = (label: string, val: string, isFirst = false) =>
+      unifiedRows.push({
+        label, baseline: val, stage1: val, delta: '0', arrow: '−', deltaColor: '#7a9bb5',
+        note: noteEntryUnchanged,
+        section: isFirst ? 'Entry-time values (truly unchanged)' : undefined,
+      });
+    entryRow('Avg credit', bm.avg_credit != null ? `$${bm.avg_credit.toFixed(2)}` : '—', true);
+    entryRow('Avg margin', bm.avg_margin != null ? `$${bm.avg_margin.toFixed(2)}` : '—');
+    entryRow('Lots', String(bm.lots ?? lots ?? '—'));
+  }
+
+  // Stage-1 cell-specific config + case breakdown + magnitudes + delta outcomes
+  // (no baseline column — these only exist under stage-1)
+  unifiedRows.push({
+    section: 'Stage-1 cell config (no baseline analog)',
+    label: 'Trigger level', baseline: '—', stage1: TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level,
+    delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only,
+  });
+  unifiedRows.push({ label: 'Exit frac', baseline: '—', stage1: `${(cell.exit_frac * 100).toFixed(0)}%`, delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+  unifiedRows.push({ label: 'Trigger MTM', baseline: '—', stage1: triggerStr, delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+  unifiedRows.push({ label: 'Status', baseline: '—', stage1: cell.status, delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+
+  unifiedRows.push({
+    section: 'Stage-1 trade classification (no baseline analog)',
+    label: 'n_A (no fire)', baseline: '—', stage1: String(nA), delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only,
+  });
+  unifiedRows.push({ label: 'n_B_reliable (winner dipped)', baseline: '—', stage1: String(nBr), delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+  unifiedRows.push({ label: 'n_B_unreliable (peak before trough)', baseline: '—', stage1: String(nBu), delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+  unifiedRows.push({ label: 'n_C (fires on losers)', baseline: '—', stage1: String(nC), delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+  unifiedRows.push({ label: 'n_C_deeper (saved)', baseline: '—', stage1: String(nCd), delta: '—', arrow: '', deltaColor: '#4ade80', note: noteStage1Only });
+  unifiedRows.push({ label: 'n_C_recovered (hurt)', baseline: '—', stage1: String(nCr), delta: '—', arrow: '', deltaColor: '#f87171', note: noteStage1Only });
+  unifiedRows.push({ label: 'C_recovered share', baseline: '—', stage1: fmtPct(cell.c_recovered_share), delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+
+  unifiedRows.push({
+    section: 'Stage-1 magnitudes (no baseline analog)',
+    label: 'avg saved/trade (C_deeper)', baseline: '—', stage1: savedStr, delta: '—', arrow: '', deltaColor: '#4ade80', note: noteStage1Only,
+  });
+  unifiedRows.push({ label: 'avg given-up/trade (B_reliable)', baseline: '—', stage1: fmt$(sc(cell.avg_given_up), 1), delta: '—', arrow: '', deltaColor: '#f87171', note: noteStage1Only });
+  unifiedRows.push({ label: 'avg hurt/trade (C_recovered)', baseline: '—', stage1: hurtStr, delta: '—', arrow: '', deltaColor: '#f87171', note: noteStage1Only });
+  unifiedRows.push({ label: 'pct_B_unreliable', baseline: '—', stage1: fmtPct(cell.pct_B_unreliable), delta: '—', arrow: '', deltaColor: '#7a9bb5', note: noteStage1Only });
+
+  // Stage-1 outcomes (delta + hyp)
+  const stageOutcome = (label: string, val: string, delta: string, color: string, arrow: string, isFirst = false) =>
+    unifiedRows.push({
+      label, baseline: '—', stage1: val, delta, arrow, deltaColor: color, note: 'stage-1 outcome metric',
+      section: isFirst ? 'Stage-1 outcomes (Δ from baseline)' : undefined,
+    });
+  const evScaled = sc(cell.ev_per_trade) as number | null;
+  stageOutcome('EV/trade', evScaled != null ? fmt$(evScaled, 1) : '—', evScaled != null ? fmt$(evScaled, 1) : '—',
+    (evScaled ?? 0) > 0 ? '#4ade80' : (evScaled ?? 0) < 0 ? '#f87171' : '#7a9bb5',
+    (evScaled ?? 0) > 0 ? '↑' : (evScaled ?? 0) < 0 ? '↓' : '−', true);
+  const dCvar = sc(cell.delta_cvar_95) as number | null;
+  stageOutcome('Δ CVaR-95', dCvar != null ? fmt$(dCvar, 1) : '—', dCvar != null ? fmt$(dCvar, 1) : '—',
+    (dCvar ?? 0) > 0 ? '#4ade80' : (dCvar ?? 0) < 0 ? '#f87171' : '#7a9bb5',
+    (dCvar ?? 0) > 0 ? '↑' : (dCvar ?? 0) < 0 ? '↓' : '−');
 
   // C. WOULD CHANGE — but stage-1 version requires path-walking (X1 blocker)
   //    The surviving (1-exit_frac) portion has its OWN MTM trajectory after trigger.
@@ -1433,148 +1712,143 @@ function CellDetail({
     }}>{text}</div>
   );
 
-  const compactItem = (label: string, value: string): React.ReactNode => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '2px 0' }}>
-      <span style={{ color: '#7a9bb5', fontSize: 10 }}>{label}:</span>
-      <span style={{ color: '#cfd9e3', fontWeight: 600, fontSize: 11, fontFamily: 'monospace', textAlign: 'right' }}>{value}</span>
+  const compactItem = (
+    label: string,
+    value: string,
+    arrow?: { arrow: string; color: string },
+    context?: string,
+  ): React.ReactNode => (
+    <div style={{ display: 'flex', flexDirection: 'column', padding: '2px 0', gap: 1 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ color: '#7a9bb5', fontSize: 10 }}>{label}:</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{
+            color: arrow?.color ?? '#cfd9e3',
+            fontWeight: 600, fontSize: 11, fontFamily: 'monospace', textAlign: 'right',
+          }}>{value}</span>
+          {arrow?.arrow && (
+            <span style={{ color: arrow.color, fontSize: 13, fontWeight: 700, lineHeight: 1 }}>
+              {arrow.arrow}
+            </span>
+          )}
+        </span>
+      </div>
+      {context && (
+        <span style={{ color: '#4a5d6e', fontSize: 9, textAlign: 'right', fontFamily: 'monospace' }}>
+          {context}
+        </span>
+      )}
     </div>
   );
+
+  // ── Build arrow map for P&L impact metrics (Block 2 highlighting) ─────────
+  // sgn returns up/down arrow + green/red color. For metrics where "lower is better",
+  // pass isBetterUp=false (e.g. consec losses).
+  const sgn = (v: number | null | undefined, isBetterUp = true): { arrow: string; color: string } => {
+    if (v == null || isNaN(v)) return { arrow: '', color: '#cfd9e3' };
+    if (Math.abs(v) < 1e-9) return { arrow: '−', color: '#7a9bb5' };
+    const better = isBetterUp ? v > 0 : v < 0;
+    return { arrow: v > 0 ? '↑' : '↓', color: better ? '#4ade80' : '#f87171' };
+  };
+  const arrowMap: Record<string, { arrow: string; color: string }> = {
+    'EV/trade':            sgn(cell.ev_per_trade, true),
+    'Δ avg P&L':           sgn(cell.delta_avg_pnl, true),
+    'Δ win rate':          sgn(cell.delta_win_rate, true),
+    'Δ CVaR-95':           sgn(cell.delta_cvar_95, true),
+    'Δ max loss':          sgn(cell.delta_max_loss, true),
+    'Δ max consec losses': sgn(cell.delta_max_consec_losses, false),  // lower is better
+  };
+  // Hyp metrics vs baseline (best-combo) — change in hyp from baseline
+  if (bmAvg != null && derivedHypAvg != null) {
+    arrowMap['Hyp avg P&L'] = sgn(derivedHypAvg - bmAvg, true);
+  }
+  if (bmWR != null && derivedHypWinRate != null) {
+    arrowMap['Hyp win rate'] = sgn(derivedHypWinRate - bmWR, true);
+  }
+  if (bm?.composite_score != null && cell.composite_score_v2 != null) {
+    arrowMap['Composite v2 (hyp)'] = sgn(cell.composite_score_v2 - bm.composite_score, true);
+  }
+
+  // ── Build "baseline → stage-1" context strings for P&L impact metrics ──
+  // Shows the actual before-and-after values so the delta makes sense.
+  const ctxMap: Record<string, string> = {};
+  const baseAvgScaled = bmAvg != null ? bmAvg * totalScale : null;
+  if (baseAvgScaled != null && derivedHypAvg != null) {
+    const hypScaled = sc(derivedHypAvg) as number;
+    ctxMap['EV/trade'] = `${fmt$(baseAvgScaled, 1)} → ${fmt$(hypScaled, 1)}`;
+    ctxMap['Δ avg P&L'] = `${fmt$(baseAvgScaled, 1)} → ${fmt$(hypScaled, 1)}`;
+    ctxMap['Hyp avg P&L'] = `baseline ${fmt$(baseAvgScaled, 1)} · Δ ${fmt$(sc(cell.delta_avg_pnl), 1)}`;
+  }
+  if (bmWR != null && derivedHypWinRate != null) {
+    ctxMap['Δ win rate'] = `${fmtPct(bmWR)} → ${fmtPct(derivedHypWinRate)}`;
+    ctxMap['Hyp win rate'] = `baseline ${fmtPct(bmWR)} · Δ ${fmtPct(cell.delta_win_rate)}`;
+  }
+  if (bm?.max_loss_usd != null && cell.delta_max_loss != null) {
+    const baseML = bm.max_loss_usd * totalScale;
+    const stageML = baseML + (cell.delta_max_loss * lotsScale);
+    ctxMap['Δ max loss'] = `${fmt$(baseML, 1)} → ${fmt$(stageML, 1)}`;
+  }
+  if (bm?.max_consec_losses != null && cell.delta_max_consec_losses != null) {
+    const stageMCL = bm.max_consec_losses + cell.delta_max_consec_losses;
+    ctxMap['Δ max consec losses'] = `${bm.max_consec_losses} → ${stageMCL}`;
+  }
+  // For CVaR-95 we don't have a direct baseline cvar in best-combo; show delta only
+  if (bm?.composite_score != null && cell.composite_score_v2 != null) {
+    ctxMap['Composite v2 (hyp)'] = `baseline ${bm.composite_score.toFixed(4)} · Δ ${(cell.composite_score_v2 - bm.composite_score >= 0 ? '+' : '')}${(cell.composite_score_v2 - bm.composite_score).toFixed(4)}`;
+  }
 
   return (
     <div style={{
       marginTop: 8, background: '#0d1421', borderRadius: 4, padding: 12, fontSize: 11,
     }}>
-      {/* ── BLOCK 1A: Comparison table (Baseline → Stage-1 → Δ) ─────────────── */}
-      {cmpRows.length > 0 && (
-        <>
-          <div style={{
-            color: '#fbbf24', fontWeight: 700, fontSize: 11, letterSpacing: 0.5,
-            textTransform: 'uppercase', paddingBottom: 4, borderBottom: '1px solid #fbbf2444',
-            marginBottom: 8,
-          }}>
-            Comparison · Baseline → Stage-1 ({(cell.exit_frac * 100).toFixed(0)}% @ {TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level})
-          </div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14, fontSize: 11 }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Metric</th>
-                <th style={{ textAlign: 'right', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Baseline (no stage-1)</th>
-                <th style={{ textAlign: 'right', color: '#4ade80', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Stage-1 (this cell)</th>
-                <th style={{ textAlign: 'right', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Δ Change</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cmpRows.map((r, i) => (
-                <tr key={i} style={{ borderTop: '1px solid #14202e' }}>
-                  <td style={{ padding: '4px 8px', color: '#cfd9e3' }}>
-                    {r.label}
-                    {r.note && <span style={{ color: '#556', fontSize: 9, marginLeft: 6, fontStyle: 'italic' }}>({r.note})</span>}
-                  </td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right', color: '#cfd9e3', fontFamily: 'monospace' }}>{r.baseline}</td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right', color: '#cfd9e3', fontFamily: 'monospace', fontWeight: 600 }}>{r.stage1}</td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right', color: r.deltaColor, fontFamily: 'monospace', fontWeight: 700 }}>
-                    {r.delta} <span style={{ fontSize: 12 }}>{r.arrow}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      )}
-
-      {/* ── BLOCK 1B: Truly unchanged (entry-only) ──────────────────────────── */}
-      {baselineEntryOnly.length > 0 && (
-        <>
-          <div style={{
-            color: '#fbbf24aa', fontWeight: 600, fontSize: 10, letterSpacing: 0.5,
-            textTransform: 'uppercase', paddingBottom: 3, borderBottom: '1px solid #fbbf2422',
-            marginBottom: 4,
-          }}>
-            Entry-time values · truly unchanged by stage-1
-          </div>
-          <div style={{ color: '#556', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>
-            Set when the position opens, before any stage-1 logic can fire.
-          </div>
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
-            marginBottom: 14,
-          }}>
-            {baselineEntryOnly.map(([l, v]) => (
-              <div key={l}>{compactItem(l, v)}</div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* ── BLOCK 1C: Would change but hyp not computed (backend gap) ────────── */}
-      {baselineDerivable.length > 0 && (
-        <>
-          <div style={{
-            color: '#fbbf24aa', fontWeight: 600, fontSize: 10, letterSpacing: 0.5,
-            textTransform: 'uppercase', paddingBottom: 3, borderBottom: '1px solid #fbbf2422',
-            marginBottom: 4,
-          }}>
-            Baseline values · stage-1 hyp computable but not yet returned by backend (F-tracked)
-          </div>
-          <div style={{ color: '#556', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>
-            These DO change under stage-1 (since trade-level hyp net P&L is known), but the backend doesn't aggregate hyp win/loss splits or hyp returns per cell yet. See <code style={{ color: '#7a9bb5' }}>docs/stage1_future_work.md</code> F2–F5.
-          </div>
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
-            marginBottom: 14,
-          }}>
-            {baselineDerivable.map(([l, v]) => (
-              <div key={l}>{compactItem(l, v)}</div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* ── BLOCK 1D: MTM trajectory — path-walking required (X1 blocker) ────── */}
-      {baselineMtmTrajectory.length > 0 && (
-        <>
-          <div style={{
-            color: '#f8717177', fontWeight: 600, fontSize: 10, letterSpacing: 0.5,
-            textTransform: 'uppercase', paddingBottom: 3, borderBottom: '1px solid #f8717122',
-            marginBottom: 4,
-          }}>
-            Baseline MTM trajectory · stage-1 hyp blocked (X1 — needs path-walking)
-          </div>
-          <div style={{ color: '#556', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>
-            These DO change under stage-1, but the surviving (1−exit_frac) portion has its OWN MTM trajectory after the trigger fires, which requires minute-by-minute leg price walking. The current cache only stores aggregate min/max MTM per trade. See <code style={{ color: '#7a9bb5' }}>docs/stage1_future_work.md</code> X1.
-          </div>
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
-            marginBottom: 14,
-          }}>
-            {baselineMtmTrajectory.map(([l, v]) => (
-              <div key={l}>{compactItem(l, v)}</div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* ── BLOCK 2: Stage-1 cell — all data, compact ───────────────────────────── */}
+      {/* ── UNIFIED CONTINUOUS COMPARISON TABLE ─────────────────────────────────
+            Single table with section header rows. Replaces Blocks 1A-1D and 2.
+            Rows where stage-1 has no equivalent show "—" with a Note column. */}
       <div style={{
-        color: '#4ade80', fontWeight: 700, fontSize: 11, letterSpacing: 0.5,
-        textTransform: 'uppercase', paddingBottom: 4, borderBottom: '1px solid #4ade8044',
+        color: '#fbbf24', fontWeight: 700, fontSize: 11, letterSpacing: 0.5,
+        textTransform: 'uppercase', paddingBottom: 4, borderBottom: '1px solid #fbbf2444',
         marginBottom: 8,
       }}>
-        Stage-1 cell · {(cell.exit_frac * 100).toFixed(0)}% exit @ {TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level}
+        Continuous comparison · Baseline → Stage-1 ({(cell.exit_frac * 100).toFixed(0)}% @ {TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level})
       </div>
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
-        marginBottom: 14,
-      }}>
-        {[...sections.entries()].map(([sec, secRows]) => (
-          <React.Fragment key={sec}>
-            {sectionHeader(sec, '#4ade80')}
-            {secRows.map((r, i) => (
-              <div key={`${sec}-${i}`}>{compactItem(r.label, r.value)}</div>
-            ))}
-          </React.Fragment>
-        ))}
-      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14, fontSize: 11 }}>
+        <thead style={{ position: 'sticky', top: 0, background: '#0d1421' }}>
+          <tr>
+            <th style={{ textAlign: 'left', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Metric</th>
+            <th style={{ textAlign: 'right', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Baseline</th>
+            <th style={{ textAlign: 'right', color: '#4ade80', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Stage-1</th>
+            <th style={{ textAlign: 'right', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Δ</th>
+            <th style={{ textAlign: 'left', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10, width: '32%' }}>Note / Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {unifiedRows.map((r, i) => (
+            <React.Fragment key={i}>
+              {r.section && (
+                <tr>
+                  <td colSpan={5} style={{
+                    padding: '8px 8px 3px', color: '#fbbf24', fontWeight: 700,
+                    fontSize: 10, letterSpacing: 0.5, textTransform: 'uppercase',
+                    borderTop: i > 0 ? '2px solid #1a2d42' : undefined,
+                    background: '#0a1019',
+                  }}>{r.section}</td>
+                </tr>
+              )}
+              <tr style={{ borderTop: '1px solid #14202e' }}>
+                <td style={{ padding: '3px 8px', color: '#cfd9e3', fontSize: 11 }}>{r.label}</td>
+                <td style={{ padding: '3px 8px', textAlign: 'right', color: '#cfd9e3', fontFamily: 'monospace', fontSize: 11 }}>{r.baseline}</td>
+                <td style={{ padding: '3px 8px', textAlign: 'right', color: '#cfd9e3', fontFamily: 'monospace', fontSize: 11, fontWeight: 600 }}>{r.stage1}</td>
+                <td style={{ padding: '3px 8px', textAlign: 'right', color: r.deltaColor, fontFamily: 'monospace', fontSize: 11, fontWeight: 700 }}>
+                  {r.delta} {r.arrow && <span style={{ fontSize: 12 }}>{r.arrow}</span>}
+                </td>
+                <td style={{ padding: '3px 8px', color: '#6a8294', fontSize: 9, fontStyle: 'italic', lineHeight: 1.3 }}>
+                  {r.note ?? ''}
+                </td>
+              </tr>
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
 
       {/* ── BLOCK 3: What each metric means ─────────────────────────────────────── */}
       <div style={{
@@ -1854,18 +2128,28 @@ export function M7Stage1Panel({
       {!collapsed && resp?.status === 'ready' && resp.result && (
         <>
           <VerdictSummary result={resp.result} />
-          {bands.map(band => (
-            <Stage1BandCard
-              key={band}
-              band={band}
-              cells={cellsByBand[band] ?? []}
-              bestCell={bestByBand[band] ?? null}
-              summary={summaryByBand[band] ?? null}
-              lots={resolvedRules[band]?.lots ?? 100}
-              baselineMetrics={resolvedRules[band]?.baseline_metrics ?? null}
-              onViewTrades={() => setTradesModal(band)}
-            />
-          ))}
+          {bands.map(band => {
+            const rr = resolvedRules[band];
+            return (
+              <Stage1BandCard
+                key={band}
+                band={band}
+                cells={cellsByBand[band] ?? []}
+                bestCell={bestByBand[band] ?? null}
+                summary={summaryByBand[band] ?? null}
+                lots={rr?.lots ?? 100}
+                baselineMetrics={rr?.baseline_metrics ?? null}
+                ruleDict={rr?.rule_dict as Record<string, unknown> | undefined}
+                ruleFilters={{
+                  expiry_bucket: rr?.expiry_bucket ?? undefined,
+                  delta_target: rr?.delta_target ?? undefined,
+                  entry_hour_ist: rr?.entry_hour_ist ?? undefined,
+                }}
+                dataset={dataset}
+                onViewTrades={() => setTradesModal(band)}
+              />
+            );
+          })}
           {resp.result.caveats.length > 0 && (
             <div style={{ marginTop: 8, fontSize: 10, color: '#7a9bb5' }}>
               <strong>Caveats:</strong>

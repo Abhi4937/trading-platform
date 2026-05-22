@@ -161,6 +161,34 @@ Computable from `min_mtm`, `max_mtm`, `entry_credit` per trade.
 **Why deferred:** the band-level summary `SL_avg / L_avg / W_avg`
 already establishes the reference dips.
 
+### F14. MTM trajectory aggregates under stage-1 (linear approximation)
+**Effort:** ~3h backend + 1h UI.
+**What:** Compute per-trade `hyp_min_mtm` and `hyp_max_mtm` using the linear
+position-weighted approximation from Plan section 1.2, then aggregate per cell:
+- `avg_max_mtm_winners_hyp`, `avg_min_mtm_winners_hyp` + same for losers.
+- `worst_min_mtm_winners_hyp`, `best_max_mtm_winners_hyp` + loser analogues.
+- `largest_loss_mtm_hyp`, `largest_win_mtm_hyp`.
+- `avg_pct_drop_peak_to_trough_hyp`, `avg_pct_recovery_trough_to_peak_hyp`.
+- `n_winners_below_avg_min_mtm_hyp`, `n_losers_above_avg_max_mtm_hyp`.
+
+Move these from the current "MTM trajectory blocked" UI section into the
+comparison table (Baseline → Stage-1 → Δ).
+
+**Why deferred:** the approximation is reasonable but introduces a documented
+inaccuracy when peak comes before trough (Case B_unreliable trades). The
+current UI already flags pct_B_unreliable separately, so this would add a
+caveat per metric. Should ship behind a `--linear-approximation` flag or
+documented prominently in the UI.
+
+**Implementation outline:**
+1. In `_cell_metrics` (Python script), add the per-trade hyp_min_mtm and
+   hyp_max_mtm computation alongside hyp_net_pnl.
+2. Add hyp-winner / hyp-loser splits (already needed for F2).
+3. Aggregate the per-trade MTM values to cell-level means / extremes.
+4. Add new fields to `Stage1Cell` TypeScript type.
+5. In `M7Stage1Panel.tsx`, move the MTM trajectory section from "blocked
+   (X1)" to a new comparison sub-table with the approximation caveat.
+
 ### F13. Tab navigation state persistence (last viewed band)
 **Effort:** ~30min.
 **What:** Remember which band card was expanded last across page
@@ -177,39 +205,37 @@ These require capabilities the current architecture lacks. Documenting
 here so they're not re-proposed without first building the
 infrastructure.
 
-### X1. Hypothetical MTM trajectory aggregates
+### X1. Path-conditional behaviour after the trigger fires
 **Blocked by:** absence of per-minute leg-price path walking.
-**What's blocked:**
-- `avg_max_mtm_winners_hyp`, `avg_min_mtm_winners_hyp`,
-  `worst_min_mtm_winners_hyp`, `best_max_mtm_winners_hyp` and the
-  loser-side analogues.
-- `avg_pct_drop_peak_to_trough_hyp` / `avg_pct_recovery_trough_to_peak_hyp`.
+**Originally listed here:** "all MTM trajectory aggregates". **CORRECTED 2026-05-22**: aggregate
+hyp MTM stats (`avg_max_mtm_winners_hyp`, `avg_min_mtm_winners_hyp`,
+`worst_min_mtm_winners_hyp`, `best_max_mtm_winners_hyp`, loser analogues,
+`Largest loss MTM hyp`, etc.) are NOT blocked — they're computable with the
+linear position-weighted approximation that Plan section 1.2 explicitly
+specifies. These are now tracked under **F14** (addable without infra).
 
-**Why blocked:** Under stage-1, the surviving (1 - exit_frac) portion
-of the position has its OWN MTM trajectory after the trigger fires.
-That trajectory is NOT the same as the original trade's trajectory —
-it depends on the leg prices at every subsequent bar until the
-original rule's exit. To aggregate honest per-trade hyp MTM stats, you
-need the actual minute-by-minute leg price path. The current cache only
-stores aggregate min_mtm / max_mtm / net_pnl per trade, not the path.
+**What truly remains blocked:**
+- Exact post-trigger MTM trajectory of the surviving (1−exit_frac) portion.
+  Specifically: scenarios where the surviving portion's MTM goes DEEPER than
+  the original trade's min_mtm AFTER the trigger fires (rare — would require
+  a gamma/vol blowup that happens after the trigger but wasn't reached by the
+  pre-trigger portion).
+- Path-conditional decisions: stage-2 re-entry (X3), time-gated SL, multi-event
+  rules that act on the surviving portion's trajectory.
+- Any analysis where the surviving portion's intraday path matters beyond its
+  final exit value.
 
-**The single-point approximation we DO use:**
-For the per-trade hypothetical NET PNL only (not the MTM trajectory):
-```
-hyp_net_pnl = exit_frac × trigger_MTM + (1 - exit_frac) × actual_net_pnl
-```
-This treats the surviving portion as if it exits at the same final
-price as the original trade — which is true ONLY if the rule's exit
-condition wouldn't have re-triggered differently on a (1 - exit_frac)
-sized position. For symmetric short strangles that's usually fine
-because the surviving position has the same Greeks and faces the same
-exit triggers (premium SL, fixed-time exit, etc.) at the same time.
-But it doesn't give us a per-bar MTM trajectory.
+**The linear approximation handles the typical case:**
+For Case A (no fire):  hyp_min_mtm = min_mtm_usd, hyp_max_mtm = max_mtm_usd
+For Case B/C (fire):   hyp_min_mtm = exit_frac × trigger + (1−exit_frac) × min_mtm_usd
+                       hyp_max_mtm = exit_frac × trigger + (1−exit_frac) × max_mtm_usd
 
-**To enable this:** would need a "lite simulator" that walks the option
-minute parquet (~40-50GB on disk) for each trade, applies the rule and
-stage-1 logic minute-by-minute, and records the resulting MTM
-trajectory. Estimated 2-3 days of work plus a new cache layer.
+This assumes the surviving portion experiences the same MTM extremes as the
+original trade. Exact when the extreme is reached AFTER the trigger fires (the
+typical case — trades that fire stage-1 then continue to lower lows or higher
+highs follow the original trajectory minus the partial exit). Approximation
+breaks down when the extreme happens BEFORE the trigger (Case B_unreliable),
+which the analysis already flags separately.
 
 ### X2. Delta-trigger stage-1 (fires on absolute leg delta crossing)
 **Blocked by:** same minute-by-minute leg path infrastructure as X1.
