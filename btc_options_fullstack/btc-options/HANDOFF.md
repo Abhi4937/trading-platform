@@ -36,6 +36,104 @@ If anything looks off, the code lives at:
 
 ## Last Session
 **Who:** Claude (Opus 4.7)
+**Date:** 2026-05-22 (Session 42 — Per-session backend isolation + strike-index cache)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 42 — Shipped (committed + pushed)
+
+| Commit | What |
+|--------|------|
+| `6b6539f` | Committed Session 40's uncommitted Stage-1 panel work (M7Stage1Panel, m7_stage1_analysis API, main.py wiring, m7_api.ts types) |
+| `b33f0cd` | `historical.py` strike-index disk cache — cold start 10min → 5s. Cache at `~/btc-data/derived/.strike_index.json`, invalidated by expiry-folder count change (weekly) |
+| `5b50621` | Per-session backend isolation Phase 2: `docker/docker-compose.session.yml` (parameterized overlay, external `docker_default` network), `scripts/claim_session.sh` + `scripts/release_session.sh`, CLAUDE.md RULE #6 rewrite |
+| `9b86408` | Fix: external Redis network (session compose was spawning its own Redis → port 6379 conflict), port-in-use check in `_slot_is_free`, `docker-backend-1` treated as permanent slot-0 virtual lock |
+| `7599483` | Auto-start frontend from `claim_session.sh` (Vite on `3000+SLOT`, PID stored in lock file) |
+| `cc80f8c` | Fix: `cmd.exe start /b` for detached Vite on Windows Git Bash (`nohup &` gets killed when Bash tool exits) |
+
+### Session 42 — How per-session isolation works now
+
+- `docker-backend-1` on `:8000` = permanent primary (slot 0, live ticker, managed by `docker compose up -d backend`)
+- New Claude sessions run `./scripts/claim_session.sh` → claims first free slot 1–9
+- Slot N gets: backend `docker-backend-session-N-1` on `:800N`, frontend Vite on `:300N`, Redis DB N
+- All slots join `docker_default` network to reach the existing `docker-redis-1`
+- Strike-index loads from disk cache on all slots → ~5s cold start
+- `./scripts/release_session.sh N` stops backend container + kills frontend port
+
+**Current state**: slot 1 is live (`docker-backend-session-1-1` on `:8001`, frontend on `:3001`)
+
+### Session 42 — Pending / Next priorities
+
+1. **SL-chip Playwright verification** (OPEN from Session 40 — see top of this file) — use `:3001` frontend for this session's tests
+2. **Per-trade modal** (`Stage1BandTradesModal`) — see Session 41 notes
+3. **Pivot Profile UI verification** (OPEN from Session 40)
+4. **Capital Mode / new M7 rules discussion** — user wants to discuss cap_sl K-scaling, 2/3-way hybrids for delta_match. Was the original topic of this session before the isolation work
+5. **`ds_mtime` NameError** in coverage warmup at `m7_best_combo.py:1734` (pre-existing, non-blocking)
+
+---
+
+## Previous Session
+**Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-22 (Session 41 — Stage-1 dashboard integration complete + lock fix)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 41 — Shipped (committed)
+
+**Commit `cdf1c95`** — `fix(m7): move L2 exit-cache reads outside _EXIT_COMPUTE_LOCK + fix session overlay`
+- **Root cause of stage1 sweep hanging at 0%**: `_EXIT_COMPUTE_LOCK` in `m7_results.py` was designed
+  only for DuckDB scans (concurrent DuckDB connections crash with C++ terminate). But `pd.read_parquet`
+  (L2 disk reads) was also inside the lock. Warmup threads holding the lock for DuckDB scans blocked
+  the stage1 background thread even when all its rules had warm L2 parquet caches.
+- **Fix**: Moved L2 reads outside the lock. `pd.read_parquet` is thread-safe for concurrent reads;
+  dict assignment is GIL-atomic; only `_compute_all_exits` still needs the lock (with double-check
+  pattern inside). Stage1 10-band sweep now completes in ~2s instead of hanging indefinitely.
+- Also fixed `docker/docker-compose.session.yml` to join the external `docker_default` network
+  (so backend_session can reach docker-redis-1) and removed the now-wrong `depends_on/redis` block.
+  `scripts/claim_session.sh` + `scripts/release_session.sh` updated to drop the redundant
+  `-f docker-compose.yml` flag.
+
+**Prior commits (Sessions 41a/b, same branch):**
+- `b33f0cd` — strike-index disk cache in `historical.py` (eliminates 10-20 min cold-start scan;
+  cache at `/home/abhis/btc-data/derived/.strike_index.json`, 879 expiries)
+- `6b6539f` — Stage-1 frontend panel `M7Stage1Panel.tsx` wired end-to-end
+- `8976ecd` — Stage-1 script extension (`run_stage1_sweep` library entry point + Group A/B/C/D columns)
+
+### Session 41 — Stage-1 Dashboard Integration (Phase 9) — STATUS: COMPLETE
+
+All 5 parts delivered:
+
+| Part | Status | Commit |
+|------|--------|--------|
+| Part 1 — Script extension + library entry point | ✅ committed | `8976ecd` |
+| Part 2 — Backend API (`/stage1_analysis` + `/stage1_analysis/precheck`) | ✅ committed | `6b6539f` |
+| Part 3 — Frontend panel (`M7Stage1Panel`, filter plumbing, API client) | ✅ committed | `6b6539f` |
+| Part 4 — Real-data run | ✅ done | — |
+| Part 5 — Validation gates | ⚠️ partial | — |
+
+**Part 4 finding**: All 10 bands show `SKIP_INSUFFICIENT` under the dashboard's default best-combo
+filter state. This is expected — default filters include specific `expiry_bucket`/`delta_target`/
+`entry_hour_ist` per band, narrowing each band to <30 trades. For meaningful Stage-1 analysis,
+run with broader filter state (e.g. no expiry_bucket filter).
+
+**Part 5 remaining**: Cache invalidation test (change ds_mtime, confirm cache rebuild) not done.
+All other gates pass — sweep completes, UI renders all 10 bands with 4×5 heatmaps.
+
+### Session 41 — Pending / Next priorities
+
+1. **SL-chip Playwright verification** (OPEN from Session 40 — see top of this file)
+2. **Per-trade modal** (`Stage1BandTradesModal`): "View N trades →" button in `CellDetail`,
+   backend `POST /stage1_analysis/band_trades` endpoint, modal with All/Losers/Winners/Fired-only
+   toggle + click-to-`M7TradeDiagnosticModal`. `trade_id` is confirmed present in `_derive_exits`
+   output so the full drill-down works.
+3. **Pivot Profile UI verification** (OPEN from Session 40 — 6-way toggle, per-band spotlights,
+   stacked mini-charts; code committed in `5f78994` but Playwright verification was blocked by
+   Playwright disconnect)
+4. **`ds_mtime` NameError** in coverage warmup at `m7_best_combo.py:1734` (pre-existing,
+   non-blocking — only async pre-warm fails, endpoint itself is fine)
+
+---
+
+## Previous Session
+**Who:** Claude (Opus 4.7)
 **Date:** 2026-05-22 (Session 40 — Pivot Profile: 24min → 7s + per-band drill-downs)
 **Branch:** `mainbranch-gemini_claude`
 

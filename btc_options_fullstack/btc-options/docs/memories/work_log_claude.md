@@ -1,5 +1,89 @@
 # Claude's Work Log
 
+## Session 42 (2026-05-22) — Per-session backend isolation + strike-index disk cache
+
+### Strike-index disk persistence (`historical.py`, commit `b33f0cd`)
+Cold start time cut from ~10 minutes to ~5 seconds. `_build_strike_index` now saves the
+expiry→strikes dict to `~/btc-data/derived/.strike_index.json` after the first full scan
+(atomic write via tmp+rename). On subsequent starts it loads from JSON if the expiry-folder
+count is unchanged (~1ms check). Full rescan triggers once per week when a new Friday expiry
+folder appears. Prerequisite for per-session auto-isolation.
+
+### Per-session backend isolation (commits `5b50621`, `9b86408`, `7599483`, `cc80f8c`)
+
+Root problem: all Claude sessions defaulted to `docker-backend-1` on `:8000`. When one session
+ran `docker compose up --build -d backend`, every other session 500'd for ~10 minutes during
+the strike-index scan.
+
+Solution shipped:
+- `docker/docker-compose.session.yml` — parameterized overlay (SESSION_SLOT, BACKEND_PORT,
+  REDIS_DB, DISABLE_LIVE_TICKER). Joins existing `docker_default` network (no new Redis).
+- `scripts/claim_session.sh` — atomic slot claim (mkdir mutex), port-in-use check via
+  `docker ps --format Ports`, treats `docker-backend-1` as virtual slot-0 primary, claims
+  slots 1–9, starts backend container + Vite frontend (port 300N), uses `cmd.exe start /b`
+  for detached Vite on Windows Git Bash.
+- `scripts/release_session.sh` — stops container, kills frontend PID + port.
+- CLAUDE.md RULE #6 rewritten with new workflow.
+
+Design decisions:
+- `docker-backend-1` on `:8000` is permanent slot-0 primary; owns live ticker.
+- Sessions 1–9 have `DISABLE_LIVE_TICKER=1`; all M7 analysis works fine.
+- Redis DB per slot (slot N → DB N); no key collisions.
+- Disk caches (`~/btc-data/derived/`) shared across all slots.
+- Dedicated ticker container deferred — worth doing when `DISABLE_LIVE_TICKER` on slot 1+
+  actually becomes painful (most dev work is M7 historical, not live chain).
+
+Current state: slot 1 live — `docker-backend-session-1-1` on `:8001`, Vite on `:3001`.
+
+### Session 40 uncommitted work committed (`6b6539f`)
+Committed Stage-1 panel: `M7Stage1Panel.tsx`, `m7_stage1_analysis.py` API,
+`main.py` router wiring, `m7_api.ts` Stage-1 types.
+
+---
+
+## Session 41 (2026-05-22) — Stage-1 dashboard integration complete + _EXIT_COMPUTE_LOCK fix
+
+### Bug fix: Stage-1 sweep hanging at 0% / 0.17 progress
+
+Root cause: `_EXIT_COMPUTE_LOCK` in `m7_results.py` covered both `pd.read_parquet` (L2 disk reads)
+and `_compute_all_exits` (DuckDB scan). The lock was designed only for DuckDB (concurrent DuckDB
+connections crash with C++ terminate). Warmup threads holding the lock for DuckDB scans blocked
+the stage1 background thread even when all its rules had warm L2 parquet caches.
+
+Fix: moved L2 reads outside the lock. `pd.read_parquet` is thread-safe; dict assignment is
+GIL-atomic. Only cold-cache DuckDB scans still serialise (with double-check pattern inside the
+lock). 10-band stage1 sweep now completes in ~2s. Committed `cdf1c95`.
+
+### Session overlay fixes (also `cdf1c95`)
+
+`docker/docker-compose.session.yml` now joins the external `docker_default` network so
+`backend_session` can reach `docker-redis-1`. Removed the `depends_on/redis` block that assumed
+Redis was defined in the same compose file. `claim_session.sh` + `release_session.sh` drop
+the now-redundant `-f docker-compose.yml` flag.
+
+### Stage-1 Phase 9 — all parts delivered
+
+Full dashboard integration of Stage-1 Partial Exit Sweep:
+- Part 1: `run_stage1_sweep` library entry point + extended columns (committed `8976ecd`)
+- Part 2: `m7_stage1_analysis.py` — POST `/stage1_analysis` + `/stage1_analysis/precheck` (committed `6b6539f`)
+- Part 3: `M7Stage1Panel.tsx` — 4×5 heatmap, band cards, verdict chips, filter summary, precheck (committed `6b6539f`)
+- Part 4: Real-data run — all 10 bands `SKIP_INSUFFICIENT` under tight per-band filters (expected)
+- Part 5: Partial — sweep completes and UI verified; cache invalidation test not done
+
+### Strike index disk cache (prior commit, now documented)
+
+`historical.py` adds `_STRIKE_INDEX_CACHE_PATH` + `_load_strike_index_from_cache` / `_save_strike_index_to_cache`.
+Invalidated by n_expiries count change. Cache built at `/home/abhis/btc-data/derived/.strike_index.json`
+(879 expiries). Cold start now ~5s instead of 10-20 min on Windows-mounted Docker volume. Committed `b33f0cd`.
+
+### Pending from this session
+
+1. Per-trade modal (`Stage1BandTradesModal`) — user-requested, not yet built
+2. SL-chip Playwright verification — OPEN from Session 40
+3. Pivot Profile UI verification — OPEN from Session 40
+
+---
+
 ## Session 40 (2026-05-22) — Pivot Profile: 24min → 7s + per-band drill-downs (UNCOMMITTED)
 
 ### Speed bug fix (~210× faster cold-rule case)
