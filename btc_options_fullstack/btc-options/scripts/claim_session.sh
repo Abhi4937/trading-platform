@@ -191,38 +191,13 @@ if [ "$READY" = "0" ]; then
     echo "WARNING: backend did not respond in 120s — check: docker logs $CONTAINER"
 fi
 
-# ─── Start frontend ───────────────────────────────────────────────────────────
-echo ""
-echo "=== Starting frontend on :$FRONTEND_PORT ==="
-
-# Kill any process already on this port
-fuser -k "${FRONTEND_PORT}/tcp" 2>/dev/null && sleep 1 || true
-
+# ─── Frontend — must be started by user in their own terminal ────────────────
+# Vite is a long-lived process; launching it from within a script that runs
+# inside Claude's Bash tool causes it to die when the tool call ends.
+# The script prints the exact command instead.
 FRONTEND_LOG="/tmp/btc_frontend_${FRONTEND_PORT}.log"
-cd "$REPO_ROOT/frontend"
-# Use 'start' on Windows Git Bash to launch a detached process that survives
-# after this script exits. Fall back to & for non-Windows.
-if command -v cmd.exe >/dev/null 2>&1; then
-    cmd.exe /c "start /b cmd.exe /c \"set VITE_API_URL=http://localhost:${BACKEND_PORT}/api/v1 && set VITE_API_BASE=http://localhost:${BACKEND_PORT} && set VITE_WS_HOST=localhost:${BACKEND_PORT} && npm run dev -- --port ${FRONTEND_PORT} --strictPort > ${FRONTEND_LOG} 2>&1\""
-    FRONTEND_PID=""
-else
-    VITE_API_URL="http://localhost:${BACKEND_PORT}/api/v1" \
-    VITE_API_BASE="http://localhost:${BACKEND_PORT}" \
-    VITE_WS_HOST="localhost:${BACKEND_PORT}" \
-    npm run dev -- --port "${FRONTEND_PORT}" --strictPort > "$FRONTEND_LOG" 2>&1 &
-    FRONTEND_PID=$!
-fi
-cd "$REPO_ROOT"
-
-# Wait for Vite to bind the port (up to 30s)
+FRONTEND_PID=""
 VITE_READY=0
-for i in $(seq 1 15); do
-    sleep 2
-    if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${FRONTEND_PORT}" 2>/dev/null | grep -qE "^(200|304)"; then
-        VITE_READY=1
-        break
-    fi
-done
 
 # Update lock file with frontend PID and branch
 cat > "$LOCK_DIR/${BACKEND_PORT}.lock" <<EOF
@@ -242,20 +217,21 @@ EOF
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-printf "║  Slot %-2s ready                                              ║\n" "$SLOT"
+printf "║  Slot %-2s backend ready                                      ║\n" "$SLOT"
 printf "║  Branch   : %-49s║\n" "$SESSION_BRANCH"
-printf "║  Backend  : http://localhost:%-5s                           ║\n" "$BACKEND_PORT"
-printf "║  Frontend : http://localhost:%-5s                           ║\n" "$FRONTEND_PORT"
+printf "║  Backend  : http://localhost:%-5s  ✓                        ║\n" "$BACKEND_PORT"
+printf "║  Frontend : http://localhost:%-5s  (start manually below)  ║\n" "$FRONTEND_PORT"
 printf "║  Container: %-49s║\n" "$CONTAINER"
-if [ "$VITE_READY" = "1" ]; then
-echo "║  Vite     : ready ✓                                          ║"
-else
-echo "║  Vite     : still starting (check $FRONTEND_LOG)║"
-fi
 echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  Open   : http://localhost:${FRONTEND_PORT}                             ║"
+echo "║  START FRONTEND — run in your terminal:                      ║"
+echo "║                                                              ║"
+printf "║  cd frontend                                                 ║\n"
+printf "║  VITE_API_URL=http://localhost:%s/api/v1 \\\\                ║\n" "$BACKEND_PORT"
+printf "║  VITE_API_BASE=http://localhost:%s \\\\                      ║\n" "$BACKEND_PORT"
+printf "║  VITE_WS_HOST=localhost:%s \\\\                              ║\n" "$BACKEND_PORT"
+printf "║  npm run dev -- --port %s --strictPort                      ║\n" "$FRONTEND_PORT"
+echo "║                                                              ║"
 echo "║  Release: ./scripts/release_session.sh $SLOT                   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Backend logs : docker logs -f $CONTAINER"
-echo "Frontend logs: tail -f $FRONTEND_LOG"
+echo "Backend logs: docker logs -f $CONTAINER"
