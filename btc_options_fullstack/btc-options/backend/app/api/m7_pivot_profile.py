@@ -24,7 +24,8 @@ import pandas as pd
 from fastapi import APIRouter, Query
 
 from app.analytics.m7_pivot_profile import (
-    MIN_TRADES_PER_BAND_CELL, aggregate_pivot_profile,
+    MIN_TRADES_PER_BAND_CELL, _PIVOT_RESPONSE_VERSION,
+    aggregate_pivot_profile,
 )
 from app.api.m7_results import (
     M7_BASE_DIR, _TRADES_BY_DATASET, _derive_exits, _load_trades,
@@ -50,6 +51,10 @@ def _load_pivot_disk(cache_key: tuple, ds_mtime: float) -> Optional[dict]:
         with open(path) as f:
             data = json.load(f)
         if data.get("_ds_mtime") != ds_mtime:
+            return None
+        # Response-shape version guard. Bumped when fields are added/removed
+        # so the frontend doesn't render half a payload from a stale cache.
+        if data.get("_response_version") != _PIVOT_RESPONSE_VERSION:
             return None
         data.pop("_ds_mtime", None)
         return data
@@ -257,24 +262,16 @@ def _warm_cache_entry(
             if total > 0:
                 state["progress"] = min(1.0, done / float(total))
 
-        # Classify winners/losers per cell rule before computing pivots so the
-        # aggregator can fork the per-band stats into 3 buckets and rank
-        # individual trades for the drill-down panels.
-        winner_tids: set[str] = set()
-        loser_tids: set[str] = set()
-        pnl_by_tid: dict[str, float] = {}
-        if cells:
-            winner_tids, loser_tids, pnl_by_tid = _classify_winners_losers(
-                cells, dataset)
-            log.info("M7 pivot_profile: %d winners, %d losers across %d cells",
-                     len(winner_tids), len(loser_tids), len(cells))
+        # Classification is now done inline inside aggregate_pivot_profile
+        # using `_simulate_exit` on the same 1m path data already loaded for
+        # pivot computation. We no longer pre-compute winner/loser tids via
+        # `_derive_exits` — that was the expensive step (24 min cold-cache
+        # for any non-grid rule) and it scanned all 13,703 trades instead of
+        # just the cell's trades.
 
         result = aggregate_pivot_profile(
             trades, paths_glob, entry_hours,
             cells=(cells or None),
-            winner_tids=winner_tids if cells else None,
-            loser_tids=loser_tids if cells else None,
-            pnl_by_tid=pnl_by_tid if cells else None,
             progress_cb=_on_progress)
         state["result"] = result
         state["status"] = "ready"

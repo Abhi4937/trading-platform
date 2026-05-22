@@ -1612,13 +1612,35 @@ export interface M7TradeRecord {
   lots: number;
 }
 
+// Per-trade segment blob for the "All Lose" stacked-mini-chart view.
+// Carries enough context to render one mini-chart per loser per band.
+export interface M7LoserSegmentBlob {
+  trade_id: string;
+  friday_date_ist: string;
+  net_pnl_usd: number | null;
+  min_mtm_usd: number | null;
+  max_mtm_usd: number | null;
+  lots: number;
+  segments: Record<'Seg1' | 'Seg2' | 'Seg3' | 'Seg4' | 'Seg5',
+                    M7PivotProfileSegment>;
+}
+
 export interface M7PivotProfileResult {
   by_band: M7PivotByBand;
   by_band_winners: M7PivotByBand | null;
   by_band_losers: M7PivotByBand | null;
-  losers_list: M7TradeRecord[] | null;
-  best_winner: M7TradeRecord | null;
-  winner_worst_drawdown: M7TradeRecord | null;
+  // Single-trade-per-band drill-down charts (each band's panel renders
+  // exactly that trade's segment markers as a degenerate 1-trade aggregate).
+  by_band_best_winner: M7PivotByBand | null;
+  by_band_worst_drawdown_winner: M7PivotByBand | null;
+  // Per-band stack of per-trade segment blobs — used to render N mini-charts
+  // per band (one per loser).
+  by_band_losers_individual: Record<string, M7LoserSegmentBlob[]> | null;
+  // Spotlight card payloads (10 cards each — one per band).
+  best_winners_by_band: Record<string, M7TradeRecord> | null;
+  worst_dd_winners_by_band: Record<string, M7TradeRecord> | null;
+  // Loser list grouped by band (for the existing clickable table).
+  losers_list_by_band: Record<string, M7TradeRecord[]> | null;
   params: {
     entry_hours: number[];
     n_total_trades: number;

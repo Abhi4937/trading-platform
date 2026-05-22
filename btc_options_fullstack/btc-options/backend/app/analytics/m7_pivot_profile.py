@@ -7,6 +7,16 @@ $ swing and % drop from peak. Aggregates across trades grouped by
 entry_atm_iv_band, with an entry-hour filter the caller chooses.
 
 Pure-function module; the FastAPI router lives in app/api/m7_pivot_profile.py.
+
+WINNER/LOSER CLASSIFICATION — INLINE
+The pivot panel decides per-trade is_win by simulating each cell's exit rule
+directly on the 1m path data, scoped only to the cell's matched trades. This
+avoids the all-13703-trades DuckDB scan inside `_derive_exits` (which is
+~24 min for a non-grid rule). The simulator mirrors `_exit_rule_sql_predicate`
+in m7_results.py and uses the same cost helpers (`slippage_dollars_per_side`,
+`compute_brokerage_one_side`) as `_add_exit_costs`. Any divergence in is_win
+classification between Pivot Profile and the rest of M7 should be reported
+as a bug in the simulator below.
 """
 
 from __future__ import annotations
@@ -19,6 +29,10 @@ import glob
 
 import numpy as np
 import pandas as pd
+
+# Response shape version — bump when adding/removing top-level result fields
+# so disk-cached entries with the old shape get rebuilt on next read.
+_PIVOT_RESPONSE_VERSION = 2
 
 
 # IST is UTC+5:30; no DST in India. Use a fixed offset rather than zoneinfo
@@ -398,57 +412,173 @@ def _nan_to_none(v) -> Optional[float]:
     return f
 
 
+def _simulate_exit(
+    ts_arr: np.ndarray,            # int64 ascending
+    gross_pnl_arr: np.ndarray,     # float64 (per-100-lot baseline)
+    call_mark_arr: np.ndarray,     # float64
+    put_mark_arr: np.ndarray,      # float64
+    spot_arr: np.ndarray,          # float64
+    meta: dict,                    # per-trade meta (entry marks, costs, etc.)
+    rule: dict,                    # exit rule
+) -> Optional[dict]:
+    """Replicate `_compute_all_exits`'s rule semantics in Python on a single
+    trade's 1m path. Returns exit-row data + net_pnl + is_win, all at the
+    100-lot baseline (caller can re-scale if a cell-lots override is in play).
+
+    Mirrors the SQL predicate in `_exit_rule_sql_predicate`:
+        pnl_after_slip = gross_pnl − entry_slip_call − entry_slip_put
+        max_profit_pct        → pnl_after_slip ≥ credit_usd * pct/100
+        margin_target_pct     → pnl_after_slip ≥ margin_used * pct/100
+        premium_sl_pct        → call_mark ≥ call_entry*(1+pct/100) OR put_mark ≥ put_entry*(1+pct/100)
+    Combined with `fixed_exit_hour_ist`: rule fires first if its trigger ts
+    is ≤ hour cap; otherwise the hour cap applies. Without a hour cap, the
+    last path row is the hard cap.
+    """
+    n = ts_arr.size
+    if n == 0:
+        return None
+
+    # Build trigger mask vectorised across the trade's path.
+    pnl_after_slip = (gross_pnl_arr
+                      - float(meta["entry_slip_call"])
+                      - float(meta["entry_slip_put"]))
+    trigger = np.zeros(n, dtype=bool)
+    if rule.get("max_profit_pct") is not None and meta["credit_usd"] > 0:
+        pct = float(rule["max_profit_pct"])
+        trigger |= (pnl_after_slip >= meta["credit_usd"] * (pct / 100.0))
+    if rule.get("margin_target_pct") is not None and meta["margin_used_usd"] > 0:
+        pct = float(rule["margin_target_pct"])
+        trigger |= (pnl_after_slip >= meta["margin_used_usd"] * (pct / 100.0))
+    if rule.get("premium_sl_pct") is not None:
+        pct = float(rule["premium_sl_pct"])
+        mult = 1.0 + pct / 100.0
+        trigger |= (
+            (call_mark_arr >= meta["call_entry_mark"] * mult)
+            | (put_mark_arr >= meta["put_entry_mark"] * mult)
+        )
+
+    exit_idx: int
+    exit_reason: str
+    if rule.get("fixed_exit_hour_ist") is not None:
+        hour = float(rule["fixed_exit_hour_ist"])
+        target_ts = int(meta["friday_ts_utc"]) + int(86400 + hour * 3600 - 19800)
+        within_hour = ts_arr <= target_ts
+        if not within_hour.any():
+            return None  # no path rows before the cap — should be rare
+        rule_within = trigger & within_hour
+        if rule_within.any():
+            exit_idx = int(np.argmax(rule_within))   # first True
+            exit_reason = "rule_trigger"
+        else:
+            hour_idxs = np.where(within_hour)[0]
+            exit_idx = int(hour_idxs[-1])             # latest ts ≤ cap
+            exit_reason = "fixed_hour_ist"
+    else:
+        if trigger.any():
+            exit_idx = int(np.argmax(trigger))
+            exit_reason = "rule_trigger"
+        else:
+            exit_idx = n - 1                         # hard cap = last row
+            exit_reason = "hard_cap"
+
+    gross_at_exit = float(gross_pnl_arr[exit_idx])
+    spot_at_exit = float(spot_arr[exit_idx])
+    call_at_exit = float(call_mark_arr[exit_idx])
+    put_at_exit = float(put_mark_arr[exit_idx])
+    ts_at_exit = int(ts_arr[exit_idx])
+
+    # Compute exit costs (same helpers as _add_exit_costs in m7_results.py).
+    # If any required input is degenerate (mark ≤ 0 or spot ≤ 0) the helpers
+    # return 0 — that matches their existing degenerate-path handling.
+    try:
+        from app.services.costs import (
+            slippage_dollars_per_side, compute_brokerage_one_side,
+        )
+        qty = int(meta["quantity_lots"]) or 100
+        c_slip = slippage_dollars_per_side(
+            True, "smart", 5.0, 1.0, spot_at_exit, call_at_exit,
+            float(meta["call_strike"]), True, qty, ts_at_exit)
+        p_slip = slippage_dollars_per_side(
+            True, "smart", 5.0, 1.0, spot_at_exit, put_at_exit,
+            float(meta["put_strike"]), False, qty, ts_at_exit)
+        c_brk = compute_brokerage_one_side(
+            spot_at_exit, call_at_exit, qty, "offer", False)
+        p_brk = compute_brokerage_one_side(
+            spot_at_exit, put_at_exit, qty, "offer", False)
+        total_exit_cost = c_slip + p_slip + c_brk + p_brk
+    except Exception:  # noqa: BLE001
+        # If the cost helpers blow up for any reason, fall back to entry-cost
+        # symmetry. Approximation, but classification is rarely flipped by it.
+        total_exit_cost = float(meta["total_entry_cost"])
+
+    net_pnl = gross_at_exit - float(meta["total_entry_cost"]) - total_exit_cost
+    return {
+        "exit_idx": exit_idx,
+        "exit_ts": ts_at_exit,
+        "exit_reason": exit_reason,
+        "gross_pnl_usd": gross_at_exit,
+        "total_exit_cost_usd": float(total_exit_cost),
+        "net_pnl_usd": float(net_pnl),
+        "is_win": bool(net_pnl > 0),
+    }
+
+
 def aggregate_pivot_profile(
     trades_df: pd.DataFrame,
     paths_glob: str,
     entry_hours: Iterable[int],
     cells: Optional[list[dict]] = None,
-    winner_tids: Optional[set[str]] = None,
-    loser_tids: Optional[set[str]] = None,
-    pnl_by_tid: Optional[dict[str, float]] = None,
     progress_cb=None,
 ) -> dict:
     """Walk every trade in `trades_df` (filtered by entry_hours OR cells),
-    pull its 1m path, compute segment pivots, and aggregate by
-    entry_atm_iv_band.
+    pull its 1m path, classify winners/losers inline using the cell's rule,
+    compute segment pivots, and aggregate by entry_atm_iv_band.
 
     If `cells` is provided, it overrides `entry_hours`: each cell is a dict
-    with at least {entry_atm_iv_band, entry_hour_ist}, and a trade is
-    included only if it matches some cell on BOTH band AND entry_hour. This
-    scopes each band's pivot profile to its own selected best-combo cell.
+    with at least {entry_atm_iv_band, entry_hour_ist, rule}, and a trade is
+    included only if it matches some cell on (band, hour, expiry, delta).
 
-    If `winner_tids` / `loser_tids` are provided (sets of trade_id strings),
-    the response also includes `by_band_winners` and `by_band_losers` blocks
-    so the frontend can render an "All / Winners / Losers" toggle without a
-    re-fetch.
+    The classification is done in-process using `_simulate_exit` on the same
+    1m path data already loaded for pivot computation — no separate DuckDB
+    scan needed. This makes a cell with N trades pay O(N) work instead of
+    O(13703) for cold rules.
 
     Returns the JSON dict the FastAPI route serves.
 
-    `progress_cb(done:int, total:int)` is invoked every ~50 trades for
-    long-running calls so the warming-response can publish progress.
+    `progress_cb(done:int, total:int)` is invoked every ~5 trades so the
+    warming-response can publish progress for small-cell scopes too.
     """
     hours_set = set(int(h) for h in entry_hours) if entry_hours else set()
     if not hours_set and not cells:
         hours_set = {21, 22, 23, 0, 1, 2, 3}
 
+    EMPTY_RESPONSE = {
+        "by_band": {},
+        "by_band_winners": None,
+        "by_band_losers": None,
+        "by_band_best_winner": None,
+        "by_band_worst_drawdown_winner": None,
+        "by_band_losers_individual": None,
+        "best_winners_by_band": None,
+        "worst_dd_winners_by_band": None,
+        "losers_list_by_band": None,
+        "_response_version": _PIVOT_RESPONSE_VERSION,
+        "params": {
+            "entry_hours": sorted(hours_set),
+            "cells": cells or [],
+            "n_total_trades": 0, "n_after_filter": 0,
+            "min_trades_per_band_cell": MIN_TRADES_PER_BAND_CELL,
+        },
+    }
     if trades_df is None or trades_df.empty:
-        return {
-            "by_band": {},
-            "by_band_winners": None,
-            "by_band_losers": None,
-            "params": {
-                "entry_hours": sorted(hours_set),
-                "cells": cells or [],
-                "n_total_trades": 0, "n_after_filter": 0,
-                "min_trades_per_band_cell": MIN_TRADES_PER_BAND_CELL,
-            },
-        }
+        return EMPTY_RESPONSE
 
     # Filter trades on the full (band, hour, expiry_bucket, delta_target)
     # cell tuple when cells is provided; otherwise fall back to the bare
-    # entry-hour filter. We also build a {cell_key -> lot_scale} map so each
-    # trade's MTM can be rescaled away from the 100-lot backtester baseline.
+    # entry-hour filter. We also build {cell_key -> lot_scale} for MTM
+    # display rescaling and {cell_key -> rule} for inline classification.
     cell_scale_map: dict[str, float] = {}
+    cell_rule_map: dict[str, dict] = {}
     if cells:
         cell_keys: set[tuple[str, str, str, str]] = set()
         for c in cells:
@@ -457,6 +587,7 @@ def aggregate_pivot_profile(
             expiry = c.get("expiry_bucket")
             delta = c.get("delta_target")
             lots = c.get("lots")
+            rule = c.get("rule") or {}
             if band is None or hour is None:
                 continue
             try:
@@ -467,29 +598,32 @@ def aggregate_pivot_profile(
                     f"{float(delta):.4f}" if delta is not None else "",
                 )
                 cell_keys.add(key_tuple)
+                key_str = "|".join(key_tuple)
                 # Default 1.0 (i.e., 100-lot baseline) when lots is missing/0/<=0.
                 if lots is not None:
                     try:
                         n = int(lots)
                         if n > 0:
-                            cell_scale_map["|".join(key_tuple)] = (
+                            cell_scale_map[key_str] = (
                                 n / float(BACKTESTER_BASELINE_LOTS))
                     except (TypeError, ValueError):
                         pass
+                # Rule attached per cell so different cells in the same
+                # request can apply different exit rules.
+                if isinstance(rule, dict):
+                    cell_rule_map[key_str] = {k: v for k, v in rule.items()
+                                               if v is not None}
             except (TypeError, ValueError):
                 continue
         if not cell_keys:
-            return {
-                "by_band": {},
-                "params": {
-                    "entry_hours": [],
-                    "cells": cells,
-                    "n_total_trades": int(len(trades_df)),
-                    "n_after_filter": 0,
-                    "min_trades_per_band_cell": MIN_TRADES_PER_BAND_CELL,
-                    "note": "cells param had no usable (band, hour, expiry, delta) keys",
-                },
+            empty = dict(EMPTY_RESPONSE)
+            empty["params"] = {
+                **EMPTY_RESPONSE["params"],
+                "cells": cells,
+                "n_total_trades": int(len(trades_df)),
+                "note": "cells param had no usable (band, hour, expiry, delta) keys",
             }
+            return empty
         # Build the same composite key on every trade row.
         td_bands = trades_df["entry_atm_iv_band"].astype(str)
         td_hours = trades_df["entry_hour_ist"].astype("Int64").astype(str)
@@ -506,10 +640,23 @@ def aggregate_pivot_profile(
         mask = trade_keys.isin(cell_key_strs)
     else:
         mask = trades_df["entry_hour_ist"].astype("Int64").isin(list(hours_set))
-    sel = trades_df.loc[mask, [
+    # Expand the projection to carry every column the inline simulator needs.
+    # We tolerate missing columns (older parquet schemas) by gating with the
+    # comprehension; classification just falls back to safe defaults for
+    # trades lacking entry-context columns.
+    sel_cols = [
         "trade_id", "entry_ts_utc", "entry_hour_ist",
         "entry_atm_iv_band", "friday_date_ist",
-    ]].copy()
+        # cell-key bits + simulator inputs:
+        "expiry_bucket", "delta_target",
+        "credit_usd", "margin_used_usd_at_entry",
+        "call_entry_mark", "put_entry_mark",
+        "call_strike", "put_strike", "quantity_lots",
+        "entry_slippage_call_usd", "entry_slippage_put_usd",
+        "total_entry_cost_usd",
+    ]
+    sel = trades_df.loc[mask, [c for c in sel_cols
+                                if c in trades_df.columns]].copy()
     n_after = int(len(sel))
 
     # Group trades by their friday_date_ist partition so we can load each
@@ -518,56 +665,72 @@ def aggregate_pivot_profile(
         sel["friday_date_ist"]).dt.strftime("%Y-%m-%d")
     sel["trade_id_str"] = sel["trade_id"].astype(str)
 
-    # We need expiry_bucket and delta_target to build the per-trade composite
-    # key for cell-scale lookup. Pull them from the full trades_df rows that
-    # passed the mask, then merge onto `sel` on trade_id.
-    if cells and cell_scale_map:
-        meta_cols = ["trade_id", "expiry_bucket", "delta_target"]
-        meta = trades_df.loc[mask, [c for c in meta_cols
-                                     if c in trades_df.columns]].copy()
-        meta["trade_id_str"] = meta["trade_id"].astype(str)
-        sel = sel.merge(
-            meta[["trade_id_str", "expiry_bucket", "delta_target"]],
-            on="trade_id_str", how="left")
-
     # Build a {trade_id_str -> meta} lookup. `meta` carries everything later
     # stages need: entry timestamp (for segment_pivots), the band, MTM scale,
     # plus context (entry hour, friday, lots) used by the per-trade drill-down
-    # records.
+    # records AND every input the inline rule simulator needs.
     sel["entry_ts_unix_int"] = pd.to_numeric(
         sel["entry_ts_utc"], errors="coerce").astype("Int64")
     trade_lookup: dict[str, dict] = {}
+
+    def _safe_float(row, attr: str, default: float = 0.0) -> float:
+        try:
+            v = getattr(row, attr, None)
+            if v is None or (isinstance(v, float) and not np.isfinite(v)):
+                return default
+            return float(v)
+        except (TypeError, ValueError, AttributeError):
+            return default
+
     for row in sel.itertuples(index=False):
         ts = getattr(row, "entry_ts_unix_int", None)
         tid = getattr(row, "trade_id_str", None)
         band = getattr(row, "entry_atm_iv_band", None)
         if ts is None or tid is None or band is None or pd.isna(ts):
             continue
-        scale = 1.0
-        if cells and cell_scale_map:
-            try:
-                ebucket = getattr(row, "expiry_bucket", "") or ""
-                dtgt = getattr(row, "delta_target", None)
-                hr = int(getattr(row, "entry_hour_ist"))
-                key = "|".join([
-                    str(band), str(hr), str(ebucket),
-                    f"{float(dtgt):.4f}" if dtgt is not None else "",
-                ])
-                if key in cell_scale_map:
-                    scale = cell_scale_map[key]
-            except (TypeError, ValueError, AttributeError):
-                pass
         try:
             hr_val = int(getattr(row, "entry_hour_ist"))
         except (TypeError, ValueError, AttributeError):
             hr_val = -1
+        ebucket = (str(getattr(row, "expiry_bucket", "") or "")
+                   if hasattr(row, "expiry_bucket") else "")
+        dtgt = getattr(row, "delta_target", None)
+        cell_key = "|".join([
+            str(band), str(hr_val), ebucket,
+            f"{float(dtgt):.4f}" if dtgt is not None else "",
+        ])
+        scale = float(cell_scale_map.get(cell_key, 1.0)) if cells else 1.0
+        rule = cell_rule_map.get(cell_key, {}) if cells else {}
+        friday_str = getattr(row, "friday_date_ist_str", "")
+        try:
+            friday_ts_utc = int(pd.Timestamp(str(friday_str),
+                                              tz="UTC").timestamp())
+        except Exception:  # noqa: BLE001
+            friday_ts_utc = 0
+        try:
+            qty = int(getattr(row, "quantity_lots", 100) or 100)
+        except (TypeError, ValueError, AttributeError):
+            qty = 100
         trade_lookup[str(tid)] = {
             "entry_ts": int(ts),
             "band": str(band),
-            "scale": float(scale),
+            "scale": scale,
             "entry_hour_ist": hr_val,
-            "friday_date_ist": getattr(row, "friday_date_ist_str", ""),
-            "lots": int(round(float(scale) * BACKTESTER_BASELINE_LOTS)),
+            "friday_date_ist": friday_str,
+            "lots": int(round(scale * BACKTESTER_BASELINE_LOTS)),
+            # Inline-simulator inputs (per-100-lot baseline values):
+            "rule": rule,
+            "credit_usd":       _safe_float(row, "credit_usd"),
+            "margin_used_usd":  _safe_float(row, "margin_used_usd_at_entry"),
+            "call_entry_mark":  _safe_float(row, "call_entry_mark"),
+            "put_entry_mark":   _safe_float(row, "put_entry_mark"),
+            "call_strike":      _safe_float(row, "call_strike"),
+            "put_strike":       _safe_float(row, "put_strike"),
+            "quantity_lots":    qty,
+            "entry_slip_call":  _safe_float(row, "entry_slippage_call_usd"),
+            "entry_slip_put":   _safe_float(row, "entry_slippage_put_usd"),
+            "total_entry_cost": _safe_float(row, "total_entry_cost_usd"),
+            "friday_ts_utc":    friday_ts_utc,
         }
 
     # Accumulators: 3 parallel maps (all, winners-only, losers-only). Each
@@ -575,14 +738,18 @@ def aggregate_pivot_profile(
     band_pivots: dict[str, list[list[SegmentPivot]]] = {}
     band_pivots_winners: dict[str, list[list[SegmentPivot]]] = {}
     band_pivots_losers: dict[str, list[list[SegmentPivot]]] = {}
-    have_outcome = bool(winner_tids) or bool(loser_tids)
-    winner_set = winner_tids or set()
-    loser_set = loser_tids or set()
-    pnl_map = pnl_by_tid or {}
+    # Per-trade segment data, retained so we can build per-band drill-downs
+    # (single best winner / single worst-dd winner / per-trade loser charts).
+    per_trade_pivots: dict[str, list[Optional[SegmentPivot]]] = {}
+    # Classification is computed inline now — initialise empty sets that the
+    # simulator populates as we walk paths.
+    winner_set: set[str] = set()
+    loser_set: set[str] = set()
+    pnl_map: dict[str, float] = {}
+    have_outcome = bool(cells)  # we'll only classify when cells (with rules) are given
 
     # Per-trade records for the drill-down panels (losers list / best winner /
-    # winner with worst min-MTM). Populated regardless of pnl availability —
-    # min/max MTM stand on their own.
+    # winner with worst min-MTM).
     trade_records: list[dict] = []
 
     partitions = sorted(sel["friday_date_ist_str"].unique())
@@ -609,34 +776,65 @@ def aggregate_pivot_profile(
         if partitioned_root is None:
             flat_path = paths_glob
 
-    def _emit(tid: str, ts_arr: np.ndarray, mtm_raw: np.ndarray) -> None:
-        """Process one trade's 1m path: compute pivots + accumulate band
-        buckets + push a per-trade record."""
+    def _emit(tid: str,
+              ts_arr: np.ndarray,
+              gross_pnl_arr: np.ndarray,
+              call_mark_arr: np.ndarray,
+              put_mark_arr: np.ndarray,
+              spot_arr: np.ndarray) -> None:
+        """Process one trade's 1m path end-to-end:
+          1. Simulate the cell's exit rule → is_win, net_pnl
+          2. Compute segment pivots on the scaled MTM
+          3. Push aggregates into band buckets + the per-trade record
+        """
         nonlocal processed_trades
         meta = trade_lookup.get(tid)
         if meta is None or ts_arr.size == 0:
             return
         scale = meta["scale"]
-        mtm = mtm_raw * scale if scale != 1.0 else mtm_raw
         band = meta["band"]
+
+        # 1) Inline classification (only when we have a rule from a cell).
+        simulated = None
+        if have_outcome:
+            simulated = _simulate_exit(
+                ts_arr, gross_pnl_arr, call_mark_arr,
+                put_mark_arr, spot_arr,
+                meta, meta.get("rule") or {},
+            )
+            if simulated is not None:
+                # Scale net P&L to the cell's lot count so cards/list values
+                # reflect what the trader would have realised at chosen lots.
+                net_scaled = simulated["net_pnl_usd"] * scale
+                pnl_map[tid] = net_scaled
+                if simulated["is_win"]:
+                    winner_set.add(tid)
+                else:
+                    loser_set.add(tid)
+
+        # 2) Segment pivots on the scaled MTM (lots-display convention).
+        mtm = gross_pnl_arr * scale if scale != 1.0 else gross_pnl_arr
         pivots = segment_pivots(ts_arr, mtm, meta["entry_ts"])
+        per_trade_pivots[tid] = pivots
         band_slots = band_pivots.setdefault(band, [list() for _ in range(5)])
         for i, p in enumerate(pivots):
             if p is not None:
                 band_slots[i].append(p)
-        if have_outcome:
-            if tid in winner_set:
+        if have_outcome and simulated is not None:
+            if simulated["is_win"]:
                 slots_w = band_pivots_winners.setdefault(
                     band, [list() for _ in range(5)])
                 for i, p in enumerate(pivots):
                     if p is not None:
                         slots_w[i].append(p)
-            elif tid in loser_set:
+            else:
                 slots_l = band_pivots_losers.setdefault(
                     band, [list() for _ in range(5)])
                 for i, p in enumerate(pivots):
                     if p is not None:
                         slots_l[i].append(p)
+
+        # 3) Per-trade min/max MTM record (on scaled MTM).
         finite = np.isfinite(mtm)
         min_mtm = float(np.min(mtm[finite])) if finite.any() else None
         max_mtm = float(np.max(mtm[finite])) if finite.any() else None
@@ -651,8 +849,28 @@ def aggregate_pivot_profile(
             "net_pnl_usd": pnl_map.get(tid),
         })
         processed_trades += 1
-        if progress_cb is not None and processed_trades % 50 == 0:
+        if progress_cb is not None and processed_trades % 5 == 0:
             progress_cb(processed_trades, total_trades)
+
+    PATH_COLS = ["trade_id", "ts", "gross_pnl_usd",
+                 "call_mark", "put_mark", "spot"]
+    SUB_COLS = ["ts", "gross_pnl_usd", "call_mark", "put_mark", "spot"]
+
+    def _emit_from_grp(tid: str, grp: pd.DataFrame) -> None:
+        grp = grp.sort_values("ts")
+        ts = grp["ts"].to_numpy(dtype=np.int64)
+        gp = grp["gross_pnl_usd"].to_numpy(dtype=np.float64)
+        # Tolerate older path parquets that may not carry call/put/spot.
+        cm = (grp["call_mark"].to_numpy(dtype=np.float64)
+              if "call_mark" in grp.columns
+              else np.zeros(ts.size, dtype=np.float64))
+        pm = (grp["put_mark"].to_numpy(dtype=np.float64)
+              if "put_mark" in grp.columns
+              else np.zeros(ts.size, dtype=np.float64))
+        sp = (grp["spot"].to_numpy(dtype=np.float64)
+              if "spot" in grp.columns
+              else np.zeros(ts.size, dtype=np.float64))
+        _emit(tid, ts, gp, cm, pm, sp)
 
     if partitioned_root is not None:
         # Walk friday partitions present in the trade selection.
@@ -662,25 +880,26 @@ def aggregate_pivot_profile(
             if not os.path.exists(part_path):
                 continue
             try:
-                pdf = pd.read_parquet(
-                    part_path,
-                    columns=["trade_id", "ts", "gross_pnl_usd"],
-                )
+                pdf = pd.read_parquet(part_path, columns=PATH_COLS)
             except Exception:
-                continue
+                # Fall back to the minimum set if call/put/spot are missing.
+                try:
+                    pdf = pd.read_parquet(
+                        part_path,
+                        columns=["trade_id", "ts", "gross_pnl_usd"])
+                except Exception:
+                    continue
             if pdf.empty:
                 continue
             pdf["trade_id_str"] = pdf["trade_id"].astype(str)
             tids_here = (set(pdf["trade_id_str"].unique())
                          & set(trade_lookup.keys()))
+            keep_cols = [c for c in SUB_COLS if c in pdf.columns]
             for tid in tids_here:
-                grp = pdf.loc[pdf["trade_id_str"] == tid,
-                              ["ts", "gross_pnl_usd"]].sort_values("ts")
+                grp = pdf.loc[pdf["trade_id_str"] == tid, keep_cols]
                 if grp.empty:
                     continue
-                _emit(tid,
-                      grp["ts"].to_numpy(dtype=np.int64),
-                      grp["gross_pnl_usd"].to_numpy(dtype=np.float64))
+                _emit_from_grp(tid, grp)
     elif flat_path is not None:
         # Single-file flat parquet — use pyarrow predicate pushdown on
         # trade_id so we don't slurp the whole 2-3 GB file into memory.
@@ -689,7 +908,7 @@ def aggregate_pivot_profile(
             tids_wanted = list(trade_lookup.keys())
             tbl = pq.read_table(
                 flat_path,
-                columns=["trade_id", "ts", "gross_pnl_usd"],
+                columns=PATH_COLS,
                 filters=[("trade_id", "in", tids_wanted)],
             )
             pdf = tbl.to_pandas()
@@ -699,18 +918,19 @@ def aggregate_pivot_profile(
             _lg.getLogger(__name__).warning(
                 "pivot_profile: pyarrow filter on flat parquet failed (%s); "
                 "falling back to full-load + isin", exc)
-            pdf = pd.read_parquet(
-                flat_path,
-                columns=["trade_id", "ts", "gross_pnl_usd"])
+            try:
+                pdf = pd.read_parquet(flat_path, columns=PATH_COLS)
+            except Exception:
+                pdf = pd.read_parquet(
+                    flat_path,
+                    columns=["trade_id", "ts", "gross_pnl_usd"])
             pdf = pdf[pdf["trade_id"].astype(str).isin(
                 set(trade_lookup.keys()))]
         if not pdf.empty:
             pdf["trade_id_str"] = pdf["trade_id"].astype(str)
+            keep_cols = [c for c in SUB_COLS if c in pdf.columns]
             for tid, grp in pdf.groupby("trade_id_str", sort=False):
-                grp = grp.sort_values("ts")
-                _emit(tid,
-                      grp["ts"].to_numpy(dtype=np.int64),
-                      grp["gross_pnl_usd"].to_numpy(dtype=np.float64))
+                _emit_from_grp(tid, grp[keep_cols])
 
     if progress_cb is not None:
         progress_cb(processed_trades, total_trades)
@@ -725,47 +945,97 @@ def aggregate_pivot_profile(
             out[band] = seg_blob
         return out
 
-    # Drill-down lists (only when classification ran).
-    losers_list: Optional[list[dict]] = None
-    best_winner: Optional[dict] = None
-    winner_worst_drawdown: Optional[dict] = None
+    # Per-band drill-downs (only when classification ran).
+    by_band_best_winner: Optional[dict] = None
+    by_band_worst_dd_winner: Optional[dict] = None
+    by_band_losers_individual: Optional[dict] = None
+    best_winners_by_band: Optional[dict] = None
+    worst_dd_winners_by_band: Optional[dict] = None
+    losers_list_by_band: Optional[dict] = None
     if have_outcome:
-        losers_records = [r for r in trade_records
-                          if r["trade_id"] in loser_set]
-        # Worst (most negative) loss first. None pnl sinks to the bottom.
-        losers_records.sort(
-            key=lambda r: (r["net_pnl_usd"] is None,
-                           r["net_pnl_usd"]
-                           if r["net_pnl_usd"] is not None else 0.0))
-        losers_list = losers_records
-        winners_with_pnl = [r for r in trade_records
-                             if r["trade_id"] in winner_set
-                             and r["net_pnl_usd"] is not None]
-        if winners_with_pnl:
-            best_winner = max(winners_with_pnl,
-                               key=lambda r: r["net_pnl_usd"])
-        winners_with_min = [r for r in trade_records
-                             if r["trade_id"] in winner_set
-                             and r["min_mtm_usd"] is not None]
-        if winners_with_min:
-            winner_worst_drawdown = min(winners_with_min,
-                                         key=lambda r: r["min_mtm_usd"])
+        # Group trade records by band.
+        recs_by_band: dict[str, list[dict]] = {}
+        for r in trade_records:
+            recs_by_band.setdefault(r["band"], []).append(r)
+
+        best_winners_by_band = {}
+        worst_dd_winners_by_band = {}
+        losers_list_by_band = {}
+        bw_seg_by_band: dict[str, list[list[SegmentPivot]]] = {}
+        wd_seg_by_band: dict[str, list[list[SegmentPivot]]] = {}
+        losers_seg_by_band: dict[str, list[dict]] = {}
+
+        for band, recs in recs_by_band.items():
+            winners = [r for r in recs
+                       if r["trade_id"] in winner_set
+                       and r["net_pnl_usd"] is not None]
+            if winners:
+                bw = max(winners, key=lambda r: r["net_pnl_usd"])
+                best_winners_by_band[band] = bw
+                pivs = per_trade_pivots.get(bw["trade_id"], [])
+                # Wrap each per-segment pivot in a 1-element list so the
+                # existing _agg_segment can render it as a degenerate aggregate
+                # (single trade — n_trades=1, avg=that trade's value).
+                slots = [[p] if p is not None else [] for p in pivs]
+                bw_seg_by_band[band] = slots
+            winners_with_min = [r for r in winners
+                                 if r["min_mtm_usd"] is not None]
+            if winners_with_min:
+                wd = min(winners_with_min,
+                         key=lambda r: r["min_mtm_usd"])
+                worst_dd_winners_by_band[band] = wd
+                pivs = per_trade_pivots.get(wd["trade_id"], [])
+                slots = [[p] if p is not None else [] for p in pivs]
+                wd_seg_by_band[band] = slots
+
+            losers = [r for r in recs if r["trade_id"] in loser_set]
+            losers.sort(
+                key=lambda r: (r["net_pnl_usd"] is None,
+                               r["net_pnl_usd"]
+                               if r["net_pnl_usd"] is not None else 0.0))
+            losers_list_by_band[band] = losers
+            # Per-trade segment blobs for the stacked mini-charts.
+            band_loser_blobs: list[dict] = []
+            for r in losers:
+                pivs = per_trade_pivots.get(r["trade_id"], [])
+                seg_blob: dict[str, dict] = {}
+                for i, name in enumerate(SEG_NAMES):
+                    seg_blob[name] = _agg_segment(
+                        [pivs[i]] if i < len(pivs) and pivs[i] is not None else [])
+                band_loser_blobs.append({
+                    "trade_id": r["trade_id"],
+                    "friday_date_ist": r["friday_date_ist"],
+                    "net_pnl_usd": r["net_pnl_usd"],
+                    "min_mtm_usd": r["min_mtm_usd"],
+                    "max_mtm_usd": r["max_mtm_usd"],
+                    "lots": r["lots"],
+                    "segments": seg_blob,
+                })
+            losers_seg_by_band[band] = band_loser_blobs
+
+        by_band_best_winner = _build(bw_seg_by_band)
+        by_band_worst_dd_winner = _build(wd_seg_by_band)
+        by_band_losers_individual = losers_seg_by_band
 
     return {
         "by_band": _build(band_pivots),
         "by_band_winners": _build(band_pivots_winners) if have_outcome else None,
         "by_band_losers": _build(band_pivots_losers) if have_outcome else None,
-        "losers_list": losers_list,
-        "best_winner": best_winner,
-        "winner_worst_drawdown": winner_worst_drawdown,
+        "by_band_best_winner": by_band_best_winner,
+        "by_band_worst_drawdown_winner": by_band_worst_dd_winner,
+        "by_band_losers_individual": by_band_losers_individual,
+        "best_winners_by_band": best_winners_by_band,
+        "worst_dd_winners_by_band": worst_dd_winners_by_band,
+        "losers_list_by_band": losers_list_by_band,
+        "_response_version": _PIVOT_RESPONSE_VERSION,
         "params": {
             "entry_hours": sorted(hours_set),
             "cells": cells or [],
             "n_total_trades": int(len(trades_df)),
             "n_after_filter": int(n_after),
             "n_processed": int(processed_trades),
-            "n_winners": len(winner_set & {str(t) for t in trade_lookup.keys()}) if have_outcome else None,
-            "n_losers": len(loser_set & {str(t) for t in trade_lookup.keys()}) if have_outcome else None,
+            "n_winners": len(winner_set) if have_outcome else None,
+            "n_losers": len(loser_set) if have_outcome else None,
             "min_trades_per_band_cell": MIN_TRADES_PER_BAND_CELL,
         },
     }
