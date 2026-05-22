@@ -297,8 +297,8 @@ function SpotlightCard({
       <div style={{ fontSize: 11, color: '#7a9bb5', marginTop: 4,
                      fontFamily: 'monospace' }}>
         {record.friday_date_ist || '—'} · {record.band} · {hhmm}
-        {' · '}min {fmtUsd(record.min_mtm_usd, false)}
-        {' · '}max {fmtUsd(record.max_mtm_usd, false)}
+        {' · '}min {fmtUsd(record.min_mtm_usd)}
+        {' · '}max {fmtUsd(record.max_mtm_usd)}
         {record.lots > 0 && ` · ${record.lots} lots`}
       </div>
     </button>
@@ -374,11 +374,15 @@ function LosersListTable({
                 <td style={{ ...lTD, textAlign: 'right', color: '#f85149' }}>
                   {fmtUsd(r.net_pnl_usd)}
                 </td>
-                <td style={{ ...lTD, textAlign: 'right' }}>
-                  {fmtUsd(r.min_mtm_usd, false)}
+                <td style={{ ...lTD, textAlign: 'right',
+                              color: (r.min_mtm_usd ?? 0) < 0
+                                ? '#f85149' : '#cfd9e3' }}>
+                  {fmtUsd(r.min_mtm_usd)}
                 </td>
-                <td style={{ ...lTD, textAlign: 'right' }}>
-                  {fmtUsd(r.max_mtm_usd, false)}
+                <td style={{ ...lTD, textAlign: 'right',
+                              color: (r.max_mtm_usd ?? 0) > 0
+                                ? '#3fb950' : '#cfd9e3' }}>
+                  {fmtUsd(r.max_mtm_usd)}
                 </td>
                 <td style={{ ...lTD, textAlign: 'right' }}>{r.lots || '—'}</td>
               </tr>

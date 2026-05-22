@@ -1,5 +1,29 @@
 # Claude's Work Log
 
+## Session 39 (2026-05-22) — Stage-1 Partial Exit script + Pivot Profile UI verified
+
+### Stage-1 Partial Exit 2D Sweep Script
+New file: `backend/app/scripts/stage1_partial_exit_per_band_2d.py` (~933 lines).
+
+Evaluates adding a partial exit rule (close exit_frac of lots when MTM ≤ trigger_MTM)
+on top of per-band baseline exit rules. 2D sweep: 4 exit_fracs × 5 trigger_levels = 20 cells/band.
+
+Key implementation details:
+- EV formula: signed delta `exit_frac × (trigger_MTM − net_pnl)` — not abs(); "Case C sub-2" losers (hit trigger but recover) have negative delta. Critical fix that made all 4 validation gates pass.
+- `ev_total` = B_reliable + C (headline); `ev_total_audited` = adds B_unreliable (Gate 2 only)
+- Composite normalised per-band (20 cells each)
+- 5 CSVs output to `/home/abhis/btc-data/derived/m7/stage1_analysis/`
+- All 4 validation gates pass
+
+### Pivot Profile Panel — SpotlightStrip + LosersListTable (UI verified via Playwright)
+- SpotlightStrip BEST WINNER card (+$233.27) renders and opens M7TradeDiagnosticModal ✅
+- SpotlightStrip WINNER W/ WORST MIN-MTM card (-$998.46) renders ✅
+- LosersListTable: 17 losers, "Diagnose ▶" links, faceted breakdown ✅
+- Sparklines per band (Losers tab) render ✅
+- No new console errors
+
+---
+
 ## Session 38 (2026-05-21) — Playwright UI testing complete (no code changes)
 
 All Session 36+37 checklist items verified via Playwright MCP:

@@ -2,6 +2,80 @@
 
 ## Last Session
 **Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-22 (Session 39 — Stage-1 Partial Exit script + Pivot Profile UI verified)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 39 — Shipped (committed)
+
+#### 1. Stage-1 Partial Exit 2D Sweep Script (NEW)
+
+`backend/app/scripts/stage1_partial_exit_per_band_2d.py` — ~933 lines.
+
+Evaluates adding a "close `exit_frac` of lots when MTM ≤ trigger_MTM" rule on
+top of per-band baseline exit rules. Filter-agnostic (reads rules from JSON,
+no picker/gate logic). JSON input: `/home/abhis/btc-data/derived/m7/stage1_analysis/per_band_rules.json`.
+
+**Sweep**: 4 exit_fracs × 5 trigger_levels = 20 cells/band. Up to 10 bands × 200 cells total.
+
+**Trigger reference levels per band:**
+- `SL_avg = mean(min_mtm | SL-hit)`, `L_avg = mean(min_mtm | loser)`, `W_avg = mean(min_mtm | winner)`
+- Trigger names: `25_of_sl`, `50_of_sl`, `75_of_sl`, `L_avg`, `W_avg`
+
+**EV formula (signed):** `exit_frac × (trigger_MTM − net_pnl)` for all fired trades.
+*Not* abs() — "Case C sub-2" losers (hit trigger but recover) have negative delta.
+`ev_total` = B_reliable + C signed deltas (headline).
+`ev_total_audited` = ev_total + B_unreliable (for Gate 2 validation only).
+
+**Hypothetical P&L:** `exit_frac × trigger_MTM + (1 - exit_frac) × net_pnl` for fired trades.
+
+**4 validation gates** — all pass before declaring done.
+
+**5 CSVs output** to `/home/abhis/btc-data/derived/m7/stage1_analysis/`:
+- `all_cells.csv` — 20 rows/band, all metrics
+- `heatmap_ev.csv` — wide, ev_per_trade
+- `heatmap_composite.csv` — wide, composite_delta
+- `best_cells.csv` — best cell per band by avg_pnl + composite, cross-rank columns
+- `distribution.csv` — P&L bins at best cells
+
+**Run:** `docker compose run --rm backend python -m app.scripts.stage1_partial_exit_per_band_2d`
+
+#### 2. Pivot Profile Panel — SpotlightStrip + LosersListTable (UI verified)
+
+Code was committed in prior sessions. This session verified via Playwright:
+- `SpotlightStrip`: BEST WINNER (+$233.27 card) + WINNER W/ WORST MIN-MTM (-$998.46 card)
+- Clicking BEST WINNER card → M7TradeDiagnosticModal opens with correct trade data
+- LosersListTable: 17 individual losing trades with "Diagnose ▶" links
+- Faceted loss breakdown (cause × IV band) renders correctly
+
+### Session 39 — UI Test Results
+
+| Check | Result |
+|---|---|
+| M7 Sweep loads (13,703 trades, 10 bands) | ✅ |
+| SpotlightStrip BEST WINNER card renders (+$233.27) | ✅ |
+| SpotlightStrip WINNER W/ WORST MIN-MTM renders (-$998.46) | ✅ |
+| BEST WINNER click → diagnostic modal with correct trade_id + P&L | ✅ |
+| Losers tab: LosersListTable + "Diagnose ▶" links visible | ✅ |
+| Faceted loss breakdown (cause × IV band) table renders | ✅ |
+| Sparklines per band (Losers tab, 20-30 IV, n_max=7) | ✅ |
+| Console errors: favicon 404 only (pre-existing, harmless) | ✅ |
+
+### Session 39 — Pre-existing known issues (unchanged)
+
+1. **Cells-mode warming stuck at 0/8** on cold backend restart — resolves ~5-10 min
+2. **`ds_mtime` NameError** in coverage warmup (`m7_best_combo.py:1734`) — non-blocking
+3. **`missed_fridays` ERR_EMPTY_RESPONSE** — transient during warmup
+
+### Session 39 — Next session priorities
+
+1. **Run Stage-1 script** — create `per_band_rules.json` with best per-band rules, run sweep, analyze 5 CSVs
+2. **Fix `ds_mtime` NameError** — `m7_best_combo.py:1734`
+3. **Capital Mode** — K-scaled per-trade lot sizing (deferred from Session 35)
+
+---
+
+## Previous Session
+**Who:** Claude (Sonnet 4.6)
 **Date:** 2026-05-21 (Session 38 — Playwright UI testing complete)
 **Branch:** `mainbranch-gemini_claude`
 
