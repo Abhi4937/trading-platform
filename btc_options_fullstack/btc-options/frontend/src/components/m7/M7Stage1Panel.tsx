@@ -1491,6 +1491,26 @@ function CellDetail({
     // Streaks (date-sorted)
     max_win_streak_base: number; max_win_streak_hyp: number;
     max_loss_streak_base: number; max_loss_streak_hyp: number;
+    // Exit MTM aggregates (F14 with per-trade exit_mtm_usd from backend)
+    avg_exit_mtm_overall_base: number | null; avg_exit_mtm_overall_hyp: number | null;
+    avg_exit_mtm_w_base: number | null;       avg_exit_mtm_w_hyp: number | null;
+    avg_exit_mtm_l_base: number | null;       avg_exit_mtm_l_hyp: number | null;
+    largest_exit_mtm_w_base: number | null;   largest_exit_mtm_w_hyp: number | null;
+    largest_exit_mtm_l_base: number | null;   largest_exit_mtm_l_hyp: number | null;
+    total_exit_mtm_w_base: number | null;     total_exit_mtm_w_hyp: number | null;
+    total_exit_mtm_l_base: number | null;     total_exit_mtm_l_hyp: number | null;
+    // Peak / Trough % per-trade hyp (F14)
+    peak_pct_base: number | null; peak_pct_hyp: number | null;
+    trough_pct_base: number | null; trough_pct_hyp: number | null;
+    // Per-trade Ret/margin and Ret/credit (more accurate than band-level)
+    ret_margin_base: number | null; ret_margin_hyp: number | null;
+    ret_credit_base: number | null; ret_credit_hyp: number | null;
+    ret_margin_w_base: number | null; ret_margin_w_hyp: number | null;
+    ret_credit_w_base: number | null; ret_credit_w_hyp: number | null;
+    // Track whether per-trade fields are actually present (backend may not return them)
+    has_exit_mtm: boolean;
+    has_credit: boolean;
+    has_margin: boolean;
   } | null = null;
   if (bandTrades && bandTrades.length > 0 && cell.trigger_mtm != null && bm) {
     const trig = cell.trigger_mtm;
@@ -1499,12 +1519,32 @@ function CellDetail({
       const minM = t.min_mtm_usd ?? 0;
       const maxM = t.max_mtm_usd ?? 0;
       const net = t.net_pnl_estimate_usd ?? 0;
+      const exitM = t.exit_mtm_usd ?? net;  // fall back to net if exit_mtm not present
+      const credit = t.credit_usd ?? null;
+      const margin = t.margin_used_usd_at_entry ?? null;
       const fired = minM <= trig;
       const hyp_min = fired ? ef * trig + (1 - ef) * minM : minM;
       const hyp_max = fired ? ef * trig + (1 - ef) * maxM : maxM;
       const hyp_net = fired ? ef * trig + (1 - ef) * net : net;
+      // Hyp exit MTM under F14 linear approx: ef of lots exit at trigger,
+      // remaining (1-ef) at original exit MTM. For Case A (no fire), unchanged.
+      const hyp_exit = fired ? ef * trig + (1 - ef) * exitM : exitM;
+      // Per-trade Peak % and Trough % (hyp): hyp_max / credit and hyp_min / credit.
+      const peak_pct = credit && credit > 0 ? maxM / credit : null;
+      const trough_pct = credit && credit > 0 ? minM / credit : null;
+      const hyp_peak_pct = credit && credit > 0 ? hyp_max / credit : null;
+      const hyp_trough_pct = credit && credit > 0 ? hyp_min / credit : null;
+      // Per-trade returns
+      const ret_margin = margin && margin > 0 ? net / margin : null;
+      const ret_credit = credit && credit > 0 ? net / credit : null;
+      const hyp_ret_margin = margin && margin > 0 ? hyp_net / margin : null;
+      const hyp_ret_credit = credit && credit > 0 ? hyp_net / credit : null;
       const date = t.friday_date_ist ?? '';
-      return { minM, maxM, net, hyp_min, hyp_max, hyp_net, date };
+      return {
+        minM, maxM, net, exitM, hyp_min, hyp_max, hyp_net, hyp_exit, date,
+        peak_pct, trough_pct, hyp_peak_pct, hyp_trough_pct,
+        ret_margin, ret_credit, hyp_ret_margin, hyp_ret_credit,
+      };
     });
     const winnersHyp = enr.filter(t => t.hyp_net >= 0);
     const losersHyp = enr.filter(t => t.hyp_net < 0);
@@ -1586,6 +1626,43 @@ function CellDetail({
       max_win_streak_hyp:  maxConsec(sortedByDate, t => t.hyp_net >= 0),
       max_loss_streak_base: maxConsec(sortedByDate, t => t.net < 0),
       max_loss_streak_hyp:  maxConsec(sortedByDate, t => t.hyp_net < 0),
+
+      // Exit MTM aggregates — split by ACTUAL win/loss for baseline, HYP win/loss for stage-1
+      avg_exit_mtm_overall_base: mean(enr.map(t => t.exitM)),
+      avg_exit_mtm_overall_hyp:  mean(enr.map(t => t.hyp_exit)),
+      avg_exit_mtm_w_base: mean(winnersBase.map(t => t.exitM)),
+      avg_exit_mtm_w_hyp:  mean(winnersHyp.map(t => t.hyp_exit)),
+      avg_exit_mtm_l_base: mean(losersBase.map(t => t.exitM)),
+      avg_exit_mtm_l_hyp:  mean(losersHyp.map(t => t.hyp_exit)),
+      largest_exit_mtm_w_base: maxOf(winnersBase.map(t => t.exitM)),
+      largest_exit_mtm_w_hyp:  maxOf(winnersHyp.map(t => t.hyp_exit)),
+      largest_exit_mtm_l_base: minOf(losersBase.map(t => t.exitM)),   // most-negative
+      largest_exit_mtm_l_hyp:  minOf(losersHyp.map(t => t.hyp_exit)),
+      total_exit_mtm_w_base: sumOf(winnersBase.map(t => t.exitM)),
+      total_exit_mtm_w_hyp:  sumOf(winnersHyp.map(t => t.hyp_exit)),
+      total_exit_mtm_l_base: sumOf(losersBase.map(t => t.exitM)),
+      total_exit_mtm_l_hyp:  sumOf(losersHyp.map(t => t.hyp_exit)),
+
+      // Peak / Trough % (per-trade with credit denominator, then averaged)
+      peak_pct_base:   mean(enr.map(t => t.peak_pct).filter((v): v is number => v != null)),
+      peak_pct_hyp:    mean(enr.map(t => t.hyp_peak_pct).filter((v): v is number => v != null)),
+      trough_pct_base: mean(enr.map(t => t.trough_pct).filter((v): v is number => v != null)),
+      trough_pct_hyp:  mean(enr.map(t => t.hyp_trough_pct).filter((v): v is number => v != null)),
+
+      // Per-trade Ret/margin and Ret/credit (more accurate than band-level)
+      ret_margin_base: mean(enr.map(t => t.ret_margin).filter((v): v is number => v != null)),
+      ret_margin_hyp:  mean(enr.map(t => t.hyp_ret_margin).filter((v): v is number => v != null)),
+      ret_credit_base: mean(enr.map(t => t.ret_credit).filter((v): v is number => v != null)),
+      ret_credit_hyp:  mean(enr.map(t => t.hyp_ret_credit).filter((v): v is number => v != null)),
+      ret_margin_w_base: mean(winnersBase.map(t => t.ret_margin).filter((v): v is number => v != null)),
+      ret_margin_w_hyp:  mean(winnersHyp.map(t => t.hyp_ret_margin).filter((v): v is number => v != null)),
+      ret_credit_w_base: mean(winnersBase.map(t => t.ret_credit).filter((v): v is number => v != null)),
+      ret_credit_w_hyp:  mean(winnersHyp.map(t => t.hyp_ret_credit).filter((v): v is number => v != null)),
+
+      // Detect whether per-trade context fields are populated (older backend may not return them)
+      has_exit_mtm: bandTrades.some(t => t.exit_mtm_usd != null),
+      has_credit:   bandTrades.some(t => t.credit_usd != null),
+      has_margin:   bandTrades.some(t => t.margin_used_usd_at_entry != null),
     };
 
     const mtmRow = (label: string, baseVal: number | null, stageVal: number | null, isPositiveBetter: boolean) => {
@@ -1653,23 +1730,45 @@ function CellDetail({
     mtmStub('Largest win MTM', bm.largest_win_mtm);
   }
 
-  // Exit MTMs — baseline-only (no F14 equivalent; the "exit" under stage-1 is dual)
+  // Exit MTMs — F14 hyp using per-trade exit_mtm_usd. Falls back to stub if backend hasn't
+  // returned the field yet (older cached response or pending restart).
   if (bm) {
-    const exitStub = (label: string, baseVal: number | null, isFirst = false) => {
+    const exitMtmRow = (label: string, baseFromBm: number | null, hypVal: number | null, baseFromTrades: number | null, isFirst = false) => {
+      // Prefer baseline from bm (canonical), fall back to derived value from trades
+      const baseScaled = baseFromBm != null ? baseFromBm * totalScale
+                       : baseFromTrades != null ? baseFromTrades * totalScale
+                       : null;
+      const baseStr = baseScaled != null ? `$${baseScaled.toFixed(2)}` : '—';
+      if (hypVal == null) {
+        unifiedRows.push({
+          label, baseline: baseStr, stage1: bandTrades ? (hypAggs?.has_exit_mtm ? '⋯' : '—') : '—',
+          delta: '—', arrow: '', deltaColor: '#7a9bb5',
+          note: hypAggs?.has_exit_mtm === false ? 'restart backend to expose exit_mtm_usd per trade' : (bandTrades ? 'computing…' : 'loads when band trades load'),
+          section: isFirst ? 'Exit MTMs (F14 hyp from per-trade exit_mtm_usd)' : undefined,
+        });
+        return;
+      }
+      const hypScaled = hypVal * totalScale;
+      const delta = hypScaled - (baseScaled ?? 0);
+      const same = Math.abs(delta) < 1e-6;
+      // For Winners: higher exit MTM = better. For Losers: less-negative = better (still positive Δ).
+      const better = delta > 0;
       unifiedRows.push({
-        label, baseline: baseVal != null ? `$${(baseVal * totalScale).toFixed(2)}` : '—',
-        stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-        note: notePathBlocked,
-        section: isFirst ? 'Exit MTMs (no stage-1 equivalent — dual-exit semantics)' : undefined,
+        label, baseline: baseStr, stage1: `$${hypScaled.toFixed(2)}`,
+        delta: `${delta >= 0 ? '+' : ''}$${delta.toFixed(2)}`,
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        note: 'F14: linear approx — ef × trigger + (1−ef) × actual_exit_mtm',
+        section: isFirst ? 'Exit MTMs (F14 hyp from per-trade exit_mtm_usd)' : undefined,
       });
     };
-    exitStub('Avg exit MTM (overall)', bm.avg_exit_mtm, true);
-    exitStub('Avg exit MTM (Winners)', bm.avg_win_mtm);
-    exitStub('Largest exit MTM (Winners)', bm.largest_win_mtm);
-    exitStub('Total exit MTM (Winners)', bm.total_win_mtm);
-    exitStub('Avg exit MTM (Losers)', bm.avg_loss_mtm);
-    exitStub('Largest exit MTM (Losers)', bm.largest_loss_mtm);
-    exitStub('Total exit MTM (Losers)', bm.total_loss_mtm);
+    exitMtmRow('Avg exit MTM (overall)', bm.avg_exit_mtm, hypAggs?.avg_exit_mtm_overall_hyp ?? null, hypAggs?.avg_exit_mtm_overall_base ?? null, true);
+    exitMtmRow('Avg exit MTM (Winners)', bm.avg_win_mtm, hypAggs?.avg_exit_mtm_w_hyp ?? null, hypAggs?.avg_exit_mtm_w_base ?? null);
+    exitMtmRow('Largest exit MTM (Winners)', bm.largest_win_mtm, hypAggs?.largest_exit_mtm_w_hyp ?? null, hypAggs?.largest_exit_mtm_w_base ?? null);
+    exitMtmRow('Total exit MTM (Winners)', bm.total_win_mtm, hypAggs?.total_exit_mtm_w_hyp ?? null, hypAggs?.total_exit_mtm_w_base ?? null);
+    exitMtmRow('Avg exit MTM (Losers)', bm.avg_loss_mtm, hypAggs?.avg_exit_mtm_l_hyp ?? null, hypAggs?.avg_exit_mtm_l_base ?? null);
+    exitMtmRow('Largest exit MTM (Losers)', bm.largest_loss_mtm, hypAggs?.largest_exit_mtm_l_hyp ?? null, hypAggs?.largest_exit_mtm_l_base ?? null);
+    exitMtmRow('Total exit MTM (Losers)', bm.total_loss_mtm, hypAggs?.total_exit_mtm_l_hyp ?? null, hypAggs?.total_exit_mtm_l_base ?? null);
 
     // W<avg min, L>avg max — counts. Hyp versions computed client-side from bandTrades (F14).
     const fmtArrowCount = (baseN: number, hypN: number | null, lowerIsBetter: boolean) => {
@@ -1697,18 +1796,32 @@ function CellDetail({
       delta: lAr.delta, arrow: lAr.arrow, deltaColor: lAr.color,
       note: hypAggs ? 'F14: count using hyp_max_mtm vs hyp-losers\' avg' : 'loads when band trades load',
     });
-    unifiedRows.push({
-      label: 'Peak %',
-      baseline: bm.avg_pct_max_mtm_on_credit != null ? `${(bm.avg_pct_max_mtm_on_credit * 100).toFixed(2)}%` : '—',
-      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-      note: 'F-tracked: needs per-trade entry_credit_usd in trades API (~30 min backend)',
-    });
-    unifiedRows.push({
-      label: 'Trough %',
-      baseline: bm.avg_pct_min_mtm_on_credit != null ? `${(bm.avg_pct_min_mtm_on_credit * 100).toFixed(2)}%` : '—',
-      stage1: '—', delta: '—', arrow: '', deltaColor: '#7a9bb5',
-      note: 'F-tracked: needs per-trade entry_credit_usd in trades API',
-    });
+    // Peak % / Trough % — F14 using per-trade credit_usd from backend
+    const pctRow = (label: string, baseFromBm: number | null, hypVal: number | null, isPositiveBetter: boolean) => {
+      const baseStr = baseFromBm != null ? `${(baseFromBm * 100).toFixed(2)}%` : '—';
+      if (hypVal == null) {
+        unifiedRows.push({
+          label, baseline: baseStr, stage1: bandTrades ? (hypAggs?.has_credit ? '⋯' : '—') : '—',
+          delta: '—', arrow: '', deltaColor: '#7a9bb5',
+          note: hypAggs?.has_credit === false ? 'restart backend to expose credit_usd per trade' : (bandTrades ? 'computing…' : 'loads when band trades load'),
+        });
+        return;
+      }
+      const baseScaled = (baseFromBm ?? 0) * 100;
+      const hypScaled = hypVal * 100;
+      const delta = hypScaled - baseScaled;
+      const same = Math.abs(delta) < 1e-6;
+      const better = isPositiveBetter ? delta > 0 : delta < 0;
+      unifiedRows.push({
+        label, baseline: baseStr, stage1: `${hypScaled.toFixed(2)}%`,
+        delta: `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}%`,
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        note: 'F14: per-trade hyp_max/min_mtm ÷ credit_usd, then averaged',
+      });
+    };
+    pctRow('Peak %', bm.avg_pct_max_mtm_on_credit, hypAggs?.peak_pct_hyp ?? null, true);     // higher peak = better
+    pctRow('Trough %', bm.avg_pct_min_mtm_on_credit, hypAggs?.trough_pct_hyp ?? null, true);  // less-negative = better
   }
 
   // P&L splits — most now F14-computable from bandTrades
@@ -1761,15 +1874,14 @@ function CellDetail({
     pnlRow('Total win', baseTotalWin, hypAggs?.total_win_hyp ?? null, true);
     pnlRow('Total loss', baseTotalLoss, hypAggs?.total_loss_hyp ?? null, true);
 
-    // Ret/margin and Ret/credit — use band-level denominators (per-trade not exposed).
-    // BOTH numerator and denominator are at the per-100-lot scale, so the ratio is
-    // lot-scale invariant. Do NOT multiply numerator by totalScale here.
+    // Ret/margin and Ret/credit — prefer per-trade computation (F14 with credit_usd /
+    // margin_used_usd_at_entry per trade), fall back to band-level approximation.
     const margin = bm.avg_margin ?? null;
     const credit = bm.avg_credit ?? null;
-    const retMarginHyp = margin && hypAggs?.avg_net_hyp != null ? hypAggs.avg_net_hyp / margin : null;
-    const retCreditHyp = credit && hypAggs?.avg_net_hyp != null ? hypAggs.avg_net_hyp / credit : null;
-    const retMarginWHyp = margin && hypAggs?.avg_net_winners_hyp != null ? hypAggs.avg_net_winners_hyp / margin : null;
-    const retCreditWHyp = credit && hypAggs?.avg_net_winners_hyp != null ? hypAggs.avg_net_winners_hyp / credit : null;
+    const retMarginHyp = hypAggs?.ret_margin_hyp ?? (margin && hypAggs?.avg_net_hyp != null ? hypAggs.avg_net_hyp / margin : null);
+    const retCreditHyp = hypAggs?.ret_credit_hyp ?? (credit && hypAggs?.avg_net_hyp != null ? hypAggs.avg_net_hyp / credit : null);
+    const retMarginWHyp = hypAggs?.ret_margin_w_hyp ?? (margin && hypAggs?.avg_net_winners_hyp != null ? hypAggs.avg_net_winners_hyp / margin : null);
+    const retCreditWHyp = hypAggs?.ret_credit_w_hyp ?? (credit && hypAggs?.avg_net_winners_hyp != null ? hypAggs.avg_net_winners_hyp / credit : null);
 
     pnlRow('Ret / margin', bm.avg_pct_return_on_margin, retMarginHyp, true, true);
     pnlRow('Ret / credit', bm.avg_pct_return_on_credit, retCreditHyp, true, true);

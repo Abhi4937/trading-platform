@@ -324,6 +324,11 @@ def stage1_band_trades(body: Stage1BandTradesRequest) -> dict:
         "min_mtm_usd", "max_mtm_usd", "net_pnl_estimate_usd",
         "is_premium_sl_hit", "rel_time_min_mtm", "rel_time_max_mtm",
         "exit_reason",
+        # Per-trade context fields — used by frontend F14 to compute hyp
+        # exit MTM, Peak %, Trough %, and per-trade Ret/credit, Ret/margin.
+        "exit_mtm_usd", "credit_usd", "margin_used_usd_at_entry",
+        "pct_max_mtm_on_credit", "pct_min_mtm_on_credit",
+        "pct_return_on_credit", "pct_return_on_margin",
     ]
     cols = [c for c in want_cols if c in df.columns]
     trades_df = df[cols].copy()
@@ -369,6 +374,9 @@ def stage1_all_trades(body: Stage1Request) -> dict:
         "min_mtm_usd", "max_mtm_usd", "net_pnl_estimate_usd",
         "is_premium_sl_hit", "rel_time_min_mtm", "rel_time_max_mtm",
         "exit_reason",
+        "exit_mtm_usd", "credit_usd", "margin_used_usd_at_entry",
+        "pct_max_mtm_on_credit", "pct_min_mtm_on_credit",
+        "pct_return_on_credit", "pct_return_on_margin",
     ]
 
     for band, cfg in body.per_band_rules.items():

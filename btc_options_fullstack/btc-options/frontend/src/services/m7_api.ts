@@ -1901,6 +1901,15 @@ export interface Stage1TradeRow {
   rel_time_min_mtm: number | null;
   rel_time_max_mtm: number | null;
   exit_reason: string | null;
+  // Extended per-trade context (used by F14 to compute hyp exit MTM, Peak%, Trough%,
+  // per-trade Ret/margin, Ret/credit). All optional — older backend versions may omit.
+  exit_mtm_usd?: number | null;
+  credit_usd?: number | null;
+  margin_used_usd_at_entry?: number | null;
+  pct_max_mtm_on_credit?: number | null;
+  pct_min_mtm_on_credit?: number | null;
+  pct_return_on_credit?: number | null;
+  pct_return_on_margin?: number | null;
 }
 
 export interface Stage1BandTradesResponse {
