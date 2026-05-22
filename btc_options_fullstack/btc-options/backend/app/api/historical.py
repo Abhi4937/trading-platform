@@ -20,7 +20,10 @@ _conn = duckdb.connect(database=':memory:', read_only=False)
 def get_conn():
     return _conn
 
+import json
 import os
+import tempfile
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,15 +32,66 @@ from concurrent.futures import ThreadPoolExecutor
 _strike_index: dict[str, list[int]] = {}
 _strike_index_built = False
 
+_STRIKE_INDEX_BASE_DIR = "/home/abhis/btc-data/data/options"
+_STRIKE_INDEX_CACHE_PATH = "/home/abhis/btc-data/derived/.strike_index.json"
+
+
+def _count_expiry_dirs() -> int:
+    try:
+        return sum(
+            1 for d in Path(_STRIKE_INDEX_BASE_DIR).iterdir()
+            if d.is_dir() and "=" in d.name
+        )
+    except Exception:
+        return -1
+
+
+def _load_strike_index_from_cache() -> bool:
+    """Return True and populate _strike_index if cache exists and is fresh."""
+    if not os.path.exists(_STRIKE_INDEX_CACHE_PATH):
+        return False
+    try:
+        with open(_STRIKE_INDEX_CACHE_PATH) as f:
+            payload = json.load(f)
+        meta = payload.get("_meta", {})
+        n_now = _count_expiry_dirs()
+        if n_now < 0 or meta.get("n_expiries") != n_now:
+            return False
+        _strike_index.update({k: v for k, v in payload.items() if k != "_meta"})
+        logger.info("Strike index loaded from disk cache (%d expiries)", len(_strike_index))
+        return True
+    except Exception as e:
+        logger.warning("Strike index cache unreadable (%s) — will rescan", e)
+        return False
+
+
+def _save_strike_index_to_cache() -> None:
+    try:
+        os.makedirs(os.path.dirname(_STRIKE_INDEX_CACHE_PATH), exist_ok=True)
+        payload = dict(_strike_index)
+        payload["_meta"] = {"n_expiries": len(_strike_index), "built_at": time.time()}
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(_STRIKE_INDEX_CACHE_PATH), suffix=".tmp"
+        )
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp_path, _STRIKE_INDEX_CACHE_PATH)
+        logger.info("Strike index saved to disk cache (%d expiries)", len(_strike_index))
+    except Exception as e:
+        logger.warning("Strike index cache write failed: %s", e)
+
+
 def _build_strike_index():
-    """Scan folder names under each expiry to build strike index. No parquet reads."""
+    """Build strike index from folder names. Loads from disk cache when fresh."""
     global _strike_index, _strike_index_built
-    base_dir = "/home/abhis/btc-data/data/options"
-    if not os.path.exists(base_dir):
+    if not os.path.exists(_STRIKE_INDEX_BASE_DIR):
+        _strike_index_built = True
+        return
+    if _load_strike_index_from_cache():
         _strike_index_built = True
         return
     try:
-        for expiry_dir in Path(base_dir).iterdir():
+        for expiry_dir in Path(_STRIKE_INDEX_BASE_DIR).iterdir():
             if not expiry_dir.is_dir() or '=' not in expiry_dir.name:
                 continue
             expiry = expiry_dir.name.split('=')[1]
@@ -49,9 +103,10 @@ def _build_strike_index():
                     except ValueError:
                         pass
             _strike_index[expiry] = sorted(strikes)
-        logger.info(f"Strike index built: {len(_strike_index)} expiries")
+        logger.info("Strike index built: %d expiries", len(_strike_index))
+        _save_strike_index_to_cache()
     except Exception as e:
-        logger.error(f"Error building strike index: {e}")
+        logger.error("Error building strike index: %s", e)
     _strike_index_built = True
 
 def get_strikes_for_expiry(expiry: str) -> list[int]:
