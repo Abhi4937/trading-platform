@@ -175,11 +175,18 @@ fuser -k "${FRONTEND_PORT}/tcp" 2>/dev/null && sleep 1 || true
 
 FRONTEND_LOG="/tmp/btc_frontend_${FRONTEND_PORT}.log"
 cd "$REPO_ROOT/frontend"
-VITE_API_URL="http://localhost:${BACKEND_PORT}/api/v1" \
-VITE_API_BASE="http://localhost:${BACKEND_PORT}" \
-VITE_WS_HOST="localhost:${BACKEND_PORT}" \
-nohup npm run dev -- --port "${FRONTEND_PORT}" > "$FRONTEND_LOG" 2>&1 &
-FRONTEND_PID=$!
+# Use 'start' on Windows Git Bash to launch a detached process that survives
+# after this script exits. Fall back to & for non-Windows.
+if command -v cmd.exe >/dev/null 2>&1; then
+    cmd.exe /c "start /b cmd.exe /c \"set VITE_API_URL=http://localhost:${BACKEND_PORT}/api/v1 && set VITE_API_BASE=http://localhost:${BACKEND_PORT} && set VITE_WS_HOST=localhost:${BACKEND_PORT} && npm run dev -- --port ${FRONTEND_PORT} > ${FRONTEND_LOG} 2>&1\""
+    FRONTEND_PID=""
+else
+    VITE_API_URL="http://localhost:${BACKEND_PORT}/api/v1" \
+    VITE_API_BASE="http://localhost:${BACKEND_PORT}" \
+    VITE_WS_HOST="localhost:${BACKEND_PORT}" \
+    npm run dev -- --port "${FRONTEND_PORT}" > "$FRONTEND_LOG" 2>&1 &
+    FRONTEND_PID=$!
+fi
 cd "$REPO_ROOT"
 
 # Wait for Vite to bind the port (up to 30s)
