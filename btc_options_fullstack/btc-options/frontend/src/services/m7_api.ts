@@ -1601,10 +1601,24 @@ export type M7PivotByBand = Record<
   Record<'Seg1' | 'Seg2' | 'Seg3' | 'Seg4' | 'Seg5', M7PivotProfileSegment>
 >;
 
+export interface M7TradeRecord {
+  trade_id: string;
+  band: string;
+  entry_hour_ist: number;
+  friday_date_ist: string;
+  net_pnl_usd: number | null;
+  min_mtm_usd: number | null;
+  max_mtm_usd: number | null;
+  lots: number;
+}
+
 export interface M7PivotProfileResult {
   by_band: M7PivotByBand;
   by_band_winners: M7PivotByBand | null;
   by_band_losers: M7PivotByBand | null;
+  losers_list: M7TradeRecord[] | null;
+  best_winner: M7TradeRecord | null;
+  winner_worst_drawdown: M7TradeRecord | null;
   params: {
     entry_hours: number[];
     n_total_trades: number;

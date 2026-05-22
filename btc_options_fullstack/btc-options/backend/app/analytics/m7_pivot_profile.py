@@ -405,6 +405,7 @@ def aggregate_pivot_profile(
     cells: Optional[list[dict]] = None,
     winner_tids: Optional[set[str]] = None,
     loser_tids: Optional[set[str]] = None,
+    pnl_by_tid: Optional[dict[str, float]] = None,
     progress_cb=None,
 ) -> dict:
     """Walk every trade in `trades_df` (filtered by entry_hours OR cells),
@@ -529,10 +530,13 @@ def aggregate_pivot_profile(
             meta[["trade_id_str", "expiry_bucket", "delta_target"]],
             on="trade_id_str", how="left")
 
-    # Build a {trade_id_str -> (entry_ts_unix, band, scale)} lookup.
+    # Build a {trade_id_str -> meta} lookup. `meta` carries everything later
+    # stages need: entry timestamp (for segment_pivots), the band, MTM scale,
+    # plus context (entry hour, friday, lots) used by the per-trade drill-down
+    # records.
     sel["entry_ts_unix_int"] = pd.to_numeric(
         sel["entry_ts_utc"], errors="coerce").astype("Int64")
-    trade_lookup: dict[str, tuple[int, str, float]] = {}
+    trade_lookup: dict[str, dict] = {}
     for row in sel.itertuples(index=False):
         ts = getattr(row, "entry_ts_unix_int", None)
         tid = getattr(row, "trade_id_str", None)
@@ -553,7 +557,18 @@ def aggregate_pivot_profile(
                     scale = cell_scale_map[key]
             except (TypeError, ValueError, AttributeError):
                 pass
-        trade_lookup[str(tid)] = (int(ts), str(band), float(scale))
+        try:
+            hr_val = int(getattr(row, "entry_hour_ist"))
+        except (TypeError, ValueError, AttributeError):
+            hr_val = -1
+        trade_lookup[str(tid)] = {
+            "entry_ts": int(ts),
+            "band": str(band),
+            "scale": float(scale),
+            "entry_hour_ist": hr_val,
+            "friday_date_ist": getattr(row, "friday_date_ist_str", ""),
+            "lots": int(round(float(scale) * BACKTESTER_BASELINE_LOTS)),
+        }
 
     # Accumulators: 3 parallel maps (all, winners-only, losers-only). Each
     # is {iv_band -> [list_of_5_lists]} — one list per segment index (0..4).
@@ -563,72 +578,139 @@ def aggregate_pivot_profile(
     have_outcome = bool(winner_tids) or bool(loser_tids)
     winner_set = winner_tids or set()
     loser_set = loser_tids or set()
+    pnl_map = pnl_by_tid or {}
 
-    # Walk friday partitions present in the trade selection.
+    # Per-trade records for the drill-down panels (losers list / best winner /
+    # winner with worst min-MTM). Populated regardless of pnl availability —
+    # min/max MTM stand on their own.
+    trade_records: list[dict] = []
+
     partitions = sorted(sel["friday_date_ist_str"].unique())
     total_partitions = len(partitions)
     processed_trades = 0
     total_trades = len(trade_lookup)
 
-    # Determine the on-disk root from the glob — paths_glob looks like
-    # "<root>/m7_paths/friday_date=*/part.parquet".
-    paths_root = paths_glob.rsplit("/friday_date=*/", 1)[0]
+    # ── Resolve storage form (option C: prefer partitioned dir; fall back to
+    # flat parquet with predicate pushdown). ─────────────────────────────────
+    partitioned_root: Optional[str] = None
+    flat_path: Optional[str] = None
+    is_glob_form = "/friday_date=*/" in paths_glob
+    if is_glob_form:
+        partitioned_root = paths_glob.rsplit("/friday_date=*/", 1)[0]
+    else:
+        # `paths_glob` here is actually a flat parquet path (e.g. when
+        # `_paths_glob_for_dataset` chose the consolidated flat file).
+        # Prefer the partitioned sibling directory when it exists — fall
+        # back to single-file read with a `trade_id IN (...)` filter.
+        if paths_glob.endswith("_flat.parquet"):
+            cand = paths_glob[: -len("_flat.parquet")]
+            if os.path.isdir(cand):
+                partitioned_root = cand
+        if partitioned_root is None:
+            flat_path = paths_glob
 
-    for part_idx, friday_str in enumerate(partitions):
-        part_path = os.path.join(
-            paths_root, f"friday_date={friday_str}", "part.parquet")
-        if not os.path.exists(part_path):
-            continue
-        try:
-            pdf = pd.read_parquet(
-                part_path,
-                columns=["trade_id", "ts", "gross_pnl_usd"],
-            )
-        except Exception:
-            continue
-        if pdf.empty:
-            continue
-        pdf["trade_id_str"] = pdf["trade_id"].astype(str)
-        # Iterate the trades in this partition that we care about.
-        tids_here = (set(pdf["trade_id_str"].unique())
-                     & set(trade_lookup.keys()))
-        for tid in tids_here:
-            entry_ts_unix, band, scale = trade_lookup[tid]
-            grp = pdf.loc[pdf["trade_id_str"] == tid,
-                          ["ts", "gross_pnl_usd"]].sort_values("ts")
-            if grp.empty:
+    def _emit(tid: str, ts_arr: np.ndarray, mtm_raw: np.ndarray) -> None:
+        """Process one trade's 1m path: compute pivots + accumulate band
+        buckets + push a per-trade record."""
+        nonlocal processed_trades
+        meta = trade_lookup.get(tid)
+        if meta is None or ts_arr.size == 0:
+            return
+        scale = meta["scale"]
+        mtm = mtm_raw * scale if scale != 1.0 else mtm_raw
+        band = meta["band"]
+        pivots = segment_pivots(ts_arr, mtm, meta["entry_ts"])
+        band_slots = band_pivots.setdefault(band, [list() for _ in range(5)])
+        for i, p in enumerate(pivots):
+            if p is not None:
+                band_slots[i].append(p)
+        if have_outcome:
+            if tid in winner_set:
+                slots_w = band_pivots_winners.setdefault(
+                    band, [list() for _ in range(5)])
+                for i, p in enumerate(pivots):
+                    if p is not None:
+                        slots_w[i].append(p)
+            elif tid in loser_set:
+                slots_l = band_pivots_losers.setdefault(
+                    band, [list() for _ in range(5)])
+                for i, p in enumerate(pivots):
+                    if p is not None:
+                        slots_l[i].append(p)
+        finite = np.isfinite(mtm)
+        min_mtm = float(np.min(mtm[finite])) if finite.any() else None
+        max_mtm = float(np.max(mtm[finite])) if finite.any() else None
+        trade_records.append({
+            "trade_id": tid,
+            "band": band,
+            "entry_hour_ist": meta["entry_hour_ist"],
+            "friday_date_ist": meta["friday_date_ist"],
+            "min_mtm_usd": min_mtm,
+            "max_mtm_usd": max_mtm,
+            "lots": meta["lots"],
+            "net_pnl_usd": pnl_map.get(tid),
+        })
+        processed_trades += 1
+        if progress_cb is not None and processed_trades % 50 == 0:
+            progress_cb(processed_trades, total_trades)
+
+    if partitioned_root is not None:
+        # Walk friday partitions present in the trade selection.
+        for friday_str in partitions:
+            part_path = os.path.join(
+                partitioned_root, f"friday_date={friday_str}", "part.parquet")
+            if not os.path.exists(part_path):
                 continue
-            mtm = grp["gross_pnl_usd"].to_numpy(dtype=np.float64)
-            if scale != 1.0:
-                mtm = mtm * scale
-            pivots = segment_pivots(
-                grp["ts"].to_numpy(dtype=np.int64),
-                mtm,
-                entry_ts_unix,
+            try:
+                pdf = pd.read_parquet(
+                    part_path,
+                    columns=["trade_id", "ts", "gross_pnl_usd"],
+                )
+            except Exception:
+                continue
+            if pdf.empty:
+                continue
+            pdf["trade_id_str"] = pdf["trade_id"].astype(str)
+            tids_here = (set(pdf["trade_id_str"].unique())
+                         & set(trade_lookup.keys()))
+            for tid in tids_here:
+                grp = pdf.loc[pdf["trade_id_str"] == tid,
+                              ["ts", "gross_pnl_usd"]].sort_values("ts")
+                if grp.empty:
+                    continue
+                _emit(tid,
+                      grp["ts"].to_numpy(dtype=np.int64),
+                      grp["gross_pnl_usd"].to_numpy(dtype=np.float64))
+    elif flat_path is not None:
+        # Single-file flat parquet — use pyarrow predicate pushdown on
+        # trade_id so we don't slurp the whole 2-3 GB file into memory.
+        try:
+            import pyarrow.parquet as pq
+            tids_wanted = list(trade_lookup.keys())
+            tbl = pq.read_table(
+                flat_path,
+                columns=["trade_id", "ts", "gross_pnl_usd"],
+                filters=[("trade_id", "in", tids_wanted)],
             )
-            band_slots = band_pivots.setdefault(
-                band, [list() for _ in range(5)])
-            for i, p in enumerate(pivots):
-                if p is not None:
-                    band_slots[i].append(p)
-            # Fork into winner/loser buckets when an outcome map exists.
-            if have_outcome:
-                tid_str = str(tid)
-                if tid_str in winner_set:
-                    slots_w = band_pivots_winners.setdefault(
-                        band, [list() for _ in range(5)])
-                    for i, p in enumerate(pivots):
-                        if p is not None:
-                            slots_w[i].append(p)
-                elif tid_str in loser_set:
-                    slots_l = band_pivots_losers.setdefault(
-                        band, [list() for _ in range(5)])
-                    for i, p in enumerate(pivots):
-                        if p is not None:
-                            slots_l[i].append(p)
-            processed_trades += 1
-            if progress_cb is not None and processed_trades % 50 == 0:
-                progress_cb(processed_trades, total_trades)
+            pdf = tbl.to_pandas()
+        except Exception as exc:  # noqa: BLE001
+            # Last-ditch: full read + Python-side filter. Slow but correct.
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "pivot_profile: pyarrow filter on flat parquet failed (%s); "
+                "falling back to full-load + isin", exc)
+            pdf = pd.read_parquet(
+                flat_path,
+                columns=["trade_id", "ts", "gross_pnl_usd"])
+            pdf = pdf[pdf["trade_id"].astype(str).isin(
+                set(trade_lookup.keys()))]
+        if not pdf.empty:
+            pdf["trade_id_str"] = pdf["trade_id"].astype(str)
+            for tid, grp in pdf.groupby("trade_id_str", sort=False):
+                grp = grp.sort_values("ts")
+                _emit(tid,
+                      grp["ts"].to_numpy(dtype=np.int64),
+                      grp["gross_pnl_usd"].to_numpy(dtype=np.float64))
 
     if progress_cb is not None:
         progress_cb(processed_trades, total_trades)
@@ -643,10 +725,39 @@ def aggregate_pivot_profile(
             out[band] = seg_blob
         return out
 
+    # Drill-down lists (only when classification ran).
+    losers_list: Optional[list[dict]] = None
+    best_winner: Optional[dict] = None
+    winner_worst_drawdown: Optional[dict] = None
+    if have_outcome:
+        losers_records = [r for r in trade_records
+                          if r["trade_id"] in loser_set]
+        # Worst (most negative) loss first. None pnl sinks to the bottom.
+        losers_records.sort(
+            key=lambda r: (r["net_pnl_usd"] is None,
+                           r["net_pnl_usd"]
+                           if r["net_pnl_usd"] is not None else 0.0))
+        losers_list = losers_records
+        winners_with_pnl = [r for r in trade_records
+                             if r["trade_id"] in winner_set
+                             and r["net_pnl_usd"] is not None]
+        if winners_with_pnl:
+            best_winner = max(winners_with_pnl,
+                               key=lambda r: r["net_pnl_usd"])
+        winners_with_min = [r for r in trade_records
+                             if r["trade_id"] in winner_set
+                             and r["min_mtm_usd"] is not None]
+        if winners_with_min:
+            winner_worst_drawdown = min(winners_with_min,
+                                         key=lambda r: r["min_mtm_usd"])
+
     return {
         "by_band": _build(band_pivots),
         "by_band_winners": _build(band_pivots_winners) if have_outcome else None,
         "by_band_losers": _build(band_pivots_losers) if have_outcome else None,
+        "losers_list": losers_list,
+        "best_winner": best_winner,
+        "winner_worst_drawdown": winner_worst_drawdown,
         "params": {
             "entry_hours": sorted(hours_set),
             "cells": cells or [],
