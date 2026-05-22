@@ -2620,21 +2620,36 @@ def _compute_missed_fridays(picks: pd.DataFrame,
     # Index by Friday so we can look up the actual net P&L of THAT pick on each
     # missed Friday — i.e. what the user would have gotten if they had
     # relaxed the band-match constraint and let this pick absorb the Friday.
-    pick_friday_outcome: list[dict] = []
-    for p in pick_records:
+    #
+    # Parallelism: derive_exits for ~10 picks used to run serially (~90s on
+    # cold cache). Each call is I/O-bound (parquet read + DuckDB scan), so
+    # ThreadPoolExecutor(max_workers=4) gives a ~3-4x speedup with no GIL
+    # contention worth worrying about. The underlying _EXIT_CACHE in
+    # m7_results.py is dict-write-safe at the granularity we care about.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _derive_one(p: dict):
         flt = {
             "entry_hour_ist": str(p["entry_hour_ist"]) if p["entry_hour_ist"] is not None else None,
             "expiry_bucket": p["expiry_bucket"],
             "delta_target": f"{p['delta_target']:.4g}",
         }
         try:
-            derived = m7r._derive_exits(flt, p["rule_dict"], dataset=dataset)
+            return m7r._derive_exits(flt, p["rule_dict"], dataset=dataset)
         except Exception as exc:  # noqa: BLE001
             log.warning("missed-Fridays rescue: derive_exits failed for pick %s: %s",
                         p["rule_label"], exc)
-            pick_friday_outcome.append({})
-            continue
-        if derived.empty:
+            return None
+
+    derived_list: list[Optional[pd.DataFrame]] = [None] * len(pick_records)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for i, derived in enumerate(pool.map(_derive_one, pick_records)):
+            derived_list[i] = derived
+
+    pick_friday_outcome: list[dict] = []
+    for i, p in enumerate(pick_records):
+        derived = derived_list[i]
+        if derived is None or derived.empty:
             pick_friday_outcome.append({})
             continue
         # δ tolerance: _apply_filters rejects values that don't coerce-match
@@ -2747,6 +2762,53 @@ _MISSED_FRIDAYS_SEM = threading.BoundedSemaphore(4)
 _MISSED_FRIDAYS_CACHE: dict[tuple, tuple[float, dict]] = {}  # key → (ds_mtime, response)
 _MISSED_FRIDAYS_CACHE_MAX = 32
 _MISSED_FRIDAYS_CACHE_LOCK = threading.Lock()
+
+
+def prewarm_missed_fridays_cache() -> None:
+    """Background pre-warm of the missed-fridays response cache for common
+    filter combos the user routinely picks. Called from main.py lifespan
+    AFTER the backend is ready to accept requests. Fires HTTP self-calls
+    so cache population uses the same code path as user requests.
+
+    Combos (12 total): 3 rankings × 4 entry hours.
+    - rankings: composite_score_v2, avg_net_pnl, sum_net_pnl
+    - entry_hours: 21 (9pm), 22 (10pm), 23 (11pm), 0 (midnight)
+    - other params: defaults (min_hit_pct=50, min_n_trades=5, rule_family=all)
+
+    Sequential (not parallel) so we leave the Semaphore(4) free for actual
+    user requests. Total time: ~5 min after the parallelization fix lands.
+    Lots scale is data-invariant, so no need to vary it here.
+    """
+    import urllib.request, urllib.parse, time
+    rankings = ["composite_score_v2", "avg_net_pnl", "sum_net_pnl"]
+    hours = ["21", "22", "23", "0"]
+    log.info("Startup pre-warm — missed_fridays: %d combos queued", len(rankings) * len(hours))
+    t_total = time.time()
+    n_ok = 0
+    n_err = 0
+    for ranking in rankings:
+        for hour in hours:
+            args = {
+                "ranking": ranking,
+                "entry_hours": hour,
+                "min_hit_pct": 50,
+                "min_n_trades": 5,
+            }
+            url = ("http://localhost:8000/api/v1/m7/iv_band_best_combo/missed_fridays?"
+                   + urllib.parse.urlencode(args))
+            t0 = time.time()
+            try:
+                r = urllib.request.urlopen(url, timeout=600)
+                _ = r.read()
+                n_ok += 1
+                log.info("prewarm OK  ranking=%s hour=%s %.1fs",
+                         ranking, hour, time.time() - t0)
+            except Exception as e:  # noqa: BLE001
+                n_err += 1
+                log.warning("prewarm ERR ranking=%s hour=%s %.1fs: %s",
+                            ranking, hour, time.time() - t0, e)
+    log.info("Startup pre-warm — missed_fridays done: %d OK, %d errors, %.1fs total",
+             n_ok, n_err, time.time() - t_total)
 
 
 def _trades_parquet_mtime(dataset: str) -> float:

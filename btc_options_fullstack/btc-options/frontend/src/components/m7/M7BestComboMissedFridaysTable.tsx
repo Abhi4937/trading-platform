@@ -8,6 +8,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { InfoIcon } from './InfoIcon';
 import { ExcelButton, exportRowsAsXlsx } from './exportXlsx';
+import { usePersistedState } from '../../hooks/usePersistedState';
 import {
   fetchM7BestComboMissedFridays,
   type M7Dataset,
@@ -20,20 +21,39 @@ export function M7BestComboMissedFridaysTable({ args, dataset }: { args: FetchBe
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  // Manual compute mode: this endpoint takes ~25s on cold cache, so by
+  // default we don't auto-fire on filter change. User clicks Compute to
+  // opt in. Mode is persisted across reloads.
+  const [autoMode, setAutoMode] = usePersistedState<boolean>(
+    'm7:best_combo_missed_fridays:auto', false);
+  // Increments when user clicks Compute — used to force a re-fetch even when
+  // args haven't changed (e.g. backend cache was warmed externally).
+  const [computeCounter, setComputeCounter] = useState(0);
+  // Marks whether the user has issued at least one compute click in this
+  // session — controls the placeholder vs. data view.
+  const [hasComputed, setHasComputed] = useState(false);
 
   useEffect(() => {
+    // In manual mode (default), skip the fetch unless the user clicked
+    // Compute. In auto mode, fetch on every filter change with debounce.
+    if (!autoMode && computeCounter === 0) return;
+
     let active = true;
     const ac = new AbortController();
     setLoading(true);
     setErr(null);
+    // Debounce: missed_fridays is an expensive backend endpoint (~25s on
+    // cold cache, even after parallelization). Rapid filter changes used
+    // to fire one request per change and pile them up in the backend
+    // semaphore queue. Wait 300ms after the last change before firing.
+    const DEBOUNCE_MS = 300;
     const tick = () => {
       if (!active) return;
       fetchM7BestComboMissedFridays(args, ac.signal, dataset)
-        .then(r => { if (active) setResp(r); })
+        .then(r => { if (active) { setResp(r); setHasComputed(true); } })
         .catch(e => {
           if (!active || e?.name === 'AbortError') return;
           const msg = String(e ?? '');
-          // Same restart-race retry as the parent table.
           if (/\b500\b|NetworkError|Failed to fetch|ECONNRESET|fetch failed/i.test(msg)) {
             window.setTimeout(() => { if (active) tick(); }, 2000);
           } else {
@@ -42,9 +62,13 @@ export function M7BestComboMissedFridaysTable({ args, dataset }: { args: FetchBe
         })
         .finally(() => { if (active) setLoading(false); });
     };
-    tick();
-    return () => { active = false; ac.abort(); };
-  }, [JSON.stringify(args), dataset]);
+    const debounceTimer = window.setTimeout(tick, DEBOUNCE_MS);
+    return () => {
+      active = false;
+      window.clearTimeout(debounceTimer);
+      ac.abort();
+    };
+  }, [JSON.stringify(args), dataset, autoMode, computeCounter]);
 
   const rows = resp?.rows ?? [];
   const picks = resp?.picks ?? [];
@@ -91,8 +115,32 @@ export function M7BestComboMissedFridaysTable({ args, dataset }: { args: FetchBe
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Manual compute controls: this endpoint takes ~25s on cold cache, so
+              default to manual mode. Compute button fires the fetch once; Auto
+              toggle enables auto-fetch on every filter change (with 300ms debounce). */}
+          <span onClick={e => e.stopPropagation()}>
+            <button
+              onClick={() => setComputeCounter(c => c + 1)}
+              disabled={loading}
+              style={{
+                background: loading ? '#1a2d42' : '#1f6feb',
+                color: loading ? '#7a9bb5' : '#fff',
+                border: 'none', borderRadius: 3, padding: '3px 10px',
+                fontSize: 11, cursor: loading ? 'default' : 'pointer',
+              }}
+              title="Run missed_fridays now with current filters">
+              {loading ? 'Computing…' : hasComputed ? 'Recompute' : 'Compute'}
+            </button>
+          </span>
+          <span onClick={e => e.stopPropagation()} style={{ fontSize: 10, color: '#7a9bb5', display: 'flex', alignItems: 'center', gap: 4 }}
+                title="When on: auto-fetch on every filter change (with 300ms debounce). When off: only the Compute button fires the request.">
+            <input type="checkbox" checked={autoMode} onChange={e => setAutoMode(e.target.checked)} />
+            auto
+          </span>
           <div style={{ fontSize: 11, color: '#7a9bb5' }}>
-            {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span> : `${rows.length} rows`}
+            {loading ? 'Loading…' : err ? <span style={{ color: '#f85149' }}>{err}</span>
+              : !hasComputed ? <span style={{ color: '#7a9bb5' }}>click Compute</span>
+              : `${rows.length} rows`}
           </div>
           <span onClick={e => e.stopPropagation()}>
             <ExcelButton
@@ -113,7 +161,14 @@ export function M7BestComboMissedFridaysTable({ args, dataset }: { args: FetchBe
       </div>
       {!collapsed && !err && (
         <div style={{ overflowX: 'auto' }}>
-          {rows.length === 0 && !loading && (
+          {!hasComputed && !loading && (
+            <div style={{ color: '#7a9bb5', fontSize: 12, padding: '10px 0' }}>
+              Click <strong style={{ color: '#1f6feb' }}>Compute</strong> to run missed-Fridays for the current filter combo
+              (~5-25s cold cache, instant if previously cached).
+              {' '}Or enable <strong>auto</strong> to fetch on every filter change.
+            </div>
+          )}
+          {hasComputed && rows.length === 0 && !loading && (
             <div style={{ color: '#7a9bb5', fontSize: 12, padding: '10px 0' }}>
               {resp?.status === 'no_picks'
                 ? 'No picks under current filters — nothing to compute missed Fridays against.'

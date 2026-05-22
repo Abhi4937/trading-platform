@@ -78,6 +78,14 @@ async def lifespan(app: FastAPI):
     # That process has its own GIL and doesn't compete with FastAPI.
     if m7_best_combo.try_load_grid_only():
         logger.info("Startup — M7 best-combo grid loaded from disk cache")
+        # Pre-warm the missed_fridays response cache for 12 common filter
+        # combos (3 rankings × 4 entry hours). Sequential HTTP self-calls
+        # in a background thread; takes ~5 min after the parallelization
+        # fix lands. Doesn't block startup. Errors are logged but ignored.
+        # Skip when DISABLE_PREWARM is set (useful in dev/testing).
+        if not os.environ.get("DISABLE_PREWARM"):
+            asyncio.get_event_loop().run_in_executor(
+                None, m7_best_combo.prewarm_missed_fridays_cache)
     else:
         logger.info("Startup — M7 best-combo grid NOT cached; "
                     "run scripts/build_m7_best_combo_grid.py to build")
