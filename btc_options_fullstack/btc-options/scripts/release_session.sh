@@ -60,10 +60,14 @@ docker compose \
     down 2>&1 | grep -v "^time=" || \
 docker stop "$CONTAINER" 2>/dev/null || true
 
-# Kill frontend port if occupied
+# Kill frontend — try stored PID first, fall back to port-based kill
+FRONTEND_PID=$(grep -o '"frontend_pid": *[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*$' || echo "")
+if [ -n "$FRONTEND_PID" ] && kill -0 "$FRONTEND_PID" 2>/dev/null; then
+    kill "$FRONTEND_PID" 2>/dev/null && echo "  Killed frontend PID $FRONTEND_PID"
+fi
 if command -v fuser >/dev/null 2>&1; then
     fuser -k "${FRONTEND_PORT}/tcp" 2>/dev/null && \
-        echo "  Killed frontend on port $FRONTEND_PORT" || true
+        echo "  Killed any remaining process on port $FRONTEND_PORT" || true
 fi
 
 # Remove lock file

@@ -166,7 +166,47 @@ if [ "$READY" = "0" ]; then
     echo "WARNING: backend did not respond in 120s — check: docker logs $CONTAINER"
 fi
 
-# ─── Print instructions ────────────────────────────────────────────────────────
+# ─── Start frontend ───────────────────────────────────────────────────────────
+echo ""
+echo "=== Starting frontend on :$FRONTEND_PORT ==="
+
+# Kill any process already on this port
+fuser -k "${FRONTEND_PORT}/tcp" 2>/dev/null && sleep 1 || true
+
+FRONTEND_LOG="/tmp/btc_frontend_${FRONTEND_PORT}.log"
+cd "$REPO_ROOT/frontend"
+VITE_API_URL="http://localhost:${BACKEND_PORT}/api/v1" \
+VITE_API_BASE="http://localhost:${BACKEND_PORT}" \
+VITE_WS_HOST="localhost:${BACKEND_PORT}" \
+nohup npm run dev -- --port "${FRONTEND_PORT}" > "$FRONTEND_LOG" 2>&1 &
+FRONTEND_PID=$!
+cd "$REPO_ROOT"
+
+# Wait for Vite to bind the port (up to 30s)
+VITE_READY=0
+for i in $(seq 1 15); do
+    sleep 2
+    if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${FRONTEND_PORT}" 2>/dev/null | grep -qE "^(200|304)"; then
+        VITE_READY=1
+        break
+    fi
+done
+
+# Update lock file with frontend PID
+cat > "$LOCK_DIR/${BACKEND_PORT}.lock" <<EOF
+{
+  "slot": $SLOT,
+  "backend_port": $BACKEND_PORT,
+  "frontend_port": $FRONTEND_PORT,
+  "container": "$CONTAINER",
+  "pid": $$,
+  "frontend_pid": $FRONTEND_PID,
+  "claimed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "primary": false
+}
+EOF
+
+# ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 printf "║  Slot %-2s ready                                              ║\n" "$SLOT"
@@ -174,16 +214,15 @@ printf "║  Backend  : http://localhost:%-5s                           ║\n" "
 printf "║  Frontend : http://localhost:%-5s                           ║\n" "$FRONTEND_PORT"
 printf "║  Primary  : %-49s║\n" "$IS_PRIMARY"
 printf "║  Container: %-49s║\n" "$CONTAINER"
+if [ "$VITE_READY" = "1" ]; then
+echo "║  Vite     : ready ✓                                          ║"
+else
+echo "║  Vite     : still starting — check $FRONTEND_LOG  ║"
+fi
 echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  Start frontend (in a new terminal):                         ║"
-echo "║                                                              ║"
-printf "║  cd frontend                                                 ║\n"
-printf "║  VITE_API_URL=http://localhost:%s/api/v1 \\\\                ║\n" "$BACKEND_PORT"
-printf "║  VITE_API_BASE=http://localhost:%s \\\\                      ║\n" "$BACKEND_PORT"
-printf "║  VITE_WS_HOST=localhost:%s \\\\                              ║\n" "$BACKEND_PORT"
-printf "║  npm run dev -- --port %s                                   ║\n" "$FRONTEND_PORT"
-echo "║                                                              ║"
+echo "║  Open: http://localhost:${FRONTEND_PORT}                              ║"
 echo "║  On session end: ./scripts/release_session.sh $SLOT            ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Logs: docker logs -f $CONTAINER"
+echo "Backend logs : docker logs -f $CONTAINER"
+echo "Frontend logs: tail -f $FRONTEND_LOG"
