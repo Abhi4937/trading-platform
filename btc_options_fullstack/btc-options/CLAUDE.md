@@ -140,6 +140,11 @@ npm run dev -- --port 3001
 - **Code changes**: edit Python files on disk → they appear immediately in
   all running containers (bind-mount). Restart your container to pick them up:
   `docker restart docker-backend-session-N-1`. No rebuild needed.
+- **Branch isolation**: `claim_session.sh` auto-creates `session/slotN-YYYYMMDD`
+  from the current HEAD when you're on a base branch (`main` /
+  `mainbranch-gemini_claude`). If you're already on a feature branch it stays
+  there. One session = one container + one branch. When done, push the branch
+  and PR into `mainbranch-gemini_claude`.
 
 ### What NOT to do from a non-slot-0 session
 

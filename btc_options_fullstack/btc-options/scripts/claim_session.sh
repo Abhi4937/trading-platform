@@ -133,9 +133,34 @@ EOF
 
 _release_mutex
 
+# ─── Branch isolation ─────────────────────────────────────────────────────────
+# If on a base/trunk branch, auto-create a session branch so each session's
+# code changes stay isolated until intentionally merged.
+BASE_BRANCHES="main mainbranch-gemini_claude"
+CURRENT_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+SESSION_BRANCH=""
+
+_is_base_branch() {
+    for b in $BASE_BRANCHES; do [ "$CURRENT_BRANCH" = "$b" ] && return 0; done
+    return 1
+}
+
+if _is_base_branch; then
+    SESSION_BRANCH="session/slot${SLOT}-$(date +%Y%m%d)"
+    git -C "$REPO_ROOT" checkout -b "$SESSION_BRANCH" 2>/dev/null || {
+        # Branch already exists — reuse it (same slot, same day)
+        git -C "$REPO_ROOT" checkout "$SESSION_BRANCH"
+    }
+    echo "Created branch: $SESSION_BRANCH"
+else
+    SESSION_BRANCH="$CURRENT_BRANCH"
+    echo "Staying on existing branch: $SESSION_BRANCH"
+fi
+
 # ─── Start backend container ──────────────────────────────────────────────────
 echo ""
 echo "=== Claiming slot $SLOT — backend :$BACKEND_PORT — frontend :$FRONTEND_PORT ==="
+echo "    branch : $SESSION_BRANCH"
 echo "    primary: $IS_PRIMARY"
 echo ""
 
@@ -199,13 +224,14 @@ for i in $(seq 1 15); do
     fi
 done
 
-# Update lock file with frontend PID
+# Update lock file with frontend PID and branch
 cat > "$LOCK_DIR/${BACKEND_PORT}.lock" <<EOF
 {
   "slot": $SLOT,
   "backend_port": $BACKEND_PORT,
   "frontend_port": $FRONTEND_PORT,
   "container": "$CONTAINER",
+  "branch": "$SESSION_BRANCH",
   "pid": $$,
   "frontend_pid": $FRONTEND_PID,
   "claimed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -217,18 +243,18 @@ EOF
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 printf "║  Slot %-2s ready                                              ║\n" "$SLOT"
+printf "║  Branch   : %-49s║\n" "$SESSION_BRANCH"
 printf "║  Backend  : http://localhost:%-5s                           ║\n" "$BACKEND_PORT"
 printf "║  Frontend : http://localhost:%-5s                           ║\n" "$FRONTEND_PORT"
-printf "║  Primary  : %-49s║\n" "$IS_PRIMARY"
 printf "║  Container: %-49s║\n" "$CONTAINER"
 if [ "$VITE_READY" = "1" ]; then
 echo "║  Vite     : ready ✓                                          ║"
 else
-echo "║  Vite     : still starting — check $FRONTEND_LOG  ║"
+echo "║  Vite     : still starting (check $FRONTEND_LOG)║"
 fi
 echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  Open: http://localhost:${FRONTEND_PORT}                              ║"
-echo "║  On session end: ./scripts/release_session.sh $SLOT            ║"
+echo "║  Open   : http://localhost:${FRONTEND_PORT}                             ║"
+echo "║  Release: ./scripts/release_session.sh $SLOT                   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Backend logs : docker logs -f $CONTAINER"

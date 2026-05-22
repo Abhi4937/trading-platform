@@ -71,7 +71,15 @@ if command -v fuser >/dev/null 2>&1; then
 fi
 
 # Remove lock file
+BRANCH=$(grep -o '"branch": *"[^"]*"' "$LOCK" 2>/dev/null | grep -o '"[^"]*"$' | tr -d '"' || echo "")
 rm -f "$LOCK"
 echo "  Lock file removed."
+echo ""
+if [ -n "$BRANCH" ] && [[ "$BRANCH" == session/* ]]; then
+    echo "  Session branch: $BRANCH"
+    echo "  Don't forget to merge or PR before switching branches:"
+    echo "    git push origin $BRANCH"
+    echo "    # then create PR into mainbranch-gemini_claude"
+fi
 echo ""
 echo "Slot $SLOT is free. Run claim_session.sh to claim a new slot."
