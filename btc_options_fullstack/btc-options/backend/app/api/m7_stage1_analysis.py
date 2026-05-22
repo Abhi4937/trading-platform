@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from app.api.m7_results import (
     M7_BASE_DIR, _TRADES_BY_DATASET, _load_trades, _rule_cache_path,
+    _derive_exits,
 )
 from app.scripts.stage1_partial_exit_per_band_2d import run_stage1_sweep
 
@@ -171,6 +172,15 @@ class Stage1Request(BaseModel):
     dataset: str = Field("delta_match", description="delta_match | price_match")
 
 
+class Stage1BandTradesRequest(BaseModel):
+    band: str = Field(..., description="IV band label e.g. '30-40'")
+    rule_dict: dict = Field(..., description="Exit rule dict (nulls stripped)")
+    expiry_bucket: Optional[str] = Field(None)
+    delta_target: Optional[float] = Field(None)
+    entry_hour_ist: Optional[int] = Field(None)
+    dataset: str = Field("delta_match")
+
+
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/stage1_analysis")
@@ -251,3 +261,161 @@ def stage1_analysis_precheck(body: Stage1Request) -> dict:
         "n_cold":             n_cold,
         "estimated_compute_seconds": estimated_seconds,
     }
+
+
+@router.post("/stage1_analysis/band_trades")
+def stage1_band_trades(body: Stage1BandTradesRequest) -> dict:
+    """Return all per-trade rows for one band's baseline rule.
+
+    Trigger reference levels (SL_avg, L_avg, W_avg) are computed from
+    whatever trades exist — no minimum n threshold. Even 1 trade is enough.
+
+    The client applies case classification and hypothetical P&L arithmetic
+    so it can react instantly to trigger/exit_frac changes without re-fetching.
+
+    Returns:
+      trades: list of per-trade dicts
+      trigger_levels: {sl_avg, l_avg, w_avg}  (null when subgroup is empty)
+      n_total, n_sl_hit, n_losers, n_winners
+    """
+    filters: dict = {"entry_atm_iv_band": body.band}
+    if body.expiry_bucket is not None:
+        filters["expiry_bucket"] = body.expiry_bucket
+    if body.delta_target is not None:
+        filters["delta_target"] = body.delta_target
+    if body.entry_hour_ist is not None:
+        filters["entry_hour_ist"] = body.entry_hour_ist
+
+    rule_dict = {k: v for k, v in body.rule_dict.items() if v is not None}
+
+    try:
+        df = _derive_exits(filters, rule_dict, dataset=body.dataset)
+    except Exception as exc:
+        log.exception("stage1_band_trades _derive_exits failed: %s", exc)
+        return {"error": str(exc), "trades": [], "trigger_levels": {}, "n_total": 0}
+
+    if df.empty:
+        return {
+            "trades": [],
+            "trigger_levels": {"sl_avg": None, "l_avg": None, "w_avg": None},
+            "n_total": 0, "n_sl_hit": 0, "n_losers": 0, "n_winners": 0,
+        }
+
+    # Compute trigger reference levels from whatever data exists (no threshold).
+    sl_mask  = df["is_premium_sl_hit"].astype(bool)
+    loss_mask = df["net_pnl_estimate_usd"] < 0
+    win_mask  = df["net_pnl_estimate_usd"] >= 0
+
+    def _safe_mean(mask: "pd.Series") -> Optional[float]:
+        sub = df.loc[mask, "min_mtm_usd"]
+        if sub.empty:
+            return None
+        v = float(sub.mean())
+        return None if (math.isnan(v) or math.isinf(v)) else v
+
+    sl_avg = _safe_mean(sl_mask)
+    l_avg  = _safe_mean(loss_mask)
+    w_avg  = _safe_mean(win_mask)
+
+    # Select columns to return per trade
+    want_cols = [
+        "trade_id", "friday_date_ist", "entry_ts_utc",
+        "expiry_bucket", "delta_target", "entry_hour_ist",
+        "min_mtm_usd", "max_mtm_usd", "net_pnl_estimate_usd",
+        "is_premium_sl_hit", "rel_time_min_mtm", "rel_time_max_mtm",
+        "exit_reason",
+    ]
+    cols = [c for c in want_cols if c in df.columns]
+    trades_df = df[cols].copy()
+
+    # Cast trade_id to str for JS precision safety
+    if "trade_id" in trades_df.columns:
+        trades_df["trade_id"] = trades_df["trade_id"].astype(str)
+
+    return {
+        "trades": _df_to_records(trades_df),
+        "trigger_levels": {
+            "sl_avg": sl_avg,
+            "l_avg":  l_avg,
+            "w_avg":  w_avg,
+        },
+        "n_total":   len(df),
+        "n_sl_hit":  int(sl_mask.sum()),
+        "n_losers":  int(loss_mask.sum()),
+        "n_winners": int(win_mask.sum()),
+    }
+
+
+@router.post("/stage1_analysis/all_trades")
+def stage1_all_trades(body: Stage1Request) -> dict:
+    """All trades across every band in per_band_rules, each tagged with its
+    band's trigger reference levels (SL_avg / L_avg / W_avg, no min-n threshold).
+
+    The client applies per-trade classification so it can react to trigger /
+    exit_frac changes without re-fetching. Each trade's band_*_avg fields carry
+    that band's dollar value so that 'l_avg' applies each band's own L_avg to
+    its own trades — not a global cross-band level.
+
+    Future work: per-cell pivot graph showing trough distribution of winners vs
+    losers with trigger line marked — needs per-bar path data (similar to pivot
+    profile 5-segment charts), deferred to a future session.
+    """
+    all_rows: list[dict] = []
+    n_by_band: dict[str, int] = {}
+
+    want_cols = [
+        "trade_id", "friday_date_ist", "entry_ts_utc",
+        "expiry_bucket", "delta_target", "entry_hour_ist",
+        "min_mtm_usd", "max_mtm_usd", "net_pnl_estimate_usd",
+        "is_premium_sl_hit", "rel_time_min_mtm", "rel_time_max_mtm",
+        "exit_reason",
+    ]
+
+    for band, cfg in body.per_band_rules.items():
+        rule_dict = {k: v for k, v in cfg.get("rule_dict", {}).items() if v is not None}
+        rule_label = cfg.get("rule_label", "")
+
+        filters: dict = {"entry_atm_iv_band": band}
+        if cfg.get("expiry_bucket"):
+            filters["expiry_bucket"] = cfg["expiry_bucket"]
+        if cfg.get("delta_target") is not None:
+            filters["delta_target"] = cfg["delta_target"]
+        if cfg.get("entry_hour_ist") is not None:
+            filters["entry_hour_ist"] = cfg["entry_hour_ist"]
+
+        try:
+            df = _derive_exits(filters, rule_dict, dataset=body.dataset)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("stage1_all_trades band=%s: %s", band, exc)
+            n_by_band[band] = 0
+            continue
+
+        if df.empty:
+            n_by_band[band] = 0
+            continue
+
+        sl_m   = df["is_premium_sl_hit"].astype(bool)
+        loss_m = df["net_pnl_estimate_usd"] < 0
+        win_m  = df["net_pnl_estimate_usd"] >= 0
+
+        def _bm(mask: "pd.Series") -> Optional[float]:
+            sub = df.loc[mask, "min_mtm_usd"]
+            if sub.empty:
+                return None
+            v = float(sub.mean())
+            return None if (math.isnan(v) or math.isinf(v)) else v
+
+        cols = [c for c in want_cols if c in df.columns]
+        sub = df[cols].copy()
+        if "trade_id" in sub.columns:
+            sub["trade_id"] = sub["trade_id"].astype(str)
+        sub["band"]        = band
+        sub["rule_label"]  = rule_label
+        sub["band_sl_avg"] = _bm(sl_m)
+        sub["band_l_avg"]  = _bm(loss_m)
+        sub["band_w_avg"]  = _bm(win_m)
+
+        all_rows.extend(_df_to_records(sub))
+        n_by_band[band] = len(df)
+
+    return {"trades": all_rows, "n_total": len(all_rows), "n_by_band": n_by_band}

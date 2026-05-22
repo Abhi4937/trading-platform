@@ -2,6 +2,15 @@
 
 ## Active Projects
 
+- **Stage-1 Partial Exit Dashboard (Phase 9, Sessions 41/40/39, COMMITTED `6b6539f` + `8976ecd`):**
+  Full dashboard integration complete. POST `/api/v1/m7/stage1_analysis` with SHA1-keyed L1+L2 cache,
+  `M7Stage1Panel.tsx` with 4×5 heatmap + band cards + verdict chips. Under tight per-band filters
+  all 10 bands show `SKIP_INSUFFICIENT` (n<30) — expected; user needs broader filter state for
+  actionable results. Key bug fixed: `_EXIT_COMPUTE_LOCK` was blocking stage1 sweep — L2 reads
+  moved outside lock (`cdf1c95`), sweep now completes in ~2s.
+  **Pending**: per-trade modal (`Stage1BandTradesModal`) — new feature request from Session 41.
+  Plan file: `~/.claude/plans/stage-1-partial-exit-sharded-corbato.md`.
+
 - **Pivot Profile speedup + per-band drill-downs (Session 40, 2026-05-22, UNCOMMITTED):**
   - `_compute_all_exits` cold-rule cost (~24 min for non-grid rules) was the
     Pivot Profile bottleneck. Fixed via inline rule simulator in

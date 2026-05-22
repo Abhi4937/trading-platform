@@ -1881,3 +1881,73 @@ export function fetchM7Stage1Precheck(
     signal,
   );
 }
+
+// ─── Per-trade drill-down ─────────────────────────────────────────────────────
+
+export interface Stage1TradeRow {
+  trade_id: string;
+  friday_date_ist: string | null;
+  entry_ts_utc: number | null;
+  expiry_bucket: string | null;
+  delta_target: number | null;
+  entry_hour_ist: number | null;
+  min_mtm_usd: number | null;
+  max_mtm_usd: number | null;
+  net_pnl_estimate_usd: number | null;
+  is_premium_sl_hit: boolean | null;
+  rel_time_min_mtm: number | null;
+  rel_time_max_mtm: number | null;
+  exit_reason: string | null;
+}
+
+export interface Stage1BandTradesResponse {
+  trades: Stage1TradeRow[];
+  trigger_levels: { sl_avg: number | null; l_avg: number | null; w_avg: number | null };
+  n_total: number;
+  n_sl_hit: number;
+  n_losers: number;
+  n_winners: number;
+  error?: string;
+}
+
+// ─── Cross-band trade view ────────────────────────────────────────────────────
+
+export interface Stage1AllTradeRow extends Stage1TradeRow {
+  band: string;
+  rule_label: string;
+  band_sl_avg: number | null;
+  band_l_avg: number | null;
+  band_w_avg: number | null;
+}
+
+export interface Stage1AllTradesResponse {
+  trades: Stage1AllTradeRow[];
+  n_total: number;
+  n_by_band: Record<string, number>;
+}
+
+export function fetchM7Stage1AllTrades(
+  perBandRules: Record<string, Stage1PerBandRule>,
+  dataset: M7Dataset,
+  signal?: AbortSignal,
+): Promise<Stage1AllTradesResponse> {
+  return postJsonFetch<Stage1AllTradesResponse>(
+    `${BASE}/stage1_analysis/all_trades`,
+    { per_band_rules: perBandRules, dataset },
+    signal,
+  );
+}
+
+export function fetchM7Stage1BandTrades(
+  band: string,
+  ruleDict: Record<string, unknown>,
+  filters: { expiry_bucket?: string; delta_target?: number; entry_hour_ist?: number },
+  dataset: M7Dataset,
+  signal?: AbortSignal,
+): Promise<Stage1BandTradesResponse> {
+  return postJsonFetch<Stage1BandTradesResponse>(
+    `${BASE}/stage1_analysis/band_trades`,
+    { band, rule_dict: ruleDict, ...filters, dataset },
+    signal,
+  );
+}
