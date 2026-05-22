@@ -39,8 +39,7 @@ if another session is mid-flight. Specifically:
    **wait for it to finish** rather than racing it. Killing port 3000 while
    the other session is starting Vite will leave the user with a broken
    frontend.
-2. **Before editing files Gemini may also be editing**, re-read `git status`
-   and `HANDOFF.md` — both AI assistants share this repo.
+2. **Before editing shared files**, re-read `git status` and `HANDOFF.md`.
 3. **If unsure, ask the user**: "I see another session is currently
    restarting the frontend / accessing the UI — should I wait, or proceed?"
 
@@ -151,14 +150,13 @@ curl http://localhost:8001/api/v1/session-id
 ## Session Start Checklist (do this first, every session)
 1. Read `HANDOFF.md` — who worked last, what changed, what's pending
 2. Read `docs/memories/current_state.md` — active tasks and open issues
-3. Read `docs/memories/work_log_gemini.md` — what Gemini did (avoid conflicts)
-4. Then ask the user what they want to work on
+3. Then ask the user what they want to work on
 
 ## Handoff Protocol (do this at end of every session)
 1. Update `HANDOFF.md` — fill in: who worked, what files changed, what's pending
 2. Update `docs/memories/work_log_claude.md` — append what was done
 3. Update `docs/memories/current_state.md` — if anything changed
-4. Tell the user: "Ready to hand off to Gemini — HANDOFF.md is updated"
+4. Tell the user: "Handoff files updated"
 
 ## Auto-handoff at 90% / 95% / 98% session-context usage (added 2026-05-07)
 The status line in this repo shows live session token usage (script:
@@ -185,12 +183,6 @@ whole point is to capture state before context runs out. Each checkpoint
 should be incremental: append new items to `work_log_claude.md`; rewrite
 the "current task" block in `HANDOFF.md`; only mutate `current_state.md`
 if something there changed. Don't churn the files.
-
-## AI Collaboration with Gemini
-- Claude and Gemini take turns on this codebase
-- Gemini reads the same `HANDOFF.md` and `docs/memories/` files
-- Never overwrite a file Gemini touched without reading it first
-- Check `git status` before starting work to see Gemini's uncommitted changes
 
 ## Endpoints
 - Delta REST: `https://api.india.delta.exchange`

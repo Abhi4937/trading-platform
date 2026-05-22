@@ -710,8 +710,7 @@ Implementation in `frontend/src/components/historical/StrategyPanel.tsx`
 (`downloadExcel` + `downloadCompareExcel`). Reuses existing exit/peak state.
 
 ## Handoff Log
-- `2026-03-13`: Claude provided handoff and handoff protocol suggestion.
-- `2026-03-13`: Gemini initialized the memory directory and state files.
+- `2026-03-13`: Claude provided handoff and handoff protocol suggestion. Memory directory and state files initialized.
 - `2026-04-30`: Claude built slippage v2 + Exit & Peak Marks sheet; updated HANDOFF.md.
 - `2026-04-30` (later): Claude built multi-day backtester end-to-end + persistence layer +
   session-ID reset mechanism. Removed moneyness multiplier from `costs.py` to align with

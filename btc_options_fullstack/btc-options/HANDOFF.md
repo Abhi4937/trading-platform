@@ -2,6 +2,81 @@
 
 ## Last Session
 **Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-21 (Session 38 — Playwright UI testing complete)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 38 — UI Testing (no code changes, no commits)
+
+**Goal**: Playwright UI testing to verify Session 36's `rule_label` fix and 110-rule grid.
+
+**Result**: All critical checklist items PASSED. No new code changes needed.
+
+### Session 38 — Test results
+
+| Check | Result |
+|---|---|
+| Playwright MCP loaded | ✅ |
+| Backend up, frontend 200 | ✅ |
+| M7 Sweep loads (13,703 trades, 10 bands) | ✅ |
+| Δ-match toggle selected by default | ✅ |
+| Rule Comparison modal: 110 rows | ✅ |
+| Rule Comparison: 0 blank rule_label (Session 36 fix) | ✅ |
+| Grid breakdown: exit_hr=70, margin_target=35, baseline=5 | ✅ |
+| `losses_distribution?scope=best_combo` → 200, no crash | ✅ |
+| Δ+Price match toggle → loading state (expected) | ✅ |
+| M7 Friday-Band → clean 503 banner (stale grid) | ✅ |
+| M-Month → loads, 477 trades, 28 months | ✅ |
+
+### Session 38 — Known issues (pre-existing, not new bugs)
+
+1. **Cells-mode warming stuck at 0/8** — when the Losses Explorer is in "Mirroring Best Combo"
+   mode on a cold backend restart, the warmup threads queue behind `_EXIT_COMPUTE_LOCK`.
+   Resolves on its own after ~5-10 min when exit caches are loaded from disk parquets.
+   The `scope=best_combo` endpoint works fine; cells-mode is a UX concern only.
+
+2. **`ds_mtime` NameError in coverage warmup** — `app/api/m7_best_combo.py:1734`
+   coverage warmup thread references `ds_mtime` out of scope. Logs
+   `WARNING: coverage warmup failed for key=(...): name 'ds_mtime' is not defined`.
+   Coverage table still loads (endpoint itself is unaffected); only the async
+   pre-warm fails silently.
+
+3. **`missed_fridays` ERR_EMPTY_RESPONSE** — occurred 4× while backend was busy
+   with warmup threads. Transient, not a persistent bug.
+
+### Screenshots taken this session
+- `m38-m7sweep-initial.png` — dashboard at load
+- `m38-rule-comparison-modal.png` — Rule Comparison modal open (30-40 band)
+- `m38-price-match-toggle.png` — Δ+Price match selected
+- `m38-friday-band.png` — Friday-Band 503 banner
+- `m38-m-month-loaded.png` — M-Month dashboard
+
+### Next session priorities
+
+1. **Fix `ds_mtime` NameError in coverage warmup** — find where `ds_mtime` should be
+   scoped in `m7_best_combo.py` coverage warmup function and fix it.
+2. **Investigate cells-mode warming** — if desired, can optimize so warmup completes
+   faster (current disk-cache path should load in ~150ms/rule, but appears to queue
+   behind DuckDB lock on first backend start).
+3. **Capital Mode design** — K-scaled per-trade lot sizing (deferred from Session 35).
+4. **Phase 3 hybrids** — cap_sl × premium_sl combinations.
+
+---
+
+## Previous Session
+**Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-21 (Session 37 — UI testing blocked, handoff written)
+**Branch:** `mainbranch-gemini_claude`
+
+### Session 37 — Nothing shipped
+
+**Goal**: Playwright UI testing to visually verify Session 36's `rule_label` fix and 110-rule grid.
+**Blocked**: Playwright MCP tools were not loaded in this session.
+**No code changes. No commits.**
+
+---
+
+## Previous Session
+**Who:** Claude (Sonnet 4.6)
 **Date:** 2026-05-21 (Session 36 — production bug fix, test suite cleanup, E2E data validation)
 **Branch:** `mainbranch-gemini_claude`
 
@@ -1518,23 +1593,9 @@ rebuild execution model (separate container), 34-test verification protocol.
 /home/abhis/btc-data/derived/m7/m7_paths/                  121 partitions (friday_date=YYYY-MM-DD)
 ```
 
-### Notes for Gemini
-- I left your in-progress `m7_full_coverage` work UNTOUCHED in the working
-  tree (`backend/app/api/m7_full_coverage.py`, `backend/tests/test_m7_full_coverage.py`,
-  `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx`, plus the
-  `main.py` router registration). Specifically I temporarily reverted the
-  `M7IvBandFullCoverageTable` import + mount from `M7SweepDashboard.tsx`
-  during my commit so my Chunk 1 was self-contained, but those references
-  should be re-added when your full_coverage work commits. Not a conflict —
-  just something to put back.
-- The plan's chunks 2–10 are the natural next pieces. Chunk 2 (Baseline +
-  Theta/Vega) is the easiest from here because the enriched parquet already
-  has `theta_per_vega_combined`, `excess_over_fair_pct`,
-  `iv_regime_premium_pct`, `structural_credit_pct`.
-
 ### Pending follow-ups
 - Re-add `M7IvBandFullCoverageTable` import + mount to `M7SweepDashboard.tsx`
-  when Gemini's `m7_full_coverage` work is committed.
+  when `m7_full_coverage` work is committed.
 - Chunks 2–10 of the Trade Copilot plan.
 
 ---

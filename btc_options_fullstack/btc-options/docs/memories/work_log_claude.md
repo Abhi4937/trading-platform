@@ -1,5 +1,33 @@
 # Claude's Work Log
 
+## Session 38 (2026-05-21) — Playwright UI testing complete (no code changes)
+
+All Session 36+37 checklist items verified via Playwright MCP:
+- Rule Comparison modal: exactly 110 rows, 0 blank rule_label — Session 36 `_unflatten_after_load` fix confirmed ✅
+- Grid breakdown: exit_hr=70, margin_target=35, baseline=5 → 110 total ✅
+- `losses_distribution?scope=best_combo` → 200, no KeyError ✅
+- Δ-match toggle default; Δ+Price match shows loading state ✅
+- M7 Friday-Band: clean 503 banner (stale grid) ✅
+- M-Month: loads with 477 trades, 28 months ✅
+
+Pre-existing issues noted (not introduced this session):
+- `ds_mtime` NameError in coverage warmup at `m7_best_combo.py:1734`
+- Cells-mode warming stuck at 0/8 on cold backend (resolves after DuckDB warms)
+
+No code changes. No commits.
+
+---
+
+## Session 37 (2026-05-21) — UI testing blocked (Playwright MCP not loaded)
+
+Nothing shipped. Goal was Playwright UI testing for Session 36's rule_label fix.
+Playwright MCP tools were absent from this session's deferred tool list — likely
+the MCP server didn't start at session init. Wrote handoff with detailed UI
+testing checklist for next session. Next session must confirm Playwright tools
+are loaded before starting.
+
+---
+
 ## Session 32 (2026-05-18) — 243-rule hybrid scaffolding committed (501699b)
 
 ### What and why
@@ -1393,14 +1421,13 @@ from 8.97% (balanced IV skew) to 30.65% (call IV ≥ +5pp) — confirming
 the historical validation gate's premise: when call IV is rich, the call
 leg decays first / fastest.
 
-### Note for Gemini collaboration
-Gemini's in-progress `m7_full_coverage` work (untracked
+### Note
+In-progress `m7_full_coverage` work (untracked
 `backend/app/api/m7_full_coverage.py`, `backend/tests/test_m7_full_coverage.py`,
 `frontend/src/components/m7/M7IvBandFullCoverageTable.tsx`, plus a `main.py`
-router registration) was present at session start. I left those untouched
-and temporarily removed the `M7IvBandFullCoverageTable` import + mount
-from my dashboard commit so Chunk 1 ships self-contained. Re-add when the
-m7_full_coverage work commits.
+router registration) was present at session start. Left untouched; temporarily
+removed the `M7IvBandFullCoverageTable` import + mount from dashboard commit
+so Chunk 1 ships self-contained. Re-add when m7_full_coverage commits.
 
 ### Files committed
 - `0aa0c96` — pre-existing M7 enrichment baseline (14 files, 1,803 ins)
@@ -2139,8 +2166,8 @@ this as acceptable.
 
 ## Session 2 (2026-03-13)
 - **Status:** Bug fix + handoff system setup.
-- **Fixed:** Reverted Gemini's broken mid-refactor of `HistoricalDashboard.tsx` — removed init logic had broken historical simulation
-- **Setup:** Created full AI handoff system (CLAUDE.md checklist, HANDOFF.md, docs/memories/)
+- **Fixed:** Reverted broken mid-refactor of `HistoricalDashboard.tsx` — removed init logic had broken historical simulation
+- **Setup:** Created AI handoff system (CLAUDE.md checklist, HANDOFF.md, docs/memories/)
 - **Committed:** `9e6020e`, `c7bf66d`
 - **Files Touched:** CLAUDE.md, HANDOFF.md, docs/memories/* (all new)
 
