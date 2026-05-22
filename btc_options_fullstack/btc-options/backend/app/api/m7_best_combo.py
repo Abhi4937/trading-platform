@@ -1752,7 +1752,7 @@ def _apply_dimension_filters(
         if keep_sl and "rule_label" in grid.columns:
             prefix_pat = "|".join(f"sl{x}" for x in sorted(keep_sl))
             grid = grid[grid["rule_label"].astype(str).str.contains(
-                rf"^({prefix_pat})_", regex=True, na=False)]
+                rf"^(?:{prefix_pat})_", regex=True, na=False)]
     return grid
 
 

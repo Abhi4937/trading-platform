@@ -1,5 +1,39 @@
 # Handoff Log
 
+## Open follow-up — Playwright UI verification needed for SL-chip group (Session 40)
+
+The `premium-SL whitelist filter` feature (commit `3f3a145`) is **backend-verified
+end-to-end with curl** (5 probes — baseline / SL=50 / SL=150,200 / SL+Family
+composition / unknown-SL graceful fallback — all pass) but the UI was **not
+driven through Playwright MCP** because the Playwright browser was locked by
+another session at the time. Vite HMR pushed the UI edits to the live frontend,
+so they are running — they just weren't snapshot-verified.
+
+**Next session must do this before pushing further changes to this area**:
+
+1. Make sure the Playwright MCP server isn't held by a stale session (try
+   `mcp__playwright__browser_close` first; if "Browser is already in use",
+   check the lockfile under `C:\Users\Abhis\AppData\Local\ms-playwright\mcp-chrome-*`
+   and delete it before restart).
+2. Navigate to `http://localhost:3000` → M7 Sweep dashboard.
+3. Scroll to the **"Best combo per IV band"** table and verify all of:
+   - Header reads `premium SL ∈ {50, 75, 100, 150, 200}` and `110 rule variants × 7 expiries × 8 deltas...`
+     (NOT the stale `{50,75,100}` and `105` strings).
+   - A new `SL %:` label + chip group renders right of the Family buttons:
+     **`All / 50 / 75 / 100 / 150 / 200`**.
+   - Click `50` chip → header collapses to `premium SL ∈ {50}` and `22 rule variants`;
+     table reloads and **all `rule_label` values start with `sl50_`**.
+   - Click `Margin %` family while SL=50 active → header reads `7 rule variants`.
+   - Click `All` chip → returns to 110 variants header and the 4-SL prefix mix
+     (`sl50` / `sl75` / `sl150` / `sl200` — `sl100` happens not to be a per-band
+     winner under default ranking, that's fine).
+4. Take a screenshot named `m7-sl-filter-verified.png` for the changelog.
+
+If anything looks off, the code lives at:
+- `backend/app/api/m7_best_combo.py:_apply_dimension_filters` (filter logic, line ~1742)
+- `frontend/src/components/m7/M7IvBandBestComboTable.tsx` (chip group + header text)
+- `frontend/src/services/m7_api.ts:FetchBestComboArgs` (`premium_sl_pcts` arg + serialisation)
+
 ## Last Session
 **Who:** Claude (Opus 4.7)
 **Date:** 2026-05-22 (Session 40 — Pivot Profile: 24min → 7s + per-band drill-downs)
