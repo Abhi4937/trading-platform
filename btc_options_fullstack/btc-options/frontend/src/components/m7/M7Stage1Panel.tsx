@@ -1403,6 +1403,23 @@ function CellDetail({
         note: 'baseline = full-grid normalised; stage-1 = within-band normalised — not strictly apples-to-apples',
       });
     }
+
+    // 8) Exact n wins / n losses from bandTrades (replaces the rounded derivation above when available)
+    if (hypAggs) {
+      // Overwrite the earlier "n wins / n losses" entry derived from rounded win rate
+      const idx = cmpRows.findIndex(r => r.label === 'n wins / n losses');
+      const dwins = hypAggs.n_winners_hyp - hypAggs.n_winners_base;
+      const exactRow: CmpRow = {
+        label: 'n wins / n losses (exact)',
+        baseline: `${hypAggs.n_winners_base} / ${hypAggs.n_losers_base}`,
+        stage1: `${hypAggs.n_winners_hyp} / ${hypAggs.n_losers_hyp}`,
+        delta: `${dwins >= 0 ? '+' : ''}${dwins} / ${dwins >= 0 ? '−' : '+'}${Math.abs(dwins)}`,
+        deltaColor: dwins > 0 ? '#4ade80' : dwins < 0 ? '#f87171' : '#7a9bb5',
+        arrow: dwins > 0 ? '↑' : dwins < 0 ? '↓' : '−',
+        note: 'exact counts from bandTrades (no rounding)',
+      };
+      if (idx >= 0) cmpRows[idx] = exactRow; else cmpRows.push(exactRow);
+    }
   }
 
   // Tag first cmpRow with "Core P&L" section
@@ -1454,6 +1471,26 @@ function CellDetail({
     n_l_above_avg_max_hyp: number;
     n_w_below_avg_min_base: number;
     n_l_above_avg_max_base: number;
+    // Tier 1 / Tier 3 additions
+    min_loss_hyp: number | null;          // most negative hyp_net_pnl (largest loss per trade)
+    total_win_hyp: number | null;
+    total_loss_hyp: number | null;
+    total_net_hyp: number | null;
+    stdev_net_hyp: number | null;
+    stdev_losses_hyp: number | null;
+    sortino_hyp: number | null;
+    sharpe_hyp: number | null;
+    calmar_hyp: number | null;
+    // Baseline analogues from bandTrades (using actual net_pnl)
+    n_winners_base: number; n_losers_base: number;
+    stdev_net_base: number | null;
+    stdev_losses_base: number | null;
+    sortino_base: number | null;
+    sharpe_base: number | null;
+    calmar_base: number | null;
+    // Streaks (date-sorted)
+    max_win_streak_base: number; max_win_streak_hyp: number;
+    max_loss_streak_base: number; max_loss_streak_hyp: number;
   } | null = null;
   if (bandTrades && bandTrades.length > 0 && cell.trigger_mtm != null && bm) {
     const trig = cell.trigger_mtm;
@@ -1466,7 +1503,8 @@ function CellDetail({
       const hyp_min = fired ? ef * trig + (1 - ef) * minM : minM;
       const hyp_max = fired ? ef * trig + (1 - ef) * maxM : maxM;
       const hyp_net = fired ? ef * trig + (1 - ef) * net : net;
-      return { minM, maxM, net, hyp_min, hyp_max, hyp_net };
+      const date = t.friday_date_ist ?? '';
+      return { minM, maxM, net, hyp_min, hyp_max, hyp_net, date };
     });
     const winnersHyp = enr.filter(t => t.hyp_net >= 0);
     const losersHyp = enr.filter(t => t.hyp_net < 0);
@@ -1475,24 +1513,79 @@ function CellDetail({
     const mean = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
     const minOf = (arr: number[]) => arr.length ? Math.min(...arr) : null;
     const maxOf = (arr: number[]) => arr.length ? Math.max(...arr) : null;
+    const sumOf = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
+    const stdev = (arr: number[]): number | null => {
+      if (arr.length < 2) return null;
+      const m = sumOf(arr) / arr.length;
+      const variance = arr.reduce((a, x) => a + (x - m) ** 2, 0) / (arr.length - 1);
+      return Math.sqrt(variance);
+    };
+    // Max consecutive run of trades satisfying predicate, in date order
+    const maxConsec = (sortedTrades: typeof enr, isWin: (t: typeof enr[0]) => boolean): number => {
+      let max = 0, cur = 0;
+      for (const t of sortedTrades) {
+        if (isWin(t)) { cur++; if (cur > max) max = cur; }
+        else { cur = 0; }
+      }
+      return max;
+    };
+    const sortedByDate = [...enr].sort((a, b) => a.date.localeCompare(b.date));
 
     // Populate hypAggs for the P&L-splits section below
     const avgMinW_hyp = mean(winnersHyp.map(t => t.hyp_min)) ?? 0;
     const avgMaxL_hyp = mean(losersHyp.map(t => t.hyp_max)) ?? 0;
     const avgMinW_base = mean(winnersBase.map(t => t.minM)) ?? 0;
     const avgMaxL_base = mean(losersBase.map(t => t.maxM)) ?? 0;
+    // Risk-adjusted stats (Sortino, Sharpe, Calmar) — computed at per-100-lot scale.
+    // Ratios are lot-scale invariant.
+    const hypNetArr = enr.map(t => t.hyp_net);
+    const hypLosersArr = losersHyp.map(t => t.hyp_net);
+    const baseNetArr = enr.map(t => t.net);
+    const baseLosersArr = losersBase.map(t => t.net);
+    const meanHypNet = mean(hypNetArr);
+    const meanBaseNet = mean(baseNetArr);
+    const stdHypNet = stdev(hypNetArr);
+    const stdBaseNet = stdev(baseNetArr);
+    const stdHypLosses = stdev(hypLosersArr);
+    const stdBaseLosses = stdev(baseLosersArr);
+    const minHypNet = minOf(hypNetArr);
+    const minBaseNet = minOf(baseNetArr);
+
     hypAggs = {
       n_winners_hyp: winnersHyp.length,
       n_losers_hyp: losersHyp.length,
       avg_win_hyp: mean(winnersHyp.map(t => t.hyp_net)),
       avg_loss_hyp: mean(losersHyp.map(t => t.hyp_net)),
       max_win_hyp: maxOf(winnersHyp.map(t => t.hyp_net)),
-      avg_net_hyp: mean(enr.map(t => t.hyp_net)),
+      avg_net_hyp: meanHypNet,
       avg_net_winners_hyp: mean(winnersHyp.map(t => t.hyp_net)),
       n_w_below_avg_min_hyp: winnersHyp.filter(t => t.hyp_min < avgMinW_hyp).length,
       n_l_above_avg_max_hyp: losersHyp.filter(t => t.hyp_max > avgMaxL_hyp).length,
       n_w_below_avg_min_base: winnersBase.filter(t => t.minM < avgMinW_base).length,
       n_l_above_avg_max_base: losersBase.filter(t => t.maxM > avgMaxL_base).length,
+      // Tier 1 / Tier 3 additions
+      min_loss_hyp: minHypNet,
+      total_win_hyp: sumOf(winnersHyp.map(t => t.hyp_net)),
+      total_loss_hyp: sumOf(losersHyp.map(t => t.hyp_net)),
+      total_net_hyp: sumOf(hypNetArr),
+      stdev_net_hyp: stdHypNet,
+      stdev_losses_hyp: stdHypLosses,
+      sortino_hyp: meanHypNet != null && stdHypLosses && stdHypLosses > 0 ? meanHypNet / stdHypLosses : null,
+      sharpe_hyp: meanHypNet != null && stdHypNet && stdHypNet > 0 ? meanHypNet / stdHypNet : null,
+      calmar_hyp: meanHypNet != null && minHypNet != null && minHypNet < 0 ? meanHypNet / Math.abs(minHypNet) : null,
+      // Baseline analogues
+      n_winners_base: winnersBase.length,
+      n_losers_base: losersBase.length,
+      stdev_net_base: stdBaseNet,
+      stdev_losses_base: stdBaseLosses,
+      sortino_base: meanBaseNet != null && stdBaseLosses && stdBaseLosses > 0 ? meanBaseNet / stdBaseLosses : null,
+      sharpe_base: meanBaseNet != null && stdBaseNet && stdBaseNet > 0 ? meanBaseNet / stdBaseNet : null,
+      calmar_base: meanBaseNet != null && minBaseNet != null && minBaseNet < 0 ? meanBaseNet / Math.abs(minBaseNet) : null,
+      // Streaks (date-sorted)
+      max_win_streak_base: maxConsec(sortedByDate, t => t.net >= 0),
+      max_win_streak_hyp:  maxConsec(sortedByDate, t => t.hyp_net >= 0),
+      max_loss_streak_base: maxConsec(sortedByDate, t => t.net < 0),
+      max_loss_streak_hyp:  maxConsec(sortedByDate, t => t.hyp_net < 0),
     };
 
     const mtmRow = (label: string, baseVal: number | null, stageVal: number | null, isPositiveBetter: boolean) => {
@@ -1661,19 +1754,100 @@ function CellDetail({
     pnlRow('Avg win (per trade)', bm.avg_win_usd, hypAggs?.avg_win_hyp ?? null, true, false, true);
     pnlRow('Avg loss (per trade)', bm.avg_loss_usd, hypAggs?.avg_loss_hyp ?? null, true);  // less-negative=better still positive-direction
     pnlRow('Largest win', bm.max_win_usd, hypAggs?.max_win_hyp ?? null, true);
+    pnlRow('Largest loss (per trade)', bm.max_loss_usd, hypAggs?.min_loss_hyp ?? null, true);
+    // Total win / total loss — baseline computed from bm.avg_win × n_wins (or use total_win_mtm? No that's MTM not net)
+    const baseTotalWin = bm.avg_win_usd != null && bm.n_wins != null ? bm.avg_win_usd * bm.n_wins : null;
+    const baseTotalLoss = bm.avg_loss_usd != null && bm.n_losses != null ? bm.avg_loss_usd * bm.n_losses : null;
+    pnlRow('Total win', baseTotalWin, hypAggs?.total_win_hyp ?? null, true);
+    pnlRow('Total loss', baseTotalLoss, hypAggs?.total_loss_hyp ?? null, true);
 
-    // Ret/margin and Ret/credit — use band-level denominators (per-trade not exposed)
+    // Ret/margin and Ret/credit — use band-level denominators (per-trade not exposed).
+    // BOTH numerator and denominator are at the per-100-lot scale, so the ratio is
+    // lot-scale invariant. Do NOT multiply numerator by totalScale here.
     const margin = bm.avg_margin ?? null;
     const credit = bm.avg_credit ?? null;
-    const retMarginHyp = margin && hypAggs?.avg_net_hyp != null ? (hypAggs.avg_net_hyp * totalScale) / margin : null;
-    const retCreditHyp = credit && hypAggs?.avg_net_hyp != null ? (hypAggs.avg_net_hyp * totalScale) / credit : null;
-    const retMarginWHyp = margin && hypAggs?.avg_net_winners_hyp != null ? (hypAggs.avg_net_winners_hyp * totalScale) / margin : null;
-    const retCreditWHyp = credit && hypAggs?.avg_net_winners_hyp != null ? (hypAggs.avg_net_winners_hyp * totalScale) / credit : null;
+    const retMarginHyp = margin && hypAggs?.avg_net_hyp != null ? hypAggs.avg_net_hyp / margin : null;
+    const retCreditHyp = credit && hypAggs?.avg_net_hyp != null ? hypAggs.avg_net_hyp / credit : null;
+    const retMarginWHyp = margin && hypAggs?.avg_net_winners_hyp != null ? hypAggs.avg_net_winners_hyp / margin : null;
+    const retCreditWHyp = credit && hypAggs?.avg_net_winners_hyp != null ? hypAggs.avg_net_winners_hyp / credit : null;
 
     pnlRow('Ret / margin', bm.avg_pct_return_on_margin, retMarginHyp, true, true);
     pnlRow('Ret / credit', bm.avg_pct_return_on_credit, retCreditHyp, true, true);
     pnlRow('Ret / margin (W)', bm.avg_pct_return_on_margin_winners, retMarginWHyp, true, true);
     pnlRow('Ret / credit (W)', bm.avg_pct_return_on_credit_winners, retCreditWHyp, true, true);
+  }
+
+  // ── Risk-adjusted metrics (Sortino / Sharpe / Calmar / stdev) — F14 from bandTrades ──
+  if (hypAggs) {
+    const raRow = (label: string, baseVal: number | null, hypVal: number | null, isPositiveBetter: boolean, decimals: number, isPct = false, isFirst = false) => {
+      const fmt = (v: number | null) => v == null ? '—' : (isPct ? `${(v * 100).toFixed(decimals)}%` : v.toFixed(decimals));
+      if (baseVal == null && hypVal == null) return;
+      if (hypVal == null) {
+        unifiedRows.push({
+          label, baseline: fmt(baseVal), stage1: '⋯', delta: '—', arrow: '', deltaColor: '#7a9bb5',
+          note: 'F14: computing from band trades',
+          section: isFirst ? 'Risk-adjusted (F14 hyp from band trades)' : undefined,
+        });
+        return;
+      }
+      const delta = (hypVal ?? 0) - (baseVal ?? 0);
+      const same = Math.abs(delta) < 1e-6;
+      const better = isPositiveBetter ? delta > 0 : delta < 0;
+      const deltaStr = isPct ? `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(decimals)}%` : `${delta >= 0 ? '+' : ''}${delta.toFixed(decimals)}`;
+      unifiedRows.push({
+        label, baseline: fmt(baseVal), stage1: fmt(hypVal),
+        delta: deltaStr,
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        note: 'F14: ratio (lot-scale invariant) from bandTrades',
+        section: isFirst ? 'Risk-adjusted (F14 hyp from band trades)' : undefined,
+      });
+    };
+    raRow('Sortino', hypAggs.sortino_base, hypAggs.sortino_hyp, true, 4, false, true);
+    raRow('Sharpe', hypAggs.sharpe_base, hypAggs.sharpe_hyp, true, 4);
+    raRow('Calmar-like', hypAggs.calmar_base, hypAggs.calmar_hyp, true, 4);
+
+    // stdev metrics — lot-scaled for display
+    const stdRow = (label: string, baseVal: number | null, hypVal: number | null) => {
+      if (baseVal == null && hypVal == null) return;
+      const fmt = (v: number | null) => v == null ? '—' : `$${(v * totalScale).toFixed(2)}`;
+      if (hypVal == null) {
+        unifiedRows.push({ label, baseline: fmt(baseVal), stage1: '⋯', delta: '—', arrow: '', deltaColor: '#7a9bb5', note: 'F14: computing' });
+        return;
+      }
+      const delta = (hypVal - (baseVal ?? 0)) * totalScale;
+      const same = Math.abs(delta) < 1e-6;
+      // Lower stdev = better (less dispersion)
+      const better = delta < 0;
+      unifiedRows.push({
+        label, baseline: fmt(baseVal), stage1: fmt(hypVal),
+        delta: `${delta >= 0 ? '+' : ''}$${delta.toFixed(2)}`,
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        note: 'F14: lower = less dispersion = better',
+      });
+    };
+    stdRow('Stdev net P&L', hypAggs.stdev_net_base, hypAggs.stdev_net_hyp);
+    stdRow('Stdev losses-only', hypAggs.stdev_losses_base, hypAggs.stdev_losses_hyp);
+  }
+
+  // ── Streaks (date-sorted) — F14 from bandTrades ──
+  if (hypAggs) {
+    const streakRow = (label: string, baseN: number, hypN: number, lowerIsBetter: boolean, isFirst = false) => {
+      const delta = hypN - baseN;
+      const same = delta === 0;
+      const better = lowerIsBetter ? delta < 0 : delta > 0;
+      unifiedRows.push({
+        label, baseline: String(baseN), stage1: String(hypN),
+        delta: `${delta >= 0 ? '+' : ''}${delta}`,
+        arrow: same ? '−' : (delta > 0 ? '↑' : '↓'),
+        deltaColor: same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171'),
+        note: 'F14: max consecutive run in date-sorted trades',
+        section: isFirst ? 'Streaks (F14 — date-sorted)' : undefined,
+      });
+    };
+    streakRow('Max winning streak', hypAggs.max_win_streak_base, hypAggs.max_win_streak_hyp, false, true);  // longer = better
+    streakRow('Max losing streak', hypAggs.max_loss_streak_base, hypAggs.max_loss_streak_hyp, true);  // shorter = better
   }
 
   // Rule firing stats — baseline only (rule still fires for surviving portion; semantics ambiguous)
@@ -1688,8 +1862,7 @@ function CellDetail({
     ruleStub('Rule hits', String(bm.n_rule_trigger ?? '—'));
     ruleStub('SL hits', String(bm.n_premium_sl_hit ?? '—'));
     ruleStub('Hard cap', String(bm.n_hard_cap ?? '—'));
-    ruleStub('Max winning streak', String(bm.max_consec_wins ?? '—'));
-    ruleStub('Max losing streak', String(bm.max_consec_losses ?? '—'));
+    // Max winning/losing streak now shown in dedicated "Streaks (F14 — date-sorted)" section with full comparison
   }
 
   // Exit timing — baseline only
@@ -1713,8 +1886,10 @@ function CellDetail({
         note: noteEntryUnchanged,
         section: isFirst ? 'Entry-time values (truly unchanged)' : undefined,
       });
-    entryRow('Avg credit', bm.avg_credit != null ? `$${bm.avg_credit.toFixed(2)}` : '—', true);
-    entryRow('Avg margin', bm.avg_margin != null ? `$${bm.avg_margin.toFixed(2)}` : '—');
+    // Credit and margin are per-100-lot in bm; lot-scale them for consistency with
+    // other dollar values in the table (which are all lot-scaled).
+    entryRow('Avg credit', bm.avg_credit != null ? `$${(bm.avg_credit * totalScale).toFixed(2)}` : '—', true);
+    entryRow('Avg margin', bm.avg_margin != null ? `$${(bm.avg_margin * totalScale).toFixed(2)}` : '—');
     entryRow('Lots', String(bm.lots ?? lots ?? '—'));
   }
 
