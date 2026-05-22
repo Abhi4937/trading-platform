@@ -657,6 +657,8 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
         expiry_bucket: r.expiry_bucket ?? null,
         delta_target: r.delta_target ?? null,
         entry_hour_ist: r.entry_hour_ist ?? null,
+        lots: r.lots ?? 100,
+        baseline_metrics: r,
       };
     }
     onResolvedRulesChange(resolved, datasetProp ?? 'delta_match');

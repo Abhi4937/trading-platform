@@ -229,6 +229,7 @@ function Stage1BandTradesModal({
   ruleLabel,
   filters,
   dataset,
+  lots,
   onClose,
 }: {
   band: string;
@@ -236,6 +237,7 @@ function Stage1BandTradesModal({
   ruleLabel: string;
   filters: { expiry_bucket?: string; delta_target?: number; entry_hour_ist?: number };
   dataset: M7Dataset;
+  lots: number;
   onClose: () => void;
 }) {
   const [data, setData] = useState<Stage1BandTradesResponse | null>(null);
@@ -243,7 +245,7 @@ function Stage1BandTradesModal({
   const [fetchErr, setFetchErr] = useState<string | null>(null);
 
   // User controls
-  const [triggerChoice, setTriggerChoice] = useState<'sl_avg' | 'l_avg' | 'w_avg' | 'custom'>('l_avg');
+  const [triggerChoice, setTriggerChoice] = useState<'25_of_sl' | '50_of_sl' | '75_of_sl' | 'sl_avg' | 'l_avg' | 'w_avg' | 'custom'>('l_avg');
   const [customTrigger, setCustomTrigger] = useState<string>('-500');
   const [exitFrac, setExitFrac] = useState<number>(0.5);
   const [tradeFilter, setTradeFilter] = useState<TradeFilter>('all');
@@ -263,6 +265,9 @@ function Stage1BandTradesModal({
   const triggerMtm = useMemo(() => {
     if (!data) return -500;
     if (triggerChoice === 'custom') return parseFloat(customTrigger) || 0;
+    if (triggerChoice === '25_of_sl') return (data.trigger_levels.sl_avg ?? 0) * 0.25;
+    if (triggerChoice === '50_of_sl') return (data.trigger_levels.sl_avg ?? 0) * 0.50;
+    if (triggerChoice === '75_of_sl') return (data.trigger_levels.sl_avg ?? 0) * 0.75;
     return data.trigger_levels[triggerChoice] ?? -500;
   }, [data, triggerChoice, customTrigger]);
 
@@ -292,7 +297,11 @@ function Stage1BandTradesModal({
   }, [filtered, sortCol, sortAsc]);
 
   const tl = data?.trigger_levels;
-  const tlLabel = (v: number | null) => v != null ? `$${v.toFixed(0)}` : '—';
+  const lotsScale = lots / 100;
+  // Scale raw per-100-lot values to actual lot count for display only.
+  // Classification logic stays at per-100-lot scale so trigger comparison is consistent.
+  const sc = (v: number | null | undefined) => v != null ? v * lotsScale : v;
+  const tlLabel = (v: number | null) => v != null ? `$${(v * lotsScale).toFixed(0)}` : '—';
 
   const thStyle: React.CSSProperties = {
     padding: '4px 8px', color: '#7a9bb5', fontWeight: 500,
@@ -331,6 +340,9 @@ function Stage1BandTradesModal({
               n={data.n_total} · losers={data.n_losers} · SL-hit={data.n_sl_hit} · winners={data.n_winners}
             </span>
           )}
+          <span style={{ fontSize: 10, color: '#3a5a3a', marginLeft: 4 }}>
+            ×{lots} lots (÷100 baseline)
+          </span>
           <button onClick={onClose} style={{
             marginLeft: 'auto', background: 'none', border: 'none',
             color: '#7a9bb5', cursor: 'pointer', fontSize: 16,
@@ -343,20 +355,33 @@ function Stage1BandTradesModal({
           display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center',
         }}>
           {/* Trigger level */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, flexWrap: 'wrap' }}>
             <span style={{ color: '#7a9bb5' }}>Trigger:</span>
+            {/* Fractional SL buttons */}
+            {([
+              ['25_of_sl', `25% SL (${tlLabel(tl?.sl_avg != null ? tl.sl_avg * 0.25 : null)})`],
+              ['50_of_sl', `50% SL (${tlLabel(tl?.sl_avg != null ? tl.sl_avg * 0.50 : null)})`],
+              ['75_of_sl', `75% SL (${tlLabel(tl?.sl_avg != null ? tl.sl_avg * 0.75 : null)})`],
+            ] as const).map(([k, lbl]) => (
+              <button key={k} onClick={() => setTriggerChoice(k)} style={{
+                background: triggerChoice === k ? '#5a3a00' : '#0d1421',
+                color: triggerChoice === k ? '#fbbf24' : '#7a9bb5',
+                border: `1px solid ${triggerChoice === k ? '#fbbf2488' : '#1a2d42'}`,
+                borderRadius: 3, padding: '2px 7px', fontSize: 10, cursor: 'pointer',
+              }}>{lbl}</button>
+            ))}
+            <span style={{ color: '#2a3a4a', fontSize: 10 }}>|</span>
+            {/* Reference levels */}
             {(['sl_avg', 'l_avg', 'w_avg'] as const).map(k => {
               const val = tl?.[k];
-              const labels = { sl_avg: `SL-avg (${tlLabel(val ?? null)})`, l_avg: `L-avg (${tlLabel(val ?? null)})`, w_avg: `W-avg (${tlLabel(val ?? null)})` };
+              const lbl = { sl_avg: `SL-avg (${tlLabel(val ?? null)})`, l_avg: `L-avg (${tlLabel(val ?? null)})`, w_avg: `W-avg (${tlLabel(val ?? null)})` }[k];
               return (
                 <button key={k} onClick={() => setTriggerChoice(k)} style={{
                   background: triggerChoice === k ? '#1f6feb' : '#0d1421',
                   color: triggerChoice === k ? '#fff' : '#7a9bb5',
                   border: '1px solid #1a2d42', borderRadius: 3,
                   padding: '2px 7px', fontSize: 10, cursor: 'pointer',
-                }}>
-                  {labels[k]}
-                </button>
+                }}>{lbl}</button>
               );
             })}
             <button onClick={() => setTriggerChoice('custom')} style={{
@@ -377,7 +402,7 @@ function Stage1BandTradesModal({
               />
             )}
             <span style={{ color: '#4ade80', fontSize: 10, marginLeft: 4 }}>
-              MTM ≤ {triggerMtm.toFixed(0)}
+              MTM ≤ ${(triggerMtm * lotsScale).toFixed(0)}
             </span>
           </div>
 
@@ -428,7 +453,13 @@ function Stage1BandTradesModal({
                   <SortTh col="net_pnl_estimate_usd" label="Net P&L" />
                   <th style={thStyle}>SL?</th>
                   <th style={thStyle}>Case</th>
-                  <th style={thStyle}>Trigger fires?</th>
+                  <th style={thStyle}>Fires?</th>
+                  <th style={{...thStyle, color: '#fbbf24'}} title={`When stage-1 fires, this fraction of lots (${(exitFrac*100).toFixed(0)}%) closes at the trigger MTM`}>
+                    Partial @ ({(exitFrac*100).toFixed(0)}%)
+                  </th>
+                  <th style={{...thStyle, color: '#4ade80'}} title={`The remaining ${((1-exitFrac)*100).toFixed(0)}% of lots rides to the rule's normal exit and ends at the actual net P&L`}>
+                    Rest @ ({((1-exitFrac)*100).toFixed(0)}%)
+                  </th>
                   <SortTh col="delta" label="Hyp P&L" />
                   <SortTh col="delta" label="Δ P&L" />
                 </tr>
@@ -444,19 +475,27 @@ function Stage1BandTradesModal({
                       <td style={{ ...tdStyle, color: '#a0bbd5', fontFamily: 'monospace', fontSize: 10 }}>{t.expiry_bucket ?? '—'}</td>
                       <td style={{ ...tdStyle, color: '#a0bbd5' }}>{t.delta_target != null ? t.delta_target.toFixed(2) : '—'}</td>
                       <td style={{ ...tdStyle, color: '#a0bbd5' }}>{t.entry_hour_ist ?? '—'}</td>
-                      <td style={{ ...tdStyle, color: '#f87171', fontWeight: 600 }}>{t.min_mtm_usd != null ? `$${t.min_mtm_usd.toFixed(0)}` : '—'}</td>
-                      <td style={{ ...tdStyle, color: '#4ade80' }}>{t.max_mtm_usd != null ? `$${t.max_mtm_usd.toFixed(0)}` : '—'}</td>
-                      <td style={{ ...tdStyle, color: netColor, fontWeight: 600 }}>{t.net_pnl_estimate_usd != null ? fmt$(t.net_pnl_estimate_usd, 0) : '—'}</td>
+                      <td style={{ ...tdStyle, color: '#f87171', fontWeight: 600 }}>{sc(t.min_mtm_usd) != null ? `$${(sc(t.min_mtm_usd) as number).toFixed(0)}` : '—'}</td>
+                      <td style={{ ...tdStyle, color: '#4ade80' }}>{sc(t.max_mtm_usd) != null ? `$${(sc(t.max_mtm_usd) as number).toFixed(0)}` : '—'}</td>
+                      <td style={{ ...tdStyle, color: netColor, fontWeight: 600 }}>{sc(t.net_pnl_estimate_usd) != null ? fmt$(sc(t.net_pnl_estimate_usd) as number, 0) : '—'}</td>
                       <td style={{ ...tdStyle, color: t.is_premium_sl_hit ? '#f87171' : '#556' }}>{t.is_premium_sl_hit ? 'SL' : '—'}</td>
                       <td style={{ ...tdStyle, color: CASE_COLOR[t.caseTag], fontFamily: 'monospace', fontSize: 10, fontWeight: 700 }}>{t.caseTag}</td>
                       <td style={{ ...tdStyle, color: fired ? '#fbbf24' : '#556', textAlign: 'center' }}>{fired ? '✓' : '—'}</td>
-                      <td style={{ ...tdStyle, color: netColor }}>{fmt$(t.hypothetical, 0)}</td>
-                      <td style={{ ...tdStyle, color: deltaColor, fontWeight: 700 }}>{fmt$(t.delta, 0)}</td>
+                      {/* Partial exit cell: triggers MTM when fired, else dash */}
+                      <td style={{ ...tdStyle, color: fired ? '#fbbf24' : '#444', textAlign: 'right' }}>
+                        {fired ? `$${(triggerMtm * lotsScale).toFixed(0)}` : '—'}
+                      </td>
+                      {/* Rest exit cell: original net_pnl (the actual exit price for the unchanged portion) */}
+                      <td style={{ ...tdStyle, color: (t.net_pnl_estimate_usd ?? 0) >= 0 ? '#4ade80' : '#f87171', textAlign: 'right' }}>
+                        {fired ? fmt$(sc(t.net_pnl_estimate_usd) as number, 0) : '—'}
+                      </td>
+                      <td style={{ ...tdStyle, color: netColor }}>{fmt$(sc(t.hypothetical) as number, 0)}</td>
+                      <td style={{ ...tdStyle, color: deltaColor, fontWeight: 700 }}>{fmt$(sc(t.delta) as number, 0)}</td>
                     </tr>
                   );
                 })}
                 {sorted.length === 0 && (
-                  <tr><td colSpan={12} style={{ padding: 20, color: '#556', textAlign: 'center' }}>No trades match filter</td></tr>
+                  <tr><td colSpan={14} style={{ padding: 20, color: '#556', textAlign: 'center' }}>No trades match filter</td></tr>
                 )}
               </tbody>
             </table>
@@ -464,12 +503,15 @@ function Stage1BandTradesModal({
         </div>
 
         {/* Footer legend */}
-        <div style={{ padding: '6px 14px', borderTop: '1px solid #1a2d42', fontSize: 10, color: '#556', display: 'flex', gap: 14 }}>
+        <div style={{ padding: '6px 14px', borderTop: '1px solid #1a2d42', fontSize: 10, color: '#556', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
           <span><span style={{ color: CASE_COLOR.A }}>A</span> = didn't fire</span>
           <span><span style={{ color: CASE_COLOR.B_reliable }}>B</span> = winner that dipped (gave up profit)</span>
           <span><span style={{ color: CASE_COLOR.C_deeper }}>C_deeper</span> = loser saved</span>
           <span><span style={{ color: CASE_COLOR.C_recovered }}>C_recovered</span> = loser that recovered (hurt)</span>
-          <span>Hyp P&L = exit_frac × trigger + (1−frac) × actual</span>
+          <span style={{ marginLeft: 'auto' }}>
+            <span style={{ color: '#fbbf24' }}>Partial @</span> + <span style={{ color: '#4ade80' }}>Rest @</span> = <strong>Hyp P&L</strong>
+            <span style={{ marginLeft: 4 }}>= {(exitFrac*100).toFixed(0)}% × trigger + {((1-exitFrac)*100).toFixed(0)}% × actual</span>
+          </span>
         </div>
       </div>
     </div>
@@ -482,12 +524,16 @@ type AllTradeFilter = 'all' | 'losses' | 'best_win' | 'worst_dd_win';
 
 function classifyAllTrade(
   trade: Stage1AllTradeRow,
-  triggerChoice: 'sl_avg' | 'l_avg' | 'w_avg' | 'custom',
+  triggerChoice: '25_of_sl' | '50_of_sl' | '75_of_sl' | 'sl_avg' | 'l_avg' | 'w_avg' | 'custom',
   customValue: number,
   exitFrac: number,
 ): { caseTag: CaseTag; hypothetical: number; delta: number; triggerMtm: number | null } {
+  const sl = trade.band_sl_avg;
   const bandTrigger =
-    triggerChoice === 'sl_avg' ? trade.band_sl_avg
+    triggerChoice === '25_of_sl' ? (sl != null ? sl * 0.25 : null)
+    : triggerChoice === '50_of_sl' ? (sl != null ? sl * 0.50 : null)
+    : triggerChoice === '75_of_sl' ? (sl != null ? sl * 0.75 : null)
+    : triggerChoice === 'sl_avg' ? sl
     : triggerChoice === 'l_avg' ? trade.band_l_avg
     : triggerChoice === 'w_avg' ? trade.band_w_avg
     : null;
@@ -512,7 +558,7 @@ function Stage1AllTradesModal({
   const [loading, setLoading] = useState(true);
   const [fetchErr, setFetchErr] = useState<string | null>(null);
 
-  const [triggerChoice, setTriggerChoice] = useState<'sl_avg' | 'l_avg' | 'w_avg' | 'custom'>('l_avg');
+  const [triggerChoice, setTriggerChoice] = useState<'25_of_sl' | '50_of_sl' | '75_of_sl' | 'sl_avg' | 'l_avg' | 'w_avg' | 'custom'>('l_avg');
   const [customTrigger, setCustomTrigger] = useState<string>('-500');
   const [exitFrac, setExitFrac] = useState<number>(0.5);
   const [tradeFilter, setTradeFilter] = useState<AllTradeFilter>('all');
@@ -533,11 +579,24 @@ function Stage1AllTradesModal({
 
   const enriched = useMemo(() => {
     if (!data) return [];
-    return data.trades.map(t => ({
-      ...t,
-      ...classifyAllTrade(t, triggerChoice, customValue, exitFrac),
-    }));
-  }, [data, triggerChoice, customValue, exitFrac]);
+    return data.trades.map(t => {
+      const tLots = resolvedRules[t.band]?.lots ?? 100;
+      const tScale = tLots / 100;
+      const classified = classifyAllTrade(t, triggerChoice, customValue, exitFrac);
+      return {
+        ...t,
+        ...classified,
+        // Scaled display values (classification stays at raw 100-lot scale)
+        min_mtm_usd_scaled: (t.min_mtm_usd ?? 0) * tScale,
+        max_mtm_usd_scaled: (t.max_mtm_usd ?? 0) * tScale,
+        net_pnl_scaled: (t.net_pnl_estimate_usd ?? 0) * tScale,
+        hypothetical_scaled: classified.hypothetical * tScale,
+        delta_scaled: classified.delta * tScale,
+        triggerMtm_scaled: classified.triggerMtm != null ? classified.triggerMtm * tScale : null,
+        lots: tLots,
+      };
+    });
+  }, [data, triggerChoice, customValue, exitFrac, resolvedRules]);
 
   const filtered = useMemo(() => {
     if (tradeFilter === 'losses') return enriched.filter(t => (t.net_pnl_estimate_usd ?? 0) < 0);
@@ -627,12 +686,25 @@ function Stage1AllTradesModal({
           display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'center',
         }}>
           {/* Trigger */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, flexWrap: 'wrap' }}>
             <span style={{ color: '#7a9bb5' }}>Trigger (per band):</span>
-            {([['sl_avg', 'SL-avg'], ['l_avg', 'L-avg'], ['w_avg', 'W-avg']] as [typeof triggerChoice, string][])
-              .filter(([k]) => k !== 'custom')
-              .map(([k, lbl]) => (
-              <button key={k} onClick={() => setTriggerChoice(k as typeof triggerChoice)} style={{
+            {/* Fractional SL options */}
+            {([
+              ['25_of_sl', '25% SL'],
+              ['50_of_sl', '50% SL'],
+              ['75_of_sl', '75% SL'],
+            ] as const).map(([k, lbl]) => (
+              <button key={k} onClick={() => setTriggerChoice(k)} style={{
+                background: triggerChoice === k ? '#5a3a00' : '#0d1421',
+                color: triggerChoice === k ? '#fbbf24' : '#7a9bb5',
+                border: `1px solid ${triggerChoice === k ? '#fbbf2488' : '#1a2d42'}`,
+                borderRadius: 3, padding: '2px 8px', fontSize: 10, cursor: 'pointer',
+              }}>{lbl}</button>
+            ))}
+            <span style={{ color: '#2a3a4a', fontSize: 10 }}>|</span>
+            {/* Reference levels */}
+            {([['sl_avg', 'SL-avg'], ['l_avg', 'L-avg'], ['w_avg', 'W-avg']] as const).map(([k, lbl]) => (
+              <button key={k} onClick={() => setTriggerChoice(k)} style={{
                 background: triggerChoice === k ? '#1f6feb' : '#0d1421',
                 color: triggerChoice === k ? '#fff' : '#7a9bb5',
                 border: '1px solid #1a2d42', borderRadius: 3,
@@ -698,13 +770,19 @@ function Stage1AllTradesModal({
                   <th style={thStyle}>Expiry</th>
                   <th style={thStyle}>Δ</th>
                   <th style={thStyle}>Hr</th>
+                  <th style={thStyle}>Lots</th>
                   <SortTh col="min_mtm_usd" label="Min MTM" />
                   <th style={thStyle}>Max MTM</th>
                   <SortTh col="net_pnl_estimate_usd" label="Actual P&L" />
                   <th style={thStyle}>SL?</th>
                   <th style={thStyle}>Case</th>
-                  <th style={thStyle}>Trigger $</th>
                   <th style={thStyle}>Fires?</th>
+                  <th style={{...thStyle, color: '#fbbf24'}} title={`When stage-1 fires, ${(exitFrac*100).toFixed(0)}% of lots close at this MTM`}>
+                    Partial @ ({(exitFrac*100).toFixed(0)}%)
+                  </th>
+                  <th style={{...thStyle, color: '#4ade80'}} title={`The remaining ${((1-exitFrac)*100).toFixed(0)}% of lots rides to actual exit`}>
+                    Rest @ ({((1-exitFrac)*100).toFixed(0)}%)
+                  </th>
                   <SortTh col="delta" label="Hyp P&L" />
                   <SortTh col="delta" label="Δ P&L" />
                 </tr>
@@ -714,7 +792,7 @@ function Stage1AllTradesModal({
                   const fired = t.caseTag !== 'A';
                   const net = t.net_pnl_estimate_usd ?? 0;
                   const netColor = net >= 0 ? '#4ade80' : '#f87171';
-                  const deltaColor = t.delta > 0.5 ? '#4ade80' : t.delta < -0.5 ? '#f87171' : '#7a9bb5';
+                  const deltaColor = (t.delta_scaled ?? t.delta) > 0.5 ? '#4ade80' : (t.delta_scaled ?? t.delta) < -0.5 ? '#f87171' : '#7a9bb5';
                   const isHighlight = tradeFilter === 'best_win' || tradeFilter === 'worst_dd_win';
                   return (
                     <tr key={`${t.trade_id}-${i}`} style={{
@@ -726,22 +804,28 @@ function Stage1AllTradesModal({
                       <td style={{ ...tdStyle, color: '#a0bbd5', fontSize: 10 }}>{t.expiry_bucket ?? '—'}</td>
                       <td style={{ ...tdStyle, color: '#a0bbd5' }}>{t.delta_target != null ? t.delta_target.toFixed(2) : '—'}</td>
                       <td style={{ ...tdStyle, color: '#a0bbd5' }}>{t.entry_hour_ist ?? '—'}</td>
-                      <td style={{ ...tdStyle, color: '#f87171', fontWeight: 700 }}>{t.min_mtm_usd != null ? `$${t.min_mtm_usd.toFixed(0)}` : '—'}</td>
-                      <td style={{ ...tdStyle, color: '#4ade80' }}>{t.max_mtm_usd != null ? `$${t.max_mtm_usd.toFixed(0)}` : '—'}</td>
-                      <td style={{ ...tdStyle, color: netColor, fontWeight: 700 }}>{fmt$(net, 0)}</td>
+                      <td style={{ ...tdStyle, color: '#7a9bb5', fontSize: 9 }}>×{t.lots}</td>
+                      <td style={{ ...tdStyle, color: '#f87171', fontWeight: 700 }}>{t.min_mtm_usd_scaled != null ? `$${t.min_mtm_usd_scaled.toFixed(0)}` : '—'}</td>
+                      <td style={{ ...tdStyle, color: '#4ade80' }}>{t.max_mtm_usd_scaled != null ? `$${t.max_mtm_usd_scaled.toFixed(0)}` : '—'}</td>
+                      <td style={{ ...tdStyle, color: netColor, fontWeight: 700 }}>{fmt$(t.net_pnl_scaled, 0)}</td>
                       <td style={{ ...tdStyle, color: t.is_premium_sl_hit ? '#f87171' : '#556' }}>{t.is_premium_sl_hit ? 'SL' : '—'}</td>
                       <td style={{ ...tdStyle, color: CASE_COLOR[t.caseTag], fontFamily: 'monospace', fontSize: 10, fontWeight: 700 }}>{t.caseTag}</td>
-                      <td style={{ ...tdStyle, color: '#7a9bb5', fontSize: 10 }}>
-                        {t.triggerMtm != null ? `$${t.triggerMtm.toFixed(0)}` : '—'}
-                      </td>
                       <td style={{ ...tdStyle, color: fired ? '#fbbf24' : '#444', textAlign: 'center' }}>{fired ? '✓' : '—'}</td>
-                      <td style={{ ...tdStyle, color: netColor }}>{fmt$(t.hypothetical, 0)}</td>
-                      <td style={{ ...tdStyle, color: deltaColor, fontWeight: 700 }}>{fmt$(t.delta, 0)}</td>
+                      {/* Partial @ : trigger MTM (scaled) when fired */}
+                      <td style={{ ...tdStyle, color: fired ? '#fbbf24' : '#444', textAlign: 'right' }}>
+                        {fired && t.triggerMtm_scaled != null ? `$${t.triggerMtm_scaled.toFixed(0)}` : '—'}
+                      </td>
+                      {/* Rest @ : actual net_pnl_scaled, only meaningful when fired */}
+                      <td style={{ ...tdStyle, color: (t.net_pnl_estimate_usd ?? 0) >= 0 ? '#4ade80' : '#f87171', textAlign: 'right' }}>
+                        {fired ? fmt$(t.net_pnl_scaled, 0) : '—'}
+                      </td>
+                      <td style={{ ...tdStyle, color: netColor }}>{fmt$(t.hypothetical_scaled, 0)}</td>
+                      <td style={{ ...tdStyle, color: deltaColor, fontWeight: 700 }}>{fmt$(t.delta_scaled, 0)}</td>
                     </tr>
                   );
                 })}
                 {sorted.length === 0 && (
-                  <tr><td colSpan={15} style={{ padding: 24, color: '#556', textAlign: 'center' }}>
+                  <tr><td colSpan={17} style={{ padding: 24, color: '#556', textAlign: 'center' }}>
                     {loading ? '' : 'No trades match filter'}
                   </td></tr>
                 )}
@@ -776,16 +860,49 @@ function Stage1BandCard({
   cells,
   bestCell,
   summary,
+  lots,
+  baselineMetrics,
   onViewTrades,
 }: {
   band: string;
   cells: Stage1Cell[];
   bestCell: Stage1BestCell | null;
   summary: Stage1BandSummary | null;
+  lots: number;
+  baselineMetrics?: Stage1PerBandRule['baseline_metrics'];
   onViewTrades?: () => void;
 }) {
   const [selector, setSelector] = useState<'avg_pnl' | 'composite'>('avg_pnl');
   const [expandedCell, setExpandedCell] = useState<string | null>(null);
+
+  const lotsScale = lots / 100;
+  const sc = (v: number | null | undefined) => v != null ? v * lotsScale : v;
+
+  // Derive band's baseline (no-stage-1) aggregates by finding any cell where
+  // both `*_hyp` and `delta_*` are non-null, then computing actual = hyp - delta.
+  // The baseline is the same across all cells in the band, so this is safe.
+  const baseline = useMemo(() => {
+    let actualAvg: number | null = null;
+    let actualWinRate: number | null = null;
+    let actualMaxLoss: number | null = null;
+    let actualCvar: number | null = null;
+    for (const c of cells) {
+      if (actualAvg == null && c.avg_hyp_pnl != null && c.delta_avg_pnl != null) {
+        actualAvg = c.avg_hyp_pnl - c.delta_avg_pnl;
+      }
+      if (actualWinRate == null && c.win_rate_hyp != null && c.delta_win_rate != null) {
+        actualWinRate = c.win_rate_hyp - c.delta_win_rate;
+      }
+      if (actualMaxLoss == null && c.max_loss_hyp != null && c.delta_max_loss != null) {
+        actualMaxLoss = c.max_loss_hyp - c.delta_max_loss;
+      }
+      if (actualCvar == null && c.cvar_95_net_hyp != null && c.delta_cvar_95 != null) {
+        actualCvar = c.cvar_95_net_hyp - c.delta_cvar_95;
+      }
+      if (actualAvg != null && actualWinRate != null && actualMaxLoss != null && actualCvar != null) break;
+    }
+    return { actualAvg, actualWinRate, actualMaxLoss, actualCvar };
+  }, [cells]);
 
   const bandVerdict = bestCell?.band_verdict ?? '';
   const nTotal = bestCell?.n_total ?? summary?.n_total ?? 0;
@@ -838,7 +955,8 @@ function Stage1BandCard({
         </span>
         {summary && (
           <span style={{ fontSize: 10, color: '#556', marginLeft: 'auto' }}>
-            SL_avg: {fmtAbs$(summary.sl_avg)} L_avg: {fmtAbs$(summary.l_avg)} W_avg: {fmtAbs$(summary.w_avg)}
+            SL_avg: {fmtAbs$(sc(summary.sl_avg))} L_avg: {fmtAbs$(sc(summary.l_avg))} W_avg: {fmtAbs$(sc(summary.w_avg))}
+            <span style={{ color: '#2a3a2a', marginLeft: 4 }}>×{lots}L</span>
           </span>
         )}
         {onViewTrades && (
@@ -894,7 +1012,7 @@ function Stage1BandCard({
           <span>
             <span style={{ color: '#7a9bb5' }}>Δ avg P&L: </span>
             <strong style={{ color: (highlightedCell.delta_avg_pnl ?? 0) > 0 ? '#4ade80' : '#f87171' }}>
-              {fmt$(highlightedCell.delta_avg_pnl, 1)}
+              {fmt$(sc(highlightedCell.delta_avg_pnl), 1)}
             </strong>
           </span>
           <span>
@@ -906,7 +1024,7 @@ function Stage1BandCard({
           <span>
             <span style={{ color: '#7a9bb5' }}>EV/trade: </span>
             <strong style={{ color: (highlightedCell.ev_per_trade ?? 0) > 0 ? '#4ade80' : '#f87171' }}>
-              {fmt$(highlightedCell.ev_per_trade, 1)}
+              {fmt$(sc(highlightedCell.ev_per_trade), 1)}
             </strong>
           </span>
           <span>
@@ -945,7 +1063,8 @@ function Stage1BandCard({
                   const c = cellMap[key];
                   const isHighlight = key === highlightKey;
                   const isTighterSl = ef === 1.0;
-                  const delta = c?.delta_avg_pnl ?? null;
+                  // Apply lotsScale so heatmap matches CellDetail dollar values
+                  const delta = c?.delta_avg_pnl != null ? c.delta_avg_pnl * lotsScale : null;
                   return (
                     <td
                       key={tl}
@@ -972,7 +1091,13 @@ function Stage1BandCard({
 
       {/* Expanded cell detail */}
       {expandedCell && cellMap[expandedCell] && (
-        <CellDetail cell={cellMap[expandedCell]} />
+        <CellDetail
+          cell={cellMap[expandedCell]}
+          lotsScale={lotsScale}
+          baseline={baseline}
+          baselineMetrics={baselineMetrics}
+          lots={lots}
+        />
       )}
     </div>
   );
@@ -980,46 +1105,497 @@ function Stage1BandCard({
 
 // ─── CellDetail ───────────────────────────────────────────────────────────────
 
-function CellDetail({ cell }: { cell: Stage1Cell }) {
-  const rows: [string, string][] = [
-    ['Status', cell.status],
-    ['Exit frac', `${(cell.exit_frac * 100).toFixed(0)}%`],
-    ['Trigger', TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level],
-    ['Trigger MTM', fmtAbs$(cell.trigger_mtm)],
-    ['n_total', fmtN(cell.n_total)],
-    ['n_A (no fire)', fmtN(cell.n_A)],
-    ['n_B_reliable', fmtN(cell.n_B_reliable)],
-    ['n_B_unreliable', fmtN(cell.n_B_unreliable)],
-    ['n_C (fires)', fmtN(cell.n_C)],
-    ['n_C_deeper (saved)', fmtN(cell.n_C_deeper)],
-    ['n_C_recovered (hurt)', fmtN(cell.n_C_recovered)],
-    ['C_recovered share', fmtPct(cell.c_recovered_share)],
-    ['avg saved/trade (C_deeper)', fmt$(cell.avg_save_per_c_deeper, 1)],
-    ['avg hurt/trade (C_recovered)', fmt$(cell.avg_hurt_per_c_recovered, 1)],
-    ['pct_B_unreliable', fmtPct(cell.pct_B_unreliable)],
-    ['EV/trade', fmt$(cell.ev_per_trade, 1)],
-    ['Δ avg P&L', fmt$(cell.delta_avg_pnl, 1)],
-    ['Δ win rate', fmtPct(cell.delta_win_rate)],
-    ['Δ CVaR-95', fmt$(cell.delta_cvar_95, 1)],
-    ['Δ max loss', fmt$(cell.delta_max_loss, 1)],
-    ['Δ max consec losses', fmtN(cell.delta_max_consec_losses)],
-    ['Hyp avg P&L', fmt$(cell.avg_hyp_pnl, 1)],
-    ['Hyp win rate', fmtPct(cell.win_rate_hyp)],
-    ['Composite v2 (hyp)', cell.composite_score_v2?.toFixed(4) ?? '—'],
+function CellDetail({
+  cell, lotsScale = 1, baseline, baselineMetrics, lots,
+}: {
+  cell: Stage1Cell;
+  lotsScale?: number;
+  baseline?: { actualAvg: number | null; actualWinRate: number | null; actualMaxLoss: number | null; actualCvar: number | null };
+  baselineMetrics?: Stage1PerBandRule['baseline_metrics'];
+  lots?: number;
+}) {
+  const sc = (v: number | null | undefined) => v != null ? v * lotsScale : v;
+  const triggerStr = `${fmtAbs$(sc(cell.trigger_mtm))}`;
+
+  // Derive missing hyp values from delta + baseline (algebra: hyp = actual + delta).
+  // Prefer baselineMetrics (always available from best-combo); fall back to cells-recovered baseline.
+  const bmAvg = baselineMetrics?.avg_net_pnl ?? null;
+  const bmWR = baselineMetrics?.win_rate ?? null;
+  const actualAvgPnl = bmAvg ?? baseline?.actualAvg ?? null;
+  const actualWinRate = bmWR ?? baseline?.actualWinRate ?? null;
+  const derivedHypAvg = cell.avg_hyp_pnl != null
+    ? cell.avg_hyp_pnl
+    : (actualAvgPnl != null && cell.delta_avg_pnl != null
+        ? actualAvgPnl + cell.delta_avg_pnl
+        : null);
+  const derivedHypWinRate = cell.win_rate_hyp != null
+    ? cell.win_rate_hyp
+    : (actualWinRate != null && cell.delta_win_rate != null
+        ? actualWinRate + cell.delta_win_rate
+        : null);
+  const hypAvgIsDerived = cell.avg_hyp_pnl == null && derivedHypAvg != null;
+  const hypWinIsDerived = cell.win_rate_hyp == null && derivedHypWinRate != null;
+  const nA = cell.n_A ?? 0;
+  const nBr = cell.n_B_reliable ?? 0;
+  const nBu = cell.n_B_unreliable ?? 0;
+  const nC = cell.n_C ?? 0;
+  const nCd = cell.n_C_deeper ?? 0;
+  const nCr = cell.n_C_recovered ?? 0;
+  const efPct = `${(cell.exit_frac * 100).toFixed(0)}%`;
+  const savedStr = fmt$(sc(cell.avg_save_per_c_deeper), 1);
+  const hurtStr = fmt$(sc(cell.avg_hurt_per_c_recovered), 1);
+
+  type RowDef = { label: string; value: string; explain: string; section?: string };
+  const rows: RowDef[] = [
+    // ── Setup ──────────────────────────────────────────────────────────────────
+    {
+      section: 'Setup',
+      label: 'Status', value: cell.status,
+      explain: '"ok" = reference level defined, enough trades. "trigger_undefined" = no trades in the subgroup that defines this trigger (e.g. no SL-hit trades for an SL-avg trigger).',
+    },
+    {
+      label: 'Exit frac', value: efPct,
+      explain: `Close ${efPct} of lots at the trigger. The other ${(100 - cell.exit_frac * 100).toFixed(0)}% stay on and exit normally at the original rule's end time / SL.`,
+    },
+    {
+      label: 'Trigger', value: TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level,
+      explain: 'The reference level that sets the MTM threshold. "25% SL" = 25% of the average SL-hit trough. "L-avg" = average trough of losing trades. "W-avg" = average trough of winning trades.',
+    },
+    {
+      label: 'Trigger MTM', value: triggerStr,
+      explain: `Stage-1 fires when the position's mark-to-market (cumulative USD change on both legs) dips TO or BELOW ${triggerStr}. This is the moment you close ${efPct} of lots.`,
+    },
+    // ── Trade counts ───────────────────────────────────────────────────────────
+    {
+      section: 'Trade counts (out of n_total)',
+      label: 'n_total', value: fmtN(cell.n_total),
+      explain: 'All trades for this band + rule + optional filters. Every metric is computed over these trades.',
+    },
+    {
+      label: 'n_A  (no fire)', value: fmtN(nA),
+      explain: `${nA} trades whose intraday trough never reached ${triggerStr}. Stage-1 does nothing — the full position exits at the original rule. P&L is unchanged. Example: a winner that only dipped to -$20 when trigger is -$29.`,
+    },
+    {
+      label: 'n_B_reliable  (winner dipped)', value: fmtN(nBr),
+      explain: `${nBr} winning trades (final P&L ≥ 0) that DID dip below ${triggerStr}, and whose peak came AFTER their trough (reliable timing). Stage-1 fires — you close ${efPct} at ${triggerStr}, then the remaining ${(100 - cell.exit_frac * 100).toFixed(0)}% rides to the positive final exit. You gave up some recovery profit on the exited fraction. Avg cost: ${hurtStr !== '—' ? hurtStr : 'see EV'} per trade.`,
+    },
+    {
+      label: 'n_B_unreliable  (peak before trough)', value: fmtN(nBu),
+      explain: `${nBu} winner trades where the best price came BEFORE the worst — meaning the position peaked before it troughed. The timing of the exit matters here. These are excluded from the headline EV (included in "audited EV" only) because the fill timing assumption is unreliable.`,
+    },
+    {
+      label: 'n_C  (fires on losers)', value: fmtN(nC),
+      explain: `${nC} losing trades (final P&L < 0) where stage-1 fired. Each gets split into C_deeper or C_recovered depending on whether the trade got worse or partially recovered after the trigger.`,
+    },
+    {
+      label: 'n_C_deeper  (saved)', value: fmtN(nCd),
+      explain: `${nCd} losing trades that kept moving AGAINST you after the trigger (final loss deeper than ${triggerStr}). Stage-1 helped — you closed ${efPct} early at ${triggerStr}, avoiding part of the further loss. Avg saving: ${savedStr} per trade. Example: trigger fires at -$29, trade ends at -$152 → you saved on the ${efPct} of lots that exited at -$29 instead of -$152.`,
+    },
+    {
+      label: 'n_C_recovered  (stage-1 hurts)', value: fmtN(nCr),
+      explain: `${nCr} losing trades that RECOVERED above ${triggerStr} after the trigger fired but still ended negative. Stage-1 hurt here — you closed ${efPct} at the worst point, but the position partially recovered. The exited fraction missed the recovery. Avg cost: ${hurtStr} per trade.`,
+    },
+    {
+      label: 'C_recovered share', value: fmtPct(cell.c_recovered_share),
+      explain: `${fmtPct(cell.c_recovered_share)} of loser-fired trades (n_C) fell into the C_recovered bucket. High values (≥30%) mean stage-1 frequently fires on losers that would have partially recovered — consider a tighter trigger or smaller exit_frac.`,
+    },
+    // ── Magnitudes ─────────────────────────────────────────────────────────────
+    {
+      section: 'Magnitudes',
+      label: 'avg saved/trade  (C_deeper)', value: savedStr,
+      explain: `Average $ saved per C_deeper trade = exit_frac × |trigger − final_net_pnl|. For each saved trade: you closed ${efPct} of lots at ${triggerStr} instead of at the deeper final loss. Positive = good. Computed over ${nCd} trade(s).`,
+    },
+    {
+      label: 'avg given-up/trade  (B_reliable)', value: fmt$(sc(cell.avg_given_up), 1),
+      explain: cell.avg_given_up == null
+        ? `Shows "—" because n_B_reliable = 0 — no winners dipped to the trigger, so nothing to average.`
+        : `Average $ given UP per B_reliable trade = exit_frac × (final_net_pnl − trigger). These are the ${nBr} winners that dipped to the trigger but recovered — you closed ${efPct} of lots at ${triggerStr} (a loss for that fraction), and missed the recovery on that fraction. Negative sign = bad (you paid this cost on every B_reliable trade).`,
+    },
+    {
+      label: 'avg hurt/trade  (C_recovered)', value: hurtStr,
+      explain: hurtStr === '—'
+        ? `Shows "—" because n_C_recovered = 0 — no loser trades recovered above the trigger, so there's nothing to average.`
+        : `Average $ given up per C_recovered trade = exit_frac × |final_net_pnl − trigger|. Different from "given-up" above: these are LOSER trades that still ended negative but recovered above the trigger after firing. Stage-1 locked in trigger MTM for ${efPct} of lots, but those lots would have ended at a higher (less negative) final value. Computed over ${nCr} trade(s).`,
+    },
+    {
+      label: 'pct_B_unreliable', value: fmtPct(cell.pct_B_unreliable),
+      explain: `${fmtPct(cell.pct_B_unreliable)} of all B trades (winner-fired) had their peak BEFORE their trough. High % means the timing assumption is shaky for this trigger level — fill might differ from modeled.`,
+    },
+    // ── P&L impact ─────────────────────────────────────────────────────────────
+    {
+      section: 'P&L impact vs baseline (no stage-1)',
+      label: 'EV/trade', value: fmt$(sc(cell.ev_per_trade), 1),
+      explain: `Expected value per trade = (n_C_deeper/n) × avg_saved − (n_B_reliable/n) × avg_given_up. This is the net benefit of stage-1 averaged across ALL trades (most don't fire). Here: (${nCd}/${cell.n_total}) saves minus (${nBr}/${cell.n_total}) giveaways = ${fmt$(sc(cell.ev_per_trade), 1)}.`,
+    },
+    {
+      label: 'Δ avg P&L', value: fmt$(sc(cell.delta_avg_pnl), 1),
+      explain: `Average P&L per trade WITH stage-1 minus WITHOUT. Equivalent to EV/trade when B_unreliable = 0. ${(cell.delta_avg_pnl ?? 0) < 0 ? 'Negative here — stage-1 costs more from B trades than it saves from C trades.' : 'Positive — stage-1 adds value on average.'}`,
+    },
+    {
+      label: 'Δ win rate', value: fmtPct(cell.delta_win_rate),
+      explain: 'Change in win rate (trades ending positive ÷ total). B_reliable trades can flip from winner to loser if stage-1 locks in more than their final profit. Positive = more winners with stage-1.',
+    },
+    {
+      label: 'Δ CVaR-95', value: fmt$(sc(cell.delta_cvar_95), 1),
+      explain: 'Change in conditional value-at-risk (average of worst 5% of trades). Positive = worst-case trades are less bad with stage-1. Even when EV is negative, CVaR improvement can still justify stage-1 for risk reduction.',
+    },
+    {
+      label: 'Δ max loss', value: fmt$(sc(cell.delta_max_loss), 1),
+      explain: 'Change in single worst trade P&L. Positive = the worst trade is less bad with stage-1 (because stage-1 exited part of the position before it hit full depth).',
+    },
+    {
+      label: 'Δ max consec losses', value: fmtN(cell.delta_max_consec_losses),
+      explain: 'Change in maximum consecutive losing trades. Negative would mean stage-1 converts some winners to losers (B_reliable flipping), increasing streaks. Positive means fewer consecutive losses.',
+    },
+    {
+      label: 'Hyp avg P&L', value: fmt$(sc(derivedHypAvg), 1) + (hypAvgIsDerived ? ' †' : ''),
+      explain: derivedHypAvg == null
+        ? `Cannot derive — no baseline available (best-combo row missing) and no cell in this band has a non-null avg_hyp_pnl. Δ avg P&L above still shows the change vs baseline.`
+        : hypAvgIsDerived
+          ? `† Derived from baseline: actual_avg_P&L = ${fmt$(sc(actualAvgPnl), 1)} (from best-combo row), then this cell's hyp = baseline + Δ avg P&L = ${fmt$(sc(actualAvgPnl), 1)} + ${fmt$(sc(cell.delta_avg_pnl), 1)} = ${fmt$(sc(derivedHypAvg), 1)}. Same as: exit_frac × trigger + (1 − exit_frac) × actual_net_pnl, averaged.`
+          : `Average P&L WITH stage-1 applied. Formula per trade: exit_frac × trigger + (1 − exit_frac) × actual_net_pnl. The exited fraction locks in trigger MTM; the rest exits normally.`,
+    },
+    {
+      label: 'Hyp win rate', value: fmtPct(derivedHypWinRate) + (hypWinIsDerived ? ' †' : ''),
+      explain: derivedHypWinRate == null
+        ? `Cannot derive — no baseline available and no cell in this band has a non-null win_rate_hyp.`
+        : hypWinIsDerived
+          ? `† Derived from baseline: actual_win_rate = ${fmtPct(actualWinRate)} (from best-combo row), hyp = baseline + Δ win rate = ${fmtPct(actualWinRate)} + ${fmtPct(cell.delta_win_rate)} = ${fmtPct(derivedHypWinRate)}.`
+          : `Win rate on hypothetical P&L. Some B_reliable trades may flip to losers if stage-1 locks in more loss than the final gain.`,
+    },
+    {
+      label: 'Composite v2 (hyp)', value: cell.composite_score_v2?.toFixed(4) ?? '—',
+      explain: 'Normalised composite score (0–1) across all 20 cells in this band. Ranks cells by a blend of sortino, calmar, and CVaR. Higher = better risk-adjusted profile. Normalised within this band only — not comparable across bands.',
+    },
   ];
+
+  // Baseline metrics from best-combo (per-trade values are scaled by lots/100 for "scaled" display)
+  const bm = baselineMetrics;
+  const totalScale = (lots ?? 100) / 100;
+
+  // ── Comparison rows: baseline → stage-1 → Δ ──
+  // direction: 'pos' = positive Δ is better (green ↑), 'neg' = negative Δ is better (green ↓), 'neutral' = no preference
+  type CmpRow = { label: string; baseline: string; stage1: string; delta: string; deltaColor: string; arrow: string; note?: string };
+  const cmpRows: CmpRow[] = [];
+
+  if (bm) {
+    // Helper to format a comparison row
+    const fmtDelta = (raw: number | null, isPositiveBetter: boolean, asPct = false): { delta: string; color: string; arrow: string } => {
+      if (raw == null || isNaN(raw)) return { delta: '—', color: '#7a9bb5', arrow: '' };
+      const better = isPositiveBetter ? raw > 0 : raw < 0;
+      const same = Math.abs(raw) < 1e-9;
+      const arrow = same ? '−' : (raw > 0 ? '↑' : '↓');
+      const color = same ? '#7a9bb5' : (better ? '#4ade80' : '#f87171');
+      const s = asPct ? `${(raw * 100 >= 0 ? '+' : '')}${(raw * 100).toFixed(2)}%` : `${raw >= 0 ? '+' : ''}$${raw.toFixed(2)}`;
+      return { delta: s, color, arrow };
+    };
+
+    // 1) Avg net P&L
+    const baseAvg = bm.avg_net_pnl != null ? bm.avg_net_pnl * totalScale : null;
+    const deltaAvg = cell.delta_avg_pnl != null ? cell.delta_avg_pnl * lotsScale : null;
+    const stageAvg = baseAvg != null && deltaAvg != null ? baseAvg + deltaAvg : null;
+    const dA = fmtDelta(deltaAvg, true);
+    cmpRows.push({
+      label: 'Avg net P&L',
+      baseline: baseAvg != null ? `$${baseAvg.toFixed(2)}` : '—',
+      stage1: stageAvg != null ? `$${stageAvg.toFixed(2)}` : '—',
+      delta: dA.delta, deltaColor: dA.color, arrow: dA.arrow,
+    });
+
+    // 2) Total net P&L
+    const baseTot = bm.avg_net_pnl != null && bm.n_trades ? bm.avg_net_pnl * bm.n_trades * totalScale : null;
+    const stageTot = stageAvg != null && bm.n_trades ? stageAvg * bm.n_trades : null;
+    const deltaTot = baseTot != null && stageTot != null ? stageTot - baseTot : null;
+    const dT = fmtDelta(deltaTot, true);
+    cmpRows.push({
+      label: 'Total net P&L',
+      baseline: baseTot != null ? `$${baseTot.toFixed(2)}` : '—',
+      stage1: stageTot != null ? `$${stageTot.toFixed(2)}` : '—',
+      delta: dT.delta, deltaColor: dT.color, arrow: dT.arrow,
+    });
+
+    // 3) Win rate
+    const baseWR = bm.win_rate;
+    const stageWR = baseWR != null && cell.delta_win_rate != null ? baseWR + cell.delta_win_rate : null;
+    const dW = fmtDelta(cell.delta_win_rate, true, true);
+    cmpRows.push({
+      label: 'Win rate',
+      baseline: baseWR != null ? `${(baseWR * 100).toFixed(2)}%` : '—',
+      stage1: stageWR != null ? `${(stageWR * 100).toFixed(2)}%` : '—',
+      delta: dW.delta, deltaColor: dW.color, arrow: dW.arrow,
+    });
+
+    // 4) Largest loss (less-bad = better)
+    const baseML = bm.max_loss_usd != null ? bm.max_loss_usd * totalScale : null;
+    const deltaML = cell.delta_max_loss != null ? cell.delta_max_loss * lotsScale : null;
+    const stageML = baseML != null && deltaML != null ? baseML + deltaML : null;
+    const dML = fmtDelta(deltaML, true);
+    cmpRows.push({
+      label: 'Largest loss',
+      baseline: baseML != null ? `$${baseML.toFixed(2)}` : '—',
+      stage1: stageML != null ? `$${stageML.toFixed(2)}` : '—',
+      delta: dML.delta, deltaColor: dML.color, arrow: dML.arrow,
+      note: 'positive Δ = less negative = better',
+    });
+
+    // 5) Max consec losses (lower = better)
+    const baseMCL = bm.max_consec_losses;
+    const stageMCL = baseMCL != null && cell.delta_max_consec_losses != null ? baseMCL + cell.delta_max_consec_losses : null;
+    const dMCL = cell.delta_max_consec_losses != null
+      ? { delta: `${cell.delta_max_consec_losses > 0 ? '+' : ''}${cell.delta_max_consec_losses}`,
+          color: cell.delta_max_consec_losses < 0 ? '#4ade80' : cell.delta_max_consec_losses > 0 ? '#f87171' : '#7a9bb5',
+          arrow: cell.delta_max_consec_losses < 0 ? '↓' : cell.delta_max_consec_losses > 0 ? '↑' : '−' }
+      : { delta: '—', color: '#7a9bb5', arrow: '' };
+    cmpRows.push({
+      label: 'Max consec losses',
+      baseline: baseMCL != null ? String(baseMCL) : '—',
+      stage1: stageMCL != null ? String(stageMCL) : '—',
+      delta: dMCL.delta, deltaColor: dMCL.color, arrow: dMCL.arrow,
+      note: 'lower = better',
+    });
+
+    // 6) n wins / n losses (derived from win-rate change)
+    if (bm.n_trades && bm.n_wins != null && bm.n_losses != null && stageWR != null) {
+      const stageWins = Math.round(stageWR * bm.n_trades);
+      const stageLosses = bm.n_trades - stageWins;
+      const dwins = stageWins - bm.n_wins;
+      cmpRows.push({
+        label: 'n wins / n losses',
+        baseline: `${bm.n_wins} / ${bm.n_losses}`,
+        stage1: `${stageWins} / ${stageLosses}`,
+        delta: `${dwins >= 0 ? '+' : ''}${dwins} / ${dwins >= 0 ? '−' : '+'}${Math.abs(dwins)}`,
+        deltaColor: dwins > 0 ? '#4ade80' : dwins < 0 ? '#f87171' : '#7a9bb5',
+        arrow: dwins > 0 ? '↑' : dwins < 0 ? '↓' : '−',
+      });
+    }
+  }
+
+  // ── Baseline reference data, split by reason it lacks a stage-1 equivalent ──
+  const sx = (v: number | null | undefined) => v != null ? `$${(v * totalScale).toFixed(2)}` : '—';
+
+  // A. TRULY UNCHANGED — set at trade entry, before stage-1 can fire
+  const baselineEntryOnly: [string, string][] = bm ? [
+    ['Avg credit / margin', `${bm.avg_credit != null ? '$' + bm.avg_credit.toFixed(0) : '—'} / ${bm.avg_margin != null ? '$' + bm.avg_margin.toFixed(0) : '—'}`],
+    ['Lots', String(bm.lots ?? lots ?? '—')],
+  ] : [];
+
+  // B. WOULD CHANGE — backend doesn't compute the hyp version yet (F-tracked: F2-F5).
+  //    Listing these as BASELINE values for context; stage-1 versions are computable but missing.
+  const baselineDerivable: [string, string][] = bm ? [
+    ['Composite v2 (baseline)', bm.composite_score?.toFixed(4) ?? '—'],
+    ['Avg win / Avg loss', `${sx(bm.avg_win_usd)} / ${sx(bm.avg_loss_usd)}`],
+    ['Largest win', sx(bm.max_win_usd)],
+    ['Ret / margin', bm.avg_pct_return_on_margin != null ? `${(bm.avg_pct_return_on_margin * 100).toFixed(2)}%` : '—'],
+    ['Ret / credit', bm.avg_pct_return_on_credit != null ? `${(bm.avg_pct_return_on_credit * 100).toFixed(2)}%` : '—'],
+    ['Hit % (rule)', bm.n_rule_trigger != null && bm.n_trades ? `${((bm.n_rule_trigger / bm.n_trades) * 100).toFixed(0)}%` : '—'],
+    ['SL hits', String(bm.n_premium_sl_hit ?? '—')],
+    ['Avg winner exit', bm.avg_winner_exit_offset_minutes != null ? `${Math.floor(bm.avg_winner_exit_offset_minutes/60)}h ${Math.round(bm.avg_winner_exit_offset_minutes%60)}m` : '—'],
+    ['Avg loser exit', bm.avg_loser_exit_offset_minutes != null ? `${Math.floor(bm.avg_loser_exit_offset_minutes/60)}h ${Math.round(bm.avg_loser_exit_offset_minutes%60)}m` : '—'],
+  ] : [];
+
+  // C. WOULD CHANGE — but stage-1 version requires path-walking (X1 blocker)
+  //    The surviving (1-exit_frac) portion has its OWN MTM trajectory after trigger.
+  //    Listed as BASELINE only; cannot compute hyp without per-minute leg price walking.
+  const baselineMtmTrajectory: [string, string][] = bm ? [
+    ['Avg max MTM (Winners)', sx(bm.avg_max_mtm_winners)],
+    ['Avg min MTM (Winners)', sx(bm.avg_min_mtm_winners)],
+    ['Max MTM (Winners)', sx(bm.max_mtm_winners)],
+    ['Min MTM (Winners)', sx(bm.min_mtm_winners)],
+    ['Avg max MTM (Losers)', sx(bm.avg_max_mtm_losers)],
+    ['Avg min MTM (Losers)', sx(bm.avg_min_mtm_losers)],
+    ['Max MTM (Losers)', sx(bm.max_mtm_losers)],
+    ['Min MTM (Losers)', sx(bm.min_mtm_losers)],
+    ['Avg exit MTM', sx(bm.avg_exit_mtm)],
+    ['Avg win MTM', sx(bm.avg_win_mtm)],
+    ['Largest win MTM', sx(bm.largest_win_mtm)],
+    ['Avg loss MTM', sx(bm.avg_loss_mtm)],
+    ['Largest loss MTM', sx(bm.largest_loss_mtm)],
+    ['W < avg min MTM', String(bm.n_winners_below_avg_min_mtm ?? '—')],
+    ['L > avg max MTM', String(bm.n_losers_above_avg_max_mtm ?? '—')],
+    ['Peak %', bm.avg_pct_max_mtm_on_credit != null ? `${(bm.avg_pct_max_mtm_on_credit * 100).toFixed(2)}%` : '—'],
+    ['Trough %', bm.avg_pct_min_mtm_on_credit != null ? `${(bm.avg_pct_min_mtm_on_credit * 100).toFixed(2)}%` : '—'],
+  ] : [];
+
+  // Group stage-1 rows by section
+  const sections = new Map<string, RowDef[]>();
+  let currentSection = 'Setup';
+  for (const r of rows) {
+    if (r.section) currentSection = r.section;
+    if (!sections.has(currentSection)) sections.set(currentSection, []);
+    sections.get(currentSection)!.push(r);
+  }
+
+  const sectionHeader = (text: string, color = '#1f6feb'): React.ReactNode => (
+    <div style={{
+      gridColumn: '1 / -1', marginTop: 6, paddingBottom: 3, marginBottom: 4,
+      borderBottom: `1px solid ${color}44`,
+      color, fontWeight: 700, fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase',
+    }}>{text}</div>
+  );
+
+  const compactItem = (label: string, value: string): React.ReactNode => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '2px 0' }}>
+      <span style={{ color: '#7a9bb5', fontSize: 10 }}>{label}:</span>
+      <span style={{ color: '#cfd9e3', fontWeight: 600, fontSize: 11, fontFamily: 'monospace', textAlign: 'right' }}>{value}</span>
+    </div>
+  );
 
   return (
     <div style={{
-      marginTop: 8, background: '#0d1421', borderRadius: 4, padding: 10,
-      display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '4px 16px',
-      fontSize: 11,
+      marginTop: 8, background: '#0d1421', borderRadius: 4, padding: 12, fontSize: 11,
     }}>
-      {rows.map(([label, val]) => (
-        <div key={label} style={{ display: 'flex', gap: 4 }}>
-          <span style={{ color: '#7a9bb5', minWidth: 130 }}>{label}:</span>
-          <span style={{ color: '#cfd9e3', fontWeight: 500 }}>{val}</span>
-        </div>
-      ))}
+      {/* ── BLOCK 1A: Comparison table (Baseline → Stage-1 → Δ) ─────────────── */}
+      {cmpRows.length > 0 && (
+        <>
+          <div style={{
+            color: '#fbbf24', fontWeight: 700, fontSize: 11, letterSpacing: 0.5,
+            textTransform: 'uppercase', paddingBottom: 4, borderBottom: '1px solid #fbbf2444',
+            marginBottom: 8,
+          }}>
+            Comparison · Baseline → Stage-1 ({(cell.exit_frac * 100).toFixed(0)}% @ {TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level})
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14, fontSize: 11 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Metric</th>
+                <th style={{ textAlign: 'right', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Baseline (no stage-1)</th>
+                <th style={{ textAlign: 'right', color: '#4ade80', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Stage-1 (this cell)</th>
+                <th style={{ textAlign: 'right', color: '#7a9bb5', padding: '4px 8px', fontWeight: 500, fontSize: 10 }}>Δ Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cmpRows.map((r, i) => (
+                <tr key={i} style={{ borderTop: '1px solid #14202e' }}>
+                  <td style={{ padding: '4px 8px', color: '#cfd9e3' }}>
+                    {r.label}
+                    {r.note && <span style={{ color: '#556', fontSize: 9, marginLeft: 6, fontStyle: 'italic' }}>({r.note})</span>}
+                  </td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right', color: '#cfd9e3', fontFamily: 'monospace' }}>{r.baseline}</td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right', color: '#cfd9e3', fontFamily: 'monospace', fontWeight: 600 }}>{r.stage1}</td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right', color: r.deltaColor, fontFamily: 'monospace', fontWeight: 700 }}>
+                    {r.delta} <span style={{ fontSize: 12 }}>{r.arrow}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {/* ── BLOCK 1B: Truly unchanged (entry-only) ──────────────────────────── */}
+      {baselineEntryOnly.length > 0 && (
+        <>
+          <div style={{
+            color: '#fbbf24aa', fontWeight: 600, fontSize: 10, letterSpacing: 0.5,
+            textTransform: 'uppercase', paddingBottom: 3, borderBottom: '1px solid #fbbf2422',
+            marginBottom: 4,
+          }}>
+            Entry-time values · truly unchanged by stage-1
+          </div>
+          <div style={{ color: '#556', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>
+            Set when the position opens, before any stage-1 logic can fire.
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
+            marginBottom: 14,
+          }}>
+            {baselineEntryOnly.map(([l, v]) => (
+              <div key={l}>{compactItem(l, v)}</div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* ── BLOCK 1C: Would change but hyp not computed (backend gap) ────────── */}
+      {baselineDerivable.length > 0 && (
+        <>
+          <div style={{
+            color: '#fbbf24aa', fontWeight: 600, fontSize: 10, letterSpacing: 0.5,
+            textTransform: 'uppercase', paddingBottom: 3, borderBottom: '1px solid #fbbf2422',
+            marginBottom: 4,
+          }}>
+            Baseline values · stage-1 hyp computable but not yet returned by backend (F-tracked)
+          </div>
+          <div style={{ color: '#556', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>
+            These DO change under stage-1 (since trade-level hyp net P&L is known), but the backend doesn't aggregate hyp win/loss splits or hyp returns per cell yet. See <code style={{ color: '#7a9bb5' }}>docs/stage1_future_work.md</code> F2–F5.
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
+            marginBottom: 14,
+          }}>
+            {baselineDerivable.map(([l, v]) => (
+              <div key={l}>{compactItem(l, v)}</div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* ── BLOCK 1D: MTM trajectory — path-walking required (X1 blocker) ────── */}
+      {baselineMtmTrajectory.length > 0 && (
+        <>
+          <div style={{
+            color: '#f8717177', fontWeight: 600, fontSize: 10, letterSpacing: 0.5,
+            textTransform: 'uppercase', paddingBottom: 3, borderBottom: '1px solid #f8717122',
+            marginBottom: 4,
+          }}>
+            Baseline MTM trajectory · stage-1 hyp blocked (X1 — needs path-walking)
+          </div>
+          <div style={{ color: '#556', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>
+            These DO change under stage-1, but the surviving (1−exit_frac) portion has its OWN MTM trajectory after the trigger fires, which requires minute-by-minute leg price walking. The current cache only stores aggregate min/max MTM per trade. See <code style={{ color: '#7a9bb5' }}>docs/stage1_future_work.md</code> X1.
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
+            marginBottom: 14,
+          }}>
+            {baselineMtmTrajectory.map(([l, v]) => (
+              <div key={l}>{compactItem(l, v)}</div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* ── BLOCK 2: Stage-1 cell — all data, compact ───────────────────────────── */}
+      <div style={{
+        color: '#4ade80', fontWeight: 700, fontSize: 11, letterSpacing: 0.5,
+        textTransform: 'uppercase', paddingBottom: 4, borderBottom: '1px solid #4ade8044',
+        marginBottom: 8,
+      }}>
+        Stage-1 cell · {(cell.exit_frac * 100).toFixed(0)}% exit @ {TRIGGER_LABELS[cell.trigger_level] ?? cell.trigger_level}
+      </div>
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0 16px',
+        marginBottom: 14,
+      }}>
+        {[...sections.entries()].map(([sec, secRows]) => (
+          <React.Fragment key={sec}>
+            {sectionHeader(sec, '#4ade80')}
+            {secRows.map((r, i) => (
+              <div key={`${sec}-${i}`}>{compactItem(r.label, r.value)}</div>
+            ))}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {/* ── BLOCK 3: What each metric means ─────────────────────────────────────── */}
+      <div style={{
+        color: '#60a5fa', fontWeight: 700, fontSize: 11, letterSpacing: 0.5,
+        textTransform: 'uppercase', paddingBottom: 4, borderBottom: '1px solid #60a5fa44',
+        marginBottom: 8,
+      }}>
+        What each metric means
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {rows.map((r, i) => (
+          <div key={`def-${i}`} style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12 }}>
+            <span style={{ color: '#7a9bb5', fontSize: 10, fontFamily: 'monospace', paddingTop: 2 }}>
+              {r.label}
+            </span>
+            <span style={{ color: '#8fa8c0', fontSize: 10, lineHeight: 1.5 }}>
+              {r.explain}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1285,6 +1861,8 @@ export function M7Stage1Panel({
               cells={cellsByBand[band] ?? []}
               bestCell={bestByBand[band] ?? null}
               summary={summaryByBand[band] ?? null}
+              lots={resolvedRules[band]?.lots ?? 100}
+              baselineMetrics={resolvedRules[band]?.baseline_metrics ?? null}
               onViewTrades={() => setTradesModal(band)}
             />
           ))}
@@ -1320,6 +1898,7 @@ export function M7Stage1Panel({
             entry_hour_ist: resolvedRules[tradesModal].entry_hour_ist ?? undefined,
           }}
           dataset={dataset}
+          lots={resolvedRules[tradesModal].lots ?? 100}
           onClose={() => setTradesModal(null)}
         />
       )}

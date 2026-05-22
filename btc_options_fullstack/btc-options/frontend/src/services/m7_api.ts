@@ -1740,6 +1740,9 @@ export interface Stage1PerBandRule {
   expiry_bucket?: string | null;
   delta_target?: number | null;
   entry_hour_ist?: number | null;
+  lots?: number | null;
+  // Optional: the full best-combo row (used by Stage-1 UI to display baseline metrics)
+  baseline_metrics?: M7IvBandBestComboRow | null;
 }
 
 export interface Stage1Cell {
