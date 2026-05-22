@@ -2730,6 +2730,61 @@ def _strip_rule_dict(rec: dict) -> dict:
     return {k: v for k, v in rec.items() if k != "rule_dict"}
 
 
+# ── Missed-Fridays concurrency cap + tiny response cache ────────────────────
+# Heavy endpoint: each request serially calls _derive_exits for ~10 picks. On
+# cold cache that's 50-300s per request. With FastAPI's default 40-thread
+# anyio pool, 8+ concurrent calls (e.g. user rapid-clicking filters) saturate
+# the pool and ALL other sync routes (including /api/v1/session-id) queue up,
+# causing the frontend's session check to time out → black screen.
+#
+# Two-part defense:
+#   1) Semaphore(4) — at most 4 concurrent heavy computes; 5th+ waits its
+#      turn (still consumes a thread slot but for a much shorter window).
+#   2) Tiny LRU response cache — same args within the cache window return
+#      instantly without re-running _derive_exits. Invalidated by trades-
+#      parquet mtime so a data refresh forces a recompute.
+_MISSED_FRIDAYS_SEM = threading.BoundedSemaphore(4)
+_MISSED_FRIDAYS_CACHE: dict[tuple, tuple[float, dict]] = {}  # key → (ds_mtime, response)
+_MISSED_FRIDAYS_CACHE_MAX = 32
+_MISSED_FRIDAYS_CACHE_LOCK = threading.Lock()
+
+
+def _trades_parquet_mtime(dataset: str) -> float:
+    """Return mtime of the trades parquet for the dataset (used for cache
+    invalidation). Returns 0.0 if the file doesn't exist."""
+    if dataset == "price_match":
+        path = m7r.TRADES_PATH_PRICE_MATCHED
+    else:
+        path = (m7r.TRADES_ENRICHED_PATH if os.path.exists(m7r.TRADES_ENRICHED_PATH)
+                else m7r.TRADES_PATH)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _missed_fridays_cache_get(key: tuple, ds_mtime: float) -> Optional[dict]:
+    with _MISSED_FRIDAYS_CACHE_LOCK:
+        entry = _MISSED_FRIDAYS_CACHE.get(key)
+        if entry is None:
+            return None
+        cached_mtime, response = entry
+        if cached_mtime != ds_mtime:
+            del _MISSED_FRIDAYS_CACHE[key]
+            return None
+        # LRU bump
+        _MISSED_FRIDAYS_CACHE[key] = (cached_mtime, response)
+        return response
+
+
+def _missed_fridays_cache_set(key: tuple, ds_mtime: float, response: dict) -> None:
+    with _MISSED_FRIDAYS_CACHE_LOCK:
+        _MISSED_FRIDAYS_CACHE[key] = (ds_mtime, response)
+        # Evict oldest (first-inserted) if over cap
+        while len(_MISSED_FRIDAYS_CACHE) > _MISSED_FRIDAYS_CACHE_MAX:
+            _MISSED_FRIDAYS_CACHE.pop(next(iter(_MISSED_FRIDAYS_CACHE)))
+
+
 @router.get("/iv_band_best_combo/missed_fridays")
 def get_missed_fridays_for_best_combo(
     ranking: str = Query("avg_net_pnl"),
@@ -2770,38 +2825,64 @@ def get_missed_fridays_for_best_combo(
     if dataset == "price_match":
         if not os.path.exists(GRID_PARQUET_PATH_PRICE_MATCHED):
             return _price_match_no_data_payload({"dataset": dataset})
-    try_load_grid_only(dataset)
-    grid_state = _get_grid_state(dataset)
-    if grid_state["status"] != "ready":
-        return {"rows": [], "status": grid_state["status"]}
-    grid: pd.DataFrame = grid_state["grid"]
-    if grid is None or grid.empty:
-        return {"rows": [], "status": "empty"}
-    family_grid = _filter_grid_by_family(grid, rule_family)
-    family_grid = _apply_dimension_filters(
-        family_grid, expiry_buckets, delta_targets, entry_hours,
-        premium_sl_pcts=premium_sl_pcts,
+
+    # Cache key — all args that affect the result
+    cache_key = (
+        ranking, secondary, tolerance_pct, rule_family, total_capital_usd, pct_deploy,
+        dd_metric, dd_threshold, dd_metrics, dd_thresholds,
+        min_hit_pct, max_loss_cap_pct, max_drop_peak_to_trough_pct,
+        min_n_trades, min_win_rate, max_losing_streak, pick_mode,
+        expiry_buckets, delta_targets, entry_hours, premium_sl_pcts, dataset,
     )
-    if pick_mode == "aggregate_hours":
-        family_grid = _aggregate_across_hours(family_grid)
-    dd_constraints_list = _parse_dd_constraints(dd_metrics, dd_thresholds)
-    picks = _pick_best_per_band(
-        family_grid, ranking,
-        secondary=secondary,
-        tolerance_pct=tolerance_pct if secondary else None,
-        total_capital_usd=total_capital_usd,
-        pct_deploy=pct_deploy,
-        dd_metric=dd_metric,
-        dd_threshold=dd_threshold,
-        dd_constraints=dd_constraints_list,
-        min_hit_pct=min_hit_pct,
-        max_loss_cap_pct=max_loss_cap_pct,
-        max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
-        min_n_trades=min_n_trades,
-        min_win_rate=min_win_rate,
-        max_losing_streak=max_losing_streak,
-    )
-    return _compute_missed_fridays(picks, dataset=dataset)
+    ds_mtime = _trades_parquet_mtime(dataset)
+    cached = _missed_fridays_cache_get(cache_key, ds_mtime)
+    if cached is not None:
+        return cached
+
+    # Cap concurrency. acquire(blocking=True) is fine — the lock is held only
+    # while a heavy compute runs (seconds, not minutes for the typical case);
+    # waiting requests get processed in order without piling up indefinitely.
+    with _MISSED_FRIDAYS_SEM:
+        # Re-check cache under the semaphore — another concurrent request may
+        # have just populated it while we were waiting.
+        cached = _missed_fridays_cache_get(cache_key, ds_mtime)
+        if cached is not None:
+            return cached
+
+        try_load_grid_only(dataset)
+        grid_state = _get_grid_state(dataset)
+        if grid_state["status"] != "ready":
+            return {"rows": [], "status": grid_state["status"]}
+        grid: pd.DataFrame = grid_state["grid"]
+        if grid is None or grid.empty:
+            return {"rows": [], "status": "empty"}
+        family_grid = _filter_grid_by_family(grid, rule_family)
+        family_grid = _apply_dimension_filters(
+            family_grid, expiry_buckets, delta_targets, entry_hours,
+            premium_sl_pcts=premium_sl_pcts,
+        )
+        if pick_mode == "aggregate_hours":
+            family_grid = _aggregate_across_hours(family_grid)
+        dd_constraints_list = _parse_dd_constraints(dd_metrics, dd_thresholds)
+        picks = _pick_best_per_band(
+            family_grid, ranking,
+            secondary=secondary,
+            tolerance_pct=tolerance_pct if secondary else None,
+            total_capital_usd=total_capital_usd,
+            pct_deploy=pct_deploy,
+            dd_metric=dd_metric,
+            dd_threshold=dd_threshold,
+            dd_constraints=dd_constraints_list,
+            min_hit_pct=min_hit_pct,
+            max_loss_cap_pct=max_loss_cap_pct,
+            max_drop_peak_to_trough_pct=max_drop_peak_to_trough_pct,
+            min_n_trades=min_n_trades,
+            min_win_rate=min_win_rate,
+            max_losing_streak=max_losing_streak,
+        )
+        response = _compute_missed_fridays(picks, dataset=dataset)
+        _missed_fridays_cache_set(cache_key, ds_mtime, response)
+        return response
 
 
 @router.get("/iv_band_best_combo/missed_fridays_force_fit")

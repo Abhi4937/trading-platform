@@ -173,10 +173,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 @app.get("/api/v1/session-id", tags=["Health"])
-def get_session_id():
+async def get_session_id():
     """UUID generated at process startup. Frontend compares against its
     locally-stored copy to detect a backend restart; on mismatch it wipes the
-    auto-persisted UI state. Named saved strategies are unaffected."""
+    auto-persisted UI state. Named saved strategies are unaffected.
+
+    Declared async so it runs directly in the event loop — never queues for a
+    threadpool slot. Critical because heavy sync routes (eg.
+    get_missed_fridays_for_best_combo) can saturate the anyio threadpool;
+    we don't want the frontend's health probe to time out while waiting in
+    line behind them (that's what causes the black-screen-on-backend-busy).
+    """
     return {"session_id": SESSION_ID}
 
 
