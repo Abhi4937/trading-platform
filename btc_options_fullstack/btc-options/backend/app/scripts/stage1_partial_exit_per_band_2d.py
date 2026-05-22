@@ -110,14 +110,14 @@ def _load_and_validate_json(path: str) -> dict:
 # ─── Reference level computation ─────────────────────────────────────────────
 
 def _compute_reference_levels(df: pd.DataFrame) -> dict:
-    """SL_avg, L_avg, W_avg per band. All are None if n < LOW_N_THRESHOLD."""
+    """SL_avg, L_avg, W_avg per band. None only when the subgroup is empty."""
     sl_mask = df["is_premium_sl_hit"].astype(bool)
     loser_mask = df["net_pnl_estimate_usd"] < 0
     winner_mask = ~loser_mask
 
     def _avg(mask: pd.Series) -> Optional[float]:
         sub = df.loc[mask, "min_mtm_usd"].dropna()
-        return float(sub.mean()) if len(sub) >= LOW_N_THRESHOLD else None
+        return float(sub.mean()) if len(sub) >= 1 else None
 
     return {
         "SL_avg": _avg(sl_mask),
@@ -433,7 +433,7 @@ def _process_band(
 
             if case is None:
                 row["status"] = "trigger_undefined"
-                row["warning"] = f"{tname}: reference level undefined (n < {LOW_N_THRESHOLD})"
+                row["warning"] = f"{tname}: reference level undefined (no trades in subgroup)"
                 # Fill NaN for all metric columns.
                 for col in (
                     "n_total", "n_A", "n_B_reliable", "n_B_unreliable", "n_C",
@@ -548,7 +548,7 @@ def _process_band(
 
     # ── Per-band verdict (computed from best-by-avg-pnl cell) ─────────────────
     def _band_verdict() -> str:
-        if n_total < 30 or best_avg_idx is None:
+        if best_avg_idx is None:
             return "SKIP_INSUFFICIENT"
         r_v = cells_df.loc[best_avg_idx]
         if pd.isna(r_v.get("composite_score_v2", float("nan"))):
@@ -947,7 +947,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"    n_sl_hit    : {ref['n_sl_hit']}  n_losers={ref['n_losers']}  "
               f"n_winners={ref['n_winners']}")
         print(f"    SL_avg      : {ref['SL_avg']:.2f}" if ref['SL_avg'] is not None
-              else "    SL_avg      : undefined (n < 10)")
+              else "    SL_avg      : undefined (no SL-hit trades)")
         print(f"    L_avg       : {ref['L_avg']:.2f}" if ref['L_avg'] is not None
               else "    L_avg       : undefined")
         print(f"    W_avg       : {ref['W_avg']:.2f}" if ref['W_avg'] is not None

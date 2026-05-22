@@ -39,7 +39,7 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 _STAGE1_DISK_DIR = os.path.join(M7_BASE_DIR, "stage1_cache")
-_STAGE1_RESPONSE_VERSION = 1
+_STAGE1_RESPONSE_VERSION = 2  # bumped: removed n<30 and n<10 reference-level gates
 
 
 # ─── Cache helpers ────────────────────────────────────────────────────────────
