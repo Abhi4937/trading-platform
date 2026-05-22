@@ -49,14 +49,19 @@ trap _release_mutex EXIT
 # ─── Stale-lock check ─────────────────────────────────────────────────────────
 _slot_is_free() {
     local n="$1"
-    local lock="$LOCK_DIR/$((8000 + n)).lock"
-    [ ! -f "$lock" ] && return 0
+    local port=$((8000 + n))
+    local lock="$LOCK_DIR/${port}.lock"
 
-    # Parse container name from lock file (simple grep, no jq dependency)
+    # Hard check: is any container actually bound to this port right now?
+    if docker ps --format '{{.Ports}}' | grep -q ":${port}->"; then
+        return 1  # port in use regardless of lock file state
+    fi
+
+    # Soft check: is there a valid lock file pointing at a running container?
+    [ ! -f "$lock" ] && return 0
     local container
     container=$(grep -o '"container": *"[^"]*"' "$lock" 2>/dev/null | grep -o '"[^"]*"$' | tr -d '"' || echo "")
     [ -z "$container" ] && { rm -f "$lock"; return 0; }
-
     local running
     running=$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo "false")
     [ "$running" != "true" ] && { rm -f "$lock"; return 0; }
@@ -64,11 +69,35 @@ _slot_is_free() {
     return 1  # slot is live
 }
 
+# ─── Slot 0: docker-backend-1 is always the permanent primary ─────────────────
+# If docker-backend-1 is running it owns slot 0 and port 8000.
+# Write a virtual lock for it so sessions always claim slot 1+.
+_ensure_slot0_locked() {
+    local lock="$LOCK_DIR/8000.lock"
+    local running
+    running=$(docker inspect --format='{{.State.Running}}' docker-backend-1 2>/dev/null || echo "false")
+    if [ "$running" = "true" ]; then
+        cat > "$lock" <<EOF
+{
+  "slot": 0,
+  "backend_port": 8000,
+  "frontend_port": 3000,
+  "container": "docker-backend-1",
+  "pid": 0,
+  "claimed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "primary": true,
+  "note": "permanent primary — managed by docker compose up -d backend"
+}
+EOF
+    fi
+}
+
 # ─── Claim first free slot ────────────────────────────────────────────────────
 _acquire_mutex
+_ensure_slot0_locked
 
 SLOT=""
-for N in 0 1 2 3 4 5 6 7 8 9; do
+for N in 1 2 3 4 5 6 7 8 9; do
     if _slot_is_free "$N"; then
         SLOT="$N"
         break
@@ -77,7 +106,7 @@ done
 
 if [ -z "$SLOT" ]; then
     _release_mutex
-    echo "ERROR: all slots 0-9 are taken. Run 'release_session.sh' to free one."
+    echo "ERROR: all slots 1-9 are taken. Run 'release_session.sh' to free one."
     docker ps --filter "name=docker-backend-session" --format "  {{.Names}}  {{.Status}}  {{.Ports}}"
     exit 1
 fi
@@ -86,8 +115,8 @@ BACKEND_PORT=$((8000 + SLOT))
 FRONTEND_PORT=$((3000 + SLOT))
 REDIS_DB=$SLOT
 CONTAINER="docker-backend-session-${SLOT}-1"
-[ "$SLOT" = "0" ] && DISABLE_TICKER=0 || DISABLE_TICKER=1
-[ "$SLOT" = "0" ] && IS_PRIMARY="yes (live ticker ON)" || IS_PRIMARY="no (DISABLE_LIVE_TICKER=1)"
+DISABLE_TICKER=1   # slots 1-9 are always secondary
+IS_PRIMARY="no — live ticker runs in docker-backend-1 (:8000)"
 
 # Write lock before releasing mutex
 cat > "$LOCK_DIR/${BACKEND_PORT}.lock" <<EOF
@@ -125,7 +154,7 @@ echo "=== Backend starting — waiting for ready... ==="
 READY=0
 for i in $(seq 1 60); do
     sleep 2
-    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${BACKEND_PORT}/health" 2>/dev/null || echo "000")
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${BACKEND_PORT}/health" 2>/dev/null; true)
     if [ "$STATUS" = "200" ]; then
         READY=1
         break
