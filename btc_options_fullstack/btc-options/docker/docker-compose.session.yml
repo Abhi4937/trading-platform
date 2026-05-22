@@ -1,0 +1,39 @@
+# Parameterized session overlay — works with any slot 0-9.
+#
+# Required env vars (set by claim_session.sh):
+#   SESSION_SLOT    — numeric slot (0-9)
+#   BACKEND_PORT    — host port (8000-8009)
+#   REDIS_DB        — Redis DB index (0-9)
+#   DISABLE_LIVE_TICKER — 0 (slot 0 only) or 1
+#
+# Launch via claim_session.sh, or manually:
+#   SESSION_SLOT=2 BACKEND_PORT=8002 REDIS_DB=2 DISABLE_LIVE_TICKER=1 \
+#     docker compose -p btc_session_2 \
+#       -f docker-compose.yml -f docker-compose.session.yml \
+#       up -d backend_session
+#
+# Logs:  docker logs -f docker-backend-session-${SESSION_SLOT}-1
+# Stop:  ./scripts/release_session.sh
+services:
+  backend_session:
+    build:
+      context: ../backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: docker-backend-session-${SESSION_SLOT}-1
+    ports:
+      - "${BACKEND_PORT}:8000"
+    env_file:
+      - ../backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/${REDIS_DB}
+      - DISABLE_LIVE_TICKER=${DISABLE_LIVE_TICKER}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - C:/Users/Abhis/btc-data/data:/home/abhis/btc-data/data
+      - C:/Users/Abhis/btc-data/data_live:/home/abhis/btc-data/data_live
+      - C:/Users/Abhis/btc-data/derived:/home/abhis/btc-data/derived
+      - C:/Users/Abhis/btc-data/logs:/home/abhis/btc-data/logs
+      - ../backend/tests:/app/tests:ro
+      - ../backend/app:/app/app:ro

@@ -94,57 +94,68 @@ docker compose run -d --rm --name foo_$(date +%s) \
 Precedent: M7 v6 grid build (Session 23) ran 4h 20m through multiple
 `docker-backend-1` restarts without issue using this pattern.
 
-## RULE #6 — Per-session Backend Isolation (added 2026-05-20)
+## RULE #6 — Per-session Backend Isolation (updated 2026-05-22)
 
-When two Claude sessions are doing active backend development in parallel,
-each session should run its own isolated backend container so a rebuild in
-one session never clobbers the other's in-memory state (backtest jobs,
-caches, ticker stream).
+Every Claude session gets its own backend container on its own port so a
+rebuild in one session never clobbers another. Slots 0–9, ports 8000–8009.
 
-### Session A (primary — unchanged)
-Session A uses the canonical `docker-backend-1` on port **8000** and the
-frontend on port **3000**, exactly as always.
+### At session start — claim your slot
 
-### Session B (secondary — isolated)
-Session B runs its own container (`docker-backend-session-b-1`) on port
-**8001** using `docker/docker-compose.session-b.yml`.
-
-**Start Session B backend** (from the `docker/` directory):
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.session-b.yml up --build -d backend_session_b
+./scripts/claim_session.sh          # picks first free slot, starts container
+./scripts/claim_session.sh --build  # same but forces image rebuild
 ```
 
-**Start Session B frontend** (PowerShell, from repo root):
-```powershell
-$env:VITE_API_URL="http://localhost:8001/api/v1"
-$env:VITE_API_BASE="http://localhost:8001"
-$env:VITE_WS_HOST="localhost:8001"
-cd frontend; npm run dev -- --port 3001
-```
+The script prints your slot, backend port, and the frontend start command.
+Add `--build` only after pip/Dockerfile changes; pure Python changes don't
+need it (the `/app/app` bind-mount is live).
 
-**Stop Session B backend**:
+### Start the frontend (in a separate terminal)
+
+Use the exact command `claim_session.sh` printed. Example for slot 1:
+
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.session-b.yml stop backend_session_b
+cd frontend
+VITE_API_URL=http://localhost:8001/api/v1 \
+VITE_API_BASE=http://localhost:8001 \
+VITE_WS_HOST=localhost:8001 \
+npm run dev -- --port 3001
 ```
 
-**Stop Session B frontend**: `fuser -k 3001/tcp`
+### At session end — release your slot
+
+```bash
+./scripts/release_session.sh        # lists active sessions, prompts for slot
+./scripts/release_session.sh 1      # release slot 1 directly
+```
 
 ### Key properties
-- **Redis DB `/1`**: Session B uses Redis DB 1 instead of DB 0 — no key collisions.
-- **Live ticker disabled**: `DISABLE_LIVE_TICKER=1` skips the Delta WS subscription and live
-  recorder in Session B. Do NOT use Session B for live-ticker feature development; use Session A.
-- **Shared disk caches**: bind-mounts at `~/btc-data/derived/...` are shared — both sessions
-  read the same parquet caches. If B writes a new derived parquet, A can see it immediately.
-- **Merge-time**: once Session B's code is committed and merged, rebuild `docker-backend-1`
-  normally. The canonical `:3000` frontend picks up all changes automatically — no extra wiring.
+- **Slot 0 is primary**: live ticker ON (`DISABLE_LIVE_TICKER=0`). All other
+  slots have `DISABLE_LIVE_TICKER=1` — no Delta WS, no live chain prices.
+  If you need live ticks, use the slot-0 frontend (`:3000`).
+- **Redis DB isolation**: slot N uses Redis DB N — no key collisions.
+- **Shared disk caches**: `~/btc-data/derived/` parquet caches are shared
+  across all slots (atomic writes). Strike-index cache is auto-built on first
+  start and shared — subsequent cold starts take ~5s not ~10 minutes.
+- **Code changes**: edit Python files on disk → they appear immediately in
+  all running containers (bind-mount). Restart your container to pick them up:
+  `docker restart docker-backend-session-N-1`. No rebuild needed.
+
+### What NOT to do from a non-slot-0 session
+
+- **Never** `docker compose up --build -d backend` (main compose) — that
+  rebuilds `docker-backend-1` and disrupts slot 0.
+- **Never** `fuser -k 3000/tcp` unless you ARE slot 0.
+- **Never** hardcode `:8000` in curl / Playwright — use your slot's port.
+- **Slot 1–9**: don't debug "live chain shows no prices" — expected, live
+  ticker only runs in slot 0.
 
 ### Verify isolation
 ```bash
-# Both containers should show different IDs:
-docker ps | grep backend
-# Different session UUIDs = independent processes:
-curl http://localhost:8000/api/v1/session-id
-curl http://localhost:8001/api/v1/session-id
+docker ps | grep backend                     # shows all running slots
+curl http://localhost:8000/api/v1/session-id # slot 0 UUID
+curl http://localhost:8001/api/v1/session-id # slot 1 UUID — must differ
+ls ~/.btc-options/sessions/                  # shows active lock files
 ```
 
 ## Session Start Checklist (do this first, every session)
@@ -211,11 +222,16 @@ if something there changed. Don't churn the files.
    restart), tell the user and pause for the restart.
 
 ### Backend change
-1. Rebuild and restart backend: `cd docker && docker compose up --build -d backend`
-2. Then kill and restart frontend: `fuser -k 3000/tcp && cd frontend && npm run dev`
-3. **Verify the affected UI surface with Playwright MCP** as above — backend
-   changes that flow into the dashboard must be exercised through the browser,
-   not just via `curl`, to catch wiring/serialization mismatches.
+1. Restart **your session's container** (not the main one):
+   `docker restart docker-backend-session-N-1`
+   For a full rebuild (pip/Dockerfile changes only):
+   `./scripts/claim_session.sh --build` (or release + reclaim with --build)
+   **Never** run `docker compose up --build -d backend` from a non-slot-0
+   session — that rebuilds `docker-backend-1` and disrupts other sessions.
+2. Kill and restart **your** frontend port:
+   `fuser -k 300N/tcp && cd frontend && VITE_API_URL=http://localhost:800N/api/v1 ... npm run dev -- --port 300N`
+3. **Verify the affected UI surface with Playwright MCP** — navigate to
+   `http://localhost:300N`, exercise the feature, screenshot, confirm.
 
 - Always restart/rebuild immediately after making changes — do not wait for user to ask
 - Once the user confirms the change works, commit and push to current branch immediately
