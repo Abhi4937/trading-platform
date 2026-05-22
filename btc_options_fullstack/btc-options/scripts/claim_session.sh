@@ -117,7 +117,6 @@ export DISABLE_LIVE_TICKER="$DISABLE_TICKER"
 
 docker compose \
     -p "btc_session_${SLOT}" \
-    -f "$DOCKER_DIR/docker-compose.yml" \
     -f "$DOCKER_DIR/docker-compose.session.yml" \
     up $BUILD_FLAG -d backend_session 2>&1 | grep -v "^time=" || true
 

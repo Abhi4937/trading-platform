@@ -553,22 +553,30 @@ def _derive_exits(filters: dict, exit_rule: dict,
     rule_key = (dataset, json.dumps(exit_rule or {}, sort_keys=True), trades_mtime)
     full = _EXIT_CACHE.get(rule_key)
     if full is None:
-        # Serialise heavy DuckDB scans across threads. Re-check the cache
-        # under the lock in case another thread populated it while we waited.
-        with _EXIT_COMPUTE_LOCK:
-            full = _EXIT_CACHE.get(rule_key)
-            if full is None:
-                # L2: try disk cache before paying for the DuckDB scan.
-                full = _load_exit_cache_disk(dataset, exit_rule, trades_mtime)
+        # L2 check outside lock — pd.read_parquet is thread-safe for concurrent reads;
+        # only DuckDB scans (_compute_all_exits) must be serialised to avoid C++ crashes.
+        full = _load_exit_cache_disk(dataset, exit_rule, trades_mtime)
+        if full is not None:
+            log.info("M7 exit cache loaded from disk for (%s, %s) (%d trades)",
+                     dataset, rule_key[1][:80], len(full))
+            _EXIT_CACHE[rule_key] = full  # dict assignment is GIL-atomic
+        else:
+            # L2 miss → DuckDB scan required. Serialise across threads.
+            # Re-check both caches under the lock in case another thread
+            # populated them while we were waiting.
+            with _EXIT_COMPUTE_LOCK:
+                full = _EXIT_CACHE.get(rule_key)
                 if full is None:
-                    full = _compute_all_exits(exit_rule, dataset=dataset)
-                    _save_exit_cache_disk(dataset, exit_rule, full)
-                    log.info("M7 exit cache populated for (%s, %s) (%d trades)",
-                             dataset, rule_key[1][:80], len(full))
-                else:
-                    log.info("M7 exit cache loaded from disk for (%s, %s) (%d trades)",
-                             dataset, rule_key[1][:80], len(full))
-                _EXIT_CACHE[rule_key] = full
+                    full = _load_exit_cache_disk(dataset, exit_rule, trades_mtime)
+                    if full is None:
+                        full = _compute_all_exits(exit_rule, dataset=dataset)
+                        _save_exit_cache_disk(dataset, exit_rule, full)
+                        log.info("M7 exit cache populated for (%s, %s) (%d trades)",
+                                 dataset, rule_key[1][:80], len(full))
+                    else:
+                        log.info("M7 exit cache loaded from disk for (%s, %s) (%d trades)",
+                                 dataset, rule_key[1][:80], len(full))
+                    _EXIT_CACHE[rule_key] = full
     if full.empty:
         return full
     return _apply_filters(full, filters)

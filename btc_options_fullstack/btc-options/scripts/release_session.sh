@@ -56,7 +56,6 @@ echo "=== Releasing slot $SLOT ==="
 echo "  Stopping $CONTAINER..."
 docker compose \
     -p "btc_session_${SLOT}" \
-    -f "$DOCKER_DIR/docker-compose.yml" \
     -f "$DOCKER_DIR/docker-compose.session.yml" \
     down 2>&1 | grep -v "^time=" || \
 docker stop "$CONTAINER" 2>/dev/null || true
