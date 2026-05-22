@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo, m7_friday_band_best_combo, m7_friday_band_results, m7_joint_match_stats, m7_pivot_profile, m_month_results, m_month_best_combo, m9_friday_weekly_results, m9_friday_weekly_best_combo
+from app.api import expiries, options, plot_data, health, logs, ws, historical, backtest, live_signal, m4_results, m7_results, m7_full_coverage, m7_best_combo, m7_friday_band_best_combo, m7_friday_band_results, m7_joint_match_stats, m7_pivot_profile, m7_stage1_analysis, m_month_results, m_month_best_combo, m9_friday_weekly_results, m9_friday_weekly_best_combo
 
 # Fresh ID per process — frontend uses this to detect a backend restart and
 # wipe its auto-persisted UI state on the next page load.
@@ -197,6 +197,7 @@ app.include_router(m7_friday_band_best_combo.router, prefix="/api/v1/m7", tags=[
 app.include_router(m7_friday_band_results.router, prefix="/api/v1/m7", tags=["M7 Friday-Band"])
 app.include_router(m7_joint_match_stats.router,   prefix="/api/v1/m7",       tags=["M7 Joint Match"])
 app.include_router(m7_pivot_profile.router,       prefix="/api/v1/m7",       tags=["M7 Pivot Profile"])
+app.include_router(m7_stage1_analysis.router,     prefix="/api/v1/m7",       tags=["M7 Stage-1"])
 app.include_router(m_month_results.router,    prefix="/api/v1/m_month",  tags=["M-Month Sweep"])
 app.include_router(m_month_best_combo.router, prefix="/api/v1/m_month",  tags=["M-Month Sweep"])
 app.include_router(m9_friday_weekly_results.router,    prefix="/api/v1/m9", tags=["M9 Friday Weekly"])

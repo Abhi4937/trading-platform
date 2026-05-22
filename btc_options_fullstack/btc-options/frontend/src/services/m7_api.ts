@@ -1725,3 +1725,159 @@ export function fetchM7TradeDiagnostic(
   return jsonFetch<M7TradeDiagnosticResponse>(
     `${BASE}/trade_diagnostic?${params.toString()}`, signal);
 }
+
+
+// ─── Stage-1 Partial Exit ─────────────────────────────────────────────────────
+
+export interface Stage1PerBandRule {
+  rule_label: string;
+  rule_dict: {
+    premium_sl_pct?: number | null;
+    max_profit_pct?: number | null;
+    margin_target_pct?: number | null;
+    fixed_exit_hour_ist?: number | null;
+  };
+  expiry_bucket?: string | null;
+  delta_target?: number | null;
+  entry_hour_ist?: number | null;
+}
+
+export interface Stage1Cell {
+  band: string;
+  exit_frac: number;
+  trigger_level: string;
+  status: string;
+  band_verdict: string;
+  n_total: number;
+  n_A: number;
+  n_B_reliable: number;
+  n_B_unreliable: number;
+  n_C: number;
+  n_C_deeper: number;
+  n_C_recovered: number;
+  c_recovered_share: number | null;
+  c_recovered_warn_level: 'none' | 'yellow' | 'red';
+  avg_saved: number | null;
+  avg_given_up: number | null;
+  avg_save_per_c_deeper: number | null;
+  avg_hurt_per_c_recovered: number | null;
+  pct_B_unreliable: number | null;
+  ev_per_trade: number | null;
+  ev_total: number | null;
+  delta_avg_pnl: number | null;
+  delta_win_rate: number | null;
+  delta_cvar_95: number | null;
+  delta_max_loss: number | null;
+  delta_max_consec_losses: number | null;
+  delta_composite_v2: number | null;
+  avg_hyp_pnl: number | null;
+  win_rate_hyp: number | null;
+  max_loss_hyp: number | null;
+  cvar_95_net_hyp: number | null;
+  max_consec_losses_hyp: number | null;
+  composite_score_v2: number | null;
+  is_best_by_avg_pnl: boolean;
+  is_best_by_composite_v2: boolean;
+  trigger_mtm: number | null;
+  trigger_name?: string;
+}
+
+export interface Stage1BandSummary {
+  band: string;
+  rule_label: string;
+  n_total: number;
+  n_sl_hit: number;
+  n_losers: number;
+  n_winners: number;
+  sl_avg: number | null;
+  l_avg: number | null;
+  w_avg: number | null;
+  pct_losers_sl_hit: number | null;
+  band_verdict?: string;
+  warnings: string[];
+}
+
+export interface Stage1BestCell {
+  band: string;
+  rule_label: string;
+  n_total: number;
+  band_verdict: string;
+  best_avg_pnl_exit_frac: number | null;
+  best_avg_pnl_trigger_level: string | null;
+  best_avg_pnl_value: number | null;
+  best_avg_pnl_delta: number | null;
+  best_composite_exit_frac: number | null;
+  best_composite_trigger_level: string | null;
+  best_composite_value: number | null;
+  best_composite_delta: number | null;
+  cells_agree: boolean;
+}
+
+export interface Stage1Result {
+  all_cells: Stage1Cell[];
+  best_cells: Stage1BestCell[];
+  band_summaries: Stage1BandSummary[];
+  validation: Record<string, unknown>;
+  caveats: string[];
+  params_echo: Record<string, unknown>;
+}
+
+export interface Stage1Response {
+  status: 'warming' | 'ready' | 'error';
+  progress: number;
+  result: Stage1Result | null;
+  error: string | null;
+  params_echo: {
+    dataset: string;
+    sig: string;
+    n_bands: number;
+    bands: string[];
+  };
+}
+
+export interface Stage1PrecheckResponse {
+  per_band_cache_status: Record<string, 'warm' | 'cold'>;
+  n_warm: number;
+  n_cold: number;
+  estimated_compute_seconds: number;
+}
+
+async function postJsonFetch<T>(
+  url: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (r.ok) return (await r.json()) as T;
+  const text = await r.text().catch(() => '');
+  throw new Error(`${r.status} ${r.statusText}: ${text}`);
+}
+
+export function fetchM7Stage1(
+  perBandRules: Record<string, Stage1PerBandRule>,
+  dataset: M7Dataset,
+  signal?: AbortSignal,
+): Promise<Stage1Response> {
+  return postJsonFetch<Stage1Response>(
+    `${BASE}/stage1_analysis`,
+    { per_band_rules: perBandRules, dataset },
+    signal,
+  );
+}
+
+export function fetchM7Stage1Precheck(
+  perBandRules: Record<string, Stage1PerBandRule>,
+  dataset: M7Dataset,
+  signal?: AbortSignal,
+): Promise<Stage1PrecheckResponse> {
+  return postJsonFetch<Stage1PrecheckResponse>(
+    `${BASE}/stage1_analysis/precheck`,
+    { per_band_rules: perBandRules, dataset },
+    signal,
+  );
+}

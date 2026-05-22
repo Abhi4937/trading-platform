@@ -27,6 +27,7 @@ import {
   type M7IvBandBestComboRow,
   type M7Ranking,
   type M7RuleFamily,
+  type Stage1PerBandRule,
 } from '../../services/m7_api';
 
 // ── Metric catalog ──────────────────────────────────────────────────────────
@@ -322,9 +323,13 @@ interface Props {
   // lift the current per-band best-combo selection up so it can pass it to
   // the Losses Explorer's `cells` param.
   onSelectionsChange?: (rows: M7IvBandBestComboRow[]) => void;
+  // Called with the resolved per-band rules dict (band → Stage1PerBandRule)
+  // after each fetch settles. Used by M7Stage1Panel to POST the exact rules.
+  onResolvedRulesChange?: (rules: Record<string, Stage1PerBandRule>, dataset: string) => void;
+  dataset?: string;
 }
 
-export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
+export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChange, dataset: datasetProp }: Props = {}) {
   const [primary, setPrimary] = useState<M7Ranking>(
     () => loadLS('primary', 'avg_net_pnl'));
   const [family, setFamily] = useState<M7RuleFamily>(
@@ -633,6 +638,30 @@ export function M7IvBandBestComboTable({ onSelectionsChange }: Props = {}) {
     if (onSelectionsChange) onSelectionsChange(rowsWithEffectiveLots);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowsSignature, onSelectionsChange]);
+
+  // Hoist resolved per-band rules to parent for Stage-1 analysis.
+  // Builds a Stage1PerBandRule per band from the settled rows.
+  useEffect(() => {
+    if (!onResolvedRulesChange) return;
+    const resolved: Record<string, Stage1PerBandRule> = {};
+    for (const r of rowsWithEffectiveLots) {
+      if (!r.iv_band) continue;
+      const rule_dict: Stage1PerBandRule['rule_dict'] = {};
+      if (r.rule.premium_sl_pct != null) rule_dict.premium_sl_pct = r.rule.premium_sl_pct;
+      if (r.rule.max_profit_pct != null) rule_dict.max_profit_pct = r.rule.max_profit_pct;
+      if (r.rule.margin_target_pct != null) rule_dict.margin_target_pct = r.rule.margin_target_pct;
+      if (r.rule.fixed_exit_hour_ist != null) rule_dict.fixed_exit_hour_ist = r.rule.fixed_exit_hour_ist;
+      resolved[r.iv_band] = {
+        rule_label: r.rule_label,
+        rule_dict,
+        expiry_bucket: r.expiry_bucket ?? null,
+        delta_target: r.delta_target ?? null,
+        entry_hour_ist: r.entry_hour_ist ?? null,
+      };
+    }
+    onResolvedRulesChange(resolved, datasetProp ?? 'delta_match');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowsSignature, onResolvedRulesChange, datasetProp]);
   const primaryDef = ALL_METRICS[primary] ?? PRIMARY_GROUPS[0].metrics[0];
   const secondaryDef = ALL_METRICS[secondary];
   const showTiebreakChip = mode === 'tiebreak' && secondaryDef != null;

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { fetchM7Summary, type M7Dataset, type M7LossesCell } from '../services/m7_api';
+import { fetchM7Summary, type M7Dataset, type M7LossesCell, type Stage1PerBandRule } from '../services/m7_api';
 import type { M7ExitRule, M7Filters, M7Summary } from '../types/m7';
 import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
@@ -9,6 +9,7 @@ import { M7JointMatchStats } from '../components/m7/M7JointMatchStats';
 import type { M7IvBandBestComboRow } from '../services/m7_api';
 import { M7LossesExplorer } from '../components/m7/M7LossesExplorer';
 import { M7PivotProfilePanel } from '../components/m7/M7PivotProfilePanel';
+import { M7Stage1Panel } from '../components/m7/M7Stage1Panel';
 import { usePersistedState } from '../hooks/usePersistedState';
 
 class JointStatsBoundary extends React.Component<
@@ -57,6 +58,16 @@ function isValidDataset(v: unknown): v is M7Dataset {
 export function M7SweepDashboard() {
   const [filters] = useState<M7Filters>({});
   const [exitRule] = useState<M7ExitRule>({});
+  // Resolved per-band rules hoisted from M7IvBandBestComboTable after each fetch.
+  const [resolvedRules, setResolvedRules] = useState<Record<string, Stage1PerBandRule>>({});
+  const [resolvedDataset, setResolvedDataset] = useState<M7Dataset>('delta_match');
+  const handleResolvedRulesChange = useCallback(
+    (rules: Record<string, Stage1PerBandRule>, ds: string) => {
+      setResolvedRules(rules);
+      setResolvedDataset(ds as M7Dataset);
+    },
+    [],
+  );
   const [summary, setSummary] = useState<M7Summary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [metric] = useState<string>('avg_net_pnl');
@@ -149,7 +160,11 @@ export function M7SweepDashboard() {
         <M7JointMatchStats dataset={dataset} />
       </JointStatsBoundary>
 
-      <M7IvBandBestComboTable onSelectionsChange={handleSelectionsChange} dataset={dataset} />
+      <M7IvBandBestComboTable
+        onSelectionsChange={handleSelectionsChange}
+        onResolvedRulesChange={handleResolvedRulesChange}
+        dataset={dataset}
+      />
       <M7BestComboCoverageTable dataset={dataset} />
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric}
                               dataset={dataset} />
@@ -158,6 +173,8 @@ export function M7SweepDashboard() {
                         cells={dBestCells} dataset={dataset} />
 
       <M7PivotProfilePanel dataset={dataset} cells={dBestCells} />
+
+      <M7Stage1Panel resolvedRules={resolvedRules} dataset={resolvedDataset} />
 
     </div>
   );
