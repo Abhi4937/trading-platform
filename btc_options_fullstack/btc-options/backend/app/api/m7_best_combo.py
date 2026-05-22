@@ -2760,8 +2760,17 @@ def _strip_rule_dict(rec: dict) -> dict:
 #      parquet mtime so a data refresh forces a recompute.
 _MISSED_FRIDAYS_SEM = threading.BoundedSemaphore(4)
 _MISSED_FRIDAYS_CACHE: dict[tuple, tuple[float, dict]] = {}  # key → (ds_mtime, response)
-_MISSED_FRIDAYS_CACHE_MAX = 32
+_MISSED_FRIDAYS_CACHE_MAX = 64  # bumped from 32: pre-warm fills ~12, leave room for user combos
 _MISSED_FRIDAYS_CACHE_LOCK = threading.Lock()
+# L2 disk persistence — survives backend restarts so the pre-warm only runs
+# once per dataset change instead of every container start.
+_MISSED_FRIDAYS_DISK_DIR = os.path.join(m7r.M7_BASE_DIR, "missed_fridays_cache")
+_MISSED_FRIDAYS_DISK_VERSION = 1  # bump to invalidate all disk entries
+
+
+def _missed_fridays_disk_path(key: tuple) -> str:
+    h = hashlib.sha1(repr(key).encode()).hexdigest()
+    return os.path.join(_MISSED_FRIDAYS_DISK_DIR, f"{h}.json")
 
 
 def prewarm_missed_fridays_cache() -> None:
@@ -2780,6 +2789,22 @@ def prewarm_missed_fridays_cache() -> None:
     Lots scale is data-invariant, so no need to vary it here.
     """
     import urllib.request, urllib.parse, time
+    # Wait for uvicorn to accept connections. Lifespan code runs BEFORE the
+    # HTTP server binds, so HTTP self-calls fail with Connection refused if
+    # we don't wait. Poll /api/v1/session-id (async + instant) for up to 60s.
+    ready = False
+    for attempt in range(60):
+        try:
+            r = urllib.request.urlopen("http://localhost:8000/api/v1/session-id", timeout=1)
+            r.read()
+            ready = True
+            break
+        except Exception:  # noqa: BLE001
+            time.sleep(1)
+    if not ready:
+        log.warning("Startup pre-warm — uvicorn never came up after 60s; aborting prewarm")
+        return
+
     rankings = ["composite_score_v2", "avg_net_pnl", "sum_net_pnl"]
     hours = ["21", "22", "23", "0"]
     log.info("Startup pre-warm — missed_fridays: %d combos queued", len(rankings) * len(hours))
@@ -2826,25 +2851,64 @@ def _trades_parquet_mtime(dataset: str) -> float:
 
 
 def _missed_fridays_cache_get(key: tuple, ds_mtime: float) -> Optional[dict]:
+    """Two-level cache: L1 in-memory dict, L2 on-disk JSON."""
+    # L1
     with _MISSED_FRIDAYS_CACHE_LOCK:
         entry = _MISSED_FRIDAYS_CACHE.get(key)
-        if entry is None:
+        if entry is not None:
+            cached_mtime, response = entry
+            if cached_mtime == ds_mtime:
+                _MISSED_FRIDAYS_CACHE[key] = (cached_mtime, response)  # LRU bump
+                return response
+            else:
+                del _MISSED_FRIDAYS_CACHE[key]
+    # L2 — lazy disk load (no eager scan at startup; first miss reads the file)
+    path = _missed_fridays_disk_path(key)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if data.get("_version") != _MISSED_FRIDAYS_DISK_VERSION:
             return None
-        cached_mtime, response = entry
-        if cached_mtime != ds_mtime:
-            del _MISSED_FRIDAYS_CACHE[key]
+        if data.get("_ds_mtime") != ds_mtime:
             return None
-        # LRU bump
-        _MISSED_FRIDAYS_CACHE[key] = (cached_mtime, response)
+        response = data.get("response")
+        if not isinstance(response, dict):
+            return None
+        # Promote to L1
+        with _MISSED_FRIDAYS_CACHE_LOCK:
+            _MISSED_FRIDAYS_CACHE[key] = (ds_mtime, response)
+            while len(_MISSED_FRIDAYS_CACHE) > _MISSED_FRIDAYS_CACHE_MAX:
+                _MISSED_FRIDAYS_CACHE.pop(next(iter(_MISSED_FRIDAYS_CACHE)))
         return response
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        log.warning("missed_fridays disk cache read failed at %s: %s", path, e)
+        return None
 
 
 def _missed_fridays_cache_set(key: tuple, ds_mtime: float, response: dict) -> None:
+    """Write to both L1 and L2 (best-effort disk; L1 always succeeds)."""
+    # L1
     with _MISSED_FRIDAYS_CACHE_LOCK:
         _MISSED_FRIDAYS_CACHE[key] = (ds_mtime, response)
-        # Evict oldest (first-inserted) if over cap
         while len(_MISSED_FRIDAYS_CACHE) > _MISSED_FRIDAYS_CACHE_MAX:
             _MISSED_FRIDAYS_CACHE.pop(next(iter(_MISSED_FRIDAYS_CACHE)))
+    # L2 — atomic write (tempfile + os.replace) so partial writes never produce
+    # a corrupt JSON that the loader would silently reject.
+    try:
+        os.makedirs(_MISSED_FRIDAYS_DISK_DIR, exist_ok=True)
+        path = _missed_fridays_disk_path(key)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump({
+                "_version": _MISSED_FRIDAYS_DISK_VERSION,
+                "_ds_mtime": ds_mtime,
+                "response": response,
+            }, f)
+        os.replace(tmp_path, path)
+    except (OSError, TypeError, ValueError) as e:
+        log.warning("missed_fridays disk cache write failed: %s", e)
 
 
 @router.get("/iv_band_best_combo/missed_fridays")
