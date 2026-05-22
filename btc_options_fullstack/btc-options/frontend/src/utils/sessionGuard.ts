@@ -52,19 +52,36 @@ function wipeAutoState(): void {
   }
 }
 
-export async function checkBackendSessionAndMaybeReset(): Promise<void> {
+/**
+ * Outcome of the session check, exposed to the React mount path so it can
+ * surface "backend slow" UI when the check times out.
+ *   - 'ok'      — backend responded, session check completed (matched or wiped)
+ *   - 'timeout' — backend didn't respond within SESSION_CHECK_TIMEOUT_MS
+ *   - 'error'   — backend responded with a non-2xx or fetch threw
+ */
+export type SessionCheckResult = 'ok' | 'timeout' | 'error';
+
+const SESSION_CHECK_TIMEOUT_MS = 3000;
+
+export async function checkBackendSessionAndMaybeReset(): Promise<SessionCheckResult> {
+  const ac = new AbortController();
+  const timer = window.setTimeout(() => ac.abort(), SESSION_CHECK_TIMEOUT_MS);
   try {
-    const r = await fetch(`${API_BASE}/session-id`, { cache: 'no-store' });
-    if (!r.ok) return;
+    const r = await fetch(`${API_BASE}/session-id`, { cache: 'no-store', signal: ac.signal });
+    if (!r.ok) return 'error';
     const { session_id } = await r.json();
     const stored = localStorage.getItem(STORED_KEY);
     if (stored !== session_id) {
       wipeAutoState();
       localStorage.setItem(STORED_KEY, session_id);
     }
-  } catch {
-    // Backend unreachable — leave state alone. The user will see the same
-    // stale data, but blowing it away on a transient network blip would be
-    // worse.
+    return 'ok';
+  } catch (e) {
+    // AbortError fires when the timeout aborts the fetch.
+    if ((e as Error)?.name === 'AbortError') return 'timeout';
+    // Network failure, JSON parse error, etc. — leave state alone.
+    return 'error';
+  } finally {
+    window.clearTimeout(timer);
   }
 }

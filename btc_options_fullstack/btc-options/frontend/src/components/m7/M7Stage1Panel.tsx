@@ -1299,6 +1299,56 @@ function CellDetail({
   type CmpRow = { label: string; baseline: string; stage1: string; delta: string; deltaColor: string; arrow: string; note?: string; section?: string };
   const cmpRows: CmpRow[] = [];
 
+  // hypAggs must be declared BEFORE cmpRows construction because the
+  // "n wins / n losses (exact)" row inside cmpRows reads it. Actual population
+  // happens later (after mtmCmpRows is computed) — `null` means trades not yet
+  // loaded. Block-scoped let with TDZ rules requires this ordering.
+  type HypAggs = {
+    n_winners_hyp: number; n_losers_hyp: number;
+    avg_win_hyp: number | null; avg_loss_hyp: number | null;
+    max_win_hyp: number | null;
+    avg_net_hyp: number | null;
+    avg_net_winners_hyp: number | null;
+    n_w_below_avg_min_hyp: number;
+    n_l_above_avg_max_hyp: number;
+    n_w_below_avg_min_base: number;
+    n_l_above_avg_max_base: number;
+    min_loss_hyp: number | null;
+    total_win_hyp: number | null;
+    total_loss_hyp: number | null;
+    total_net_hyp: number | null;
+    stdev_net_hyp: number | null;
+    stdev_losses_hyp: number | null;
+    sortino_hyp: number | null;
+    sharpe_hyp: number | null;
+    calmar_hyp: number | null;
+    n_winners_base: number; n_losers_base: number;
+    stdev_net_base: number | null;
+    stdev_losses_base: number | null;
+    sortino_base: number | null;
+    sharpe_base: number | null;
+    calmar_base: number | null;
+    max_win_streak_base: number; max_win_streak_hyp: number;
+    max_loss_streak_base: number; max_loss_streak_hyp: number;
+    avg_exit_mtm_overall_base: number | null; avg_exit_mtm_overall_hyp: number | null;
+    avg_exit_mtm_w_base: number | null;       avg_exit_mtm_w_hyp: number | null;
+    avg_exit_mtm_l_base: number | null;       avg_exit_mtm_l_hyp: number | null;
+    largest_exit_mtm_w_base: number | null;   largest_exit_mtm_w_hyp: number | null;
+    largest_exit_mtm_l_base: number | null;   largest_exit_mtm_l_hyp: number | null;
+    total_exit_mtm_w_base: number | null;     total_exit_mtm_w_hyp: number | null;
+    total_exit_mtm_l_base: number | null;     total_exit_mtm_l_hyp: number | null;
+    peak_pct_base: number | null; peak_pct_hyp: number | null;
+    trough_pct_base: number | null; trough_pct_hyp: number | null;
+    ret_margin_base: number | null; ret_margin_hyp: number | null;
+    ret_credit_base: number | null; ret_credit_hyp: number | null;
+    ret_margin_w_base: number | null; ret_margin_w_hyp: number | null;
+    ret_credit_w_base: number | null; ret_credit_w_hyp: number | null;
+    has_exit_mtm: boolean;
+    has_credit: boolean;
+    has_margin: boolean;
+  };
+  let hypAggs: HypAggs | null = null;
+
   if (bm) {
     // Helper to format a comparison row
     const fmtDelta = (raw: number | null, isPositiveBetter: boolean, asPct = false): { delta: string; color: string; arrow: string } => {
@@ -1404,22 +1454,8 @@ function CellDetail({
       });
     }
 
-    // 8) Exact n wins / n losses from bandTrades (replaces the rounded derivation above when available)
-    if (hypAggs) {
-      // Overwrite the earlier "n wins / n losses" entry derived from rounded win rate
-      const idx = cmpRows.findIndex(r => r.label === 'n wins / n losses');
-      const dwins = hypAggs.n_winners_hyp - hypAggs.n_winners_base;
-      const exactRow: CmpRow = {
-        label: 'n wins / n losses (exact)',
-        baseline: `${hypAggs.n_winners_base} / ${hypAggs.n_losers_base}`,
-        stage1: `${hypAggs.n_winners_hyp} / ${hypAggs.n_losers_hyp}`,
-        delta: `${dwins >= 0 ? '+' : ''}${dwins} / ${dwins >= 0 ? '−' : '+'}${Math.abs(dwins)}`,
-        deltaColor: dwins > 0 ? '#4ade80' : dwins < 0 ? '#f87171' : '#7a9bb5',
-        arrow: dwins > 0 ? '↑' : dwins < 0 ? '↓' : '−',
-        note: 'exact counts from bandTrades (no rounding)',
-      };
-      if (idx >= 0) cmpRows[idx] = exactRow; else cmpRows.push(exactRow);
-    }
+    // 8) Exact n wins / n losses — see post-hypAggs block below; relocated to
+    //    avoid TDZ narrowing issue (hypAggs is populated later in the function).
   }
 
   // Tag first cmpRow with "Core P&L" section
@@ -1459,59 +1495,8 @@ function CellDetail({
   // hyp_max_mtm = exit_frac × trigger + (1-exit_frac) × actual_max_mtm  (for fired trades)
   // Classify hyp-winner/hyp-loser by hyp_net_pnl.
   const mtmCmpRows: CmpRow[] = [];
-  // Hyp aggregates derived from bandTrades — used to fill in client-side computable rows
-  // for the P&L-splits section. Null until trades load.
-  let hypAggs: {
-    n_winners_hyp: number; n_losers_hyp: number;
-    avg_win_hyp: number | null; avg_loss_hyp: number | null;
-    max_win_hyp: number | null;
-    avg_net_hyp: number | null;
-    avg_net_winners_hyp: number | null;
-    n_w_below_avg_min_hyp: number;
-    n_l_above_avg_max_hyp: number;
-    n_w_below_avg_min_base: number;
-    n_l_above_avg_max_base: number;
-    // Tier 1 / Tier 3 additions
-    min_loss_hyp: number | null;          // most negative hyp_net_pnl (largest loss per trade)
-    total_win_hyp: number | null;
-    total_loss_hyp: number | null;
-    total_net_hyp: number | null;
-    stdev_net_hyp: number | null;
-    stdev_losses_hyp: number | null;
-    sortino_hyp: number | null;
-    sharpe_hyp: number | null;
-    calmar_hyp: number | null;
-    // Baseline analogues from bandTrades (using actual net_pnl)
-    n_winners_base: number; n_losers_base: number;
-    stdev_net_base: number | null;
-    stdev_losses_base: number | null;
-    sortino_base: number | null;
-    sharpe_base: number | null;
-    calmar_base: number | null;
-    // Streaks (date-sorted)
-    max_win_streak_base: number; max_win_streak_hyp: number;
-    max_loss_streak_base: number; max_loss_streak_hyp: number;
-    // Exit MTM aggregates (F14 with per-trade exit_mtm_usd from backend)
-    avg_exit_mtm_overall_base: number | null; avg_exit_mtm_overall_hyp: number | null;
-    avg_exit_mtm_w_base: number | null;       avg_exit_mtm_w_hyp: number | null;
-    avg_exit_mtm_l_base: number | null;       avg_exit_mtm_l_hyp: number | null;
-    largest_exit_mtm_w_base: number | null;   largest_exit_mtm_w_hyp: number | null;
-    largest_exit_mtm_l_base: number | null;   largest_exit_mtm_l_hyp: number | null;
-    total_exit_mtm_w_base: number | null;     total_exit_mtm_w_hyp: number | null;
-    total_exit_mtm_l_base: number | null;     total_exit_mtm_l_hyp: number | null;
-    // Peak / Trough % per-trade hyp (F14)
-    peak_pct_base: number | null; peak_pct_hyp: number | null;
-    trough_pct_base: number | null; trough_pct_hyp: number | null;
-    // Per-trade Ret/margin and Ret/credit (more accurate than band-level)
-    ret_margin_base: number | null; ret_margin_hyp: number | null;
-    ret_credit_base: number | null; ret_credit_hyp: number | null;
-    ret_margin_w_base: number | null; ret_margin_w_hyp: number | null;
-    ret_credit_w_base: number | null; ret_credit_w_hyp: number | null;
-    // Track whether per-trade fields are actually present (backend may not return them)
-    has_exit_mtm: boolean;
-    has_credit: boolean;
-    has_margin: boolean;
-  } | null = null;
+  // hypAggs declared at top of the function (before cmpRows) to satisfy
+  // block-scoped TDZ ordering. Populated below when bandTrades is available.
   if (bandTrades && bandTrades.length > 0 && cell.trigger_mtm != null && bm) {
     const trig = cell.trigger_mtm;
     const ef = cell.exit_frac;
@@ -1664,6 +1649,23 @@ function CellDetail({
       has_credit:   bandTrades.some(t => t.credit_usd != null),
       has_margin:   bandTrades.some(t => t.margin_used_usd_at_entry != null),
     };
+
+    // Now that hypAggs is populated, override the "n wins / n losses" row in cmpRows
+    // with exact counts (replaces the rounded derivation from earlier).
+    {
+      const idx = cmpRows.findIndex(r => r.label === 'n wins / n losses');
+      const dwins = hypAggs.n_winners_hyp - hypAggs.n_winners_base;
+      const exactRow: CmpRow = {
+        label: 'n wins / n losses (exact)',
+        baseline: `${hypAggs.n_winners_base} / ${hypAggs.n_losers_base}`,
+        stage1: `${hypAggs.n_winners_hyp} / ${hypAggs.n_losers_hyp}`,
+        delta: `${dwins >= 0 ? '+' : ''}${dwins} / ${dwins >= 0 ? '−' : '+'}${Math.abs(dwins)}`,
+        deltaColor: dwins > 0 ? '#4ade80' : dwins < 0 ? '#f87171' : '#7a9bb5',
+        arrow: dwins > 0 ? '↑' : dwins < 0 ? '↓' : '−',
+        note: 'exact counts from bandTrades (no rounding)',
+      };
+      if (idx >= 0) cmpRows[idx] = exactRow; else cmpRows.push(exactRow);
+    }
 
     const mtmRow = (label: string, baseVal: number | null, stageVal: number | null, isPositiveBetter: boolean) => {
       if (baseVal == null || stageVal == null) return;
