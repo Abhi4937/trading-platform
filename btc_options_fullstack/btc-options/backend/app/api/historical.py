@@ -36,16 +36,6 @@ _STRIKE_INDEX_BASE_DIR = "/home/abhis/btc-data/data/options"
 _STRIKE_INDEX_CACHE_PATH = "/home/abhis/btc-data/derived/.strike_index.json"
 
 
-def _count_expiry_dirs() -> int:
-    try:
-        return sum(
-            1 for d in Path(_STRIKE_INDEX_BASE_DIR).iterdir()
-            if d.is_dir() and "=" in d.name
-        )
-    except Exception:
-        return -1
-
-
 def _load_strike_index_from_cache() -> bool:
     """Return True and populate _strike_index if cache exists and is fresh."""
     if not os.path.exists(_STRIKE_INDEX_CACHE_PATH):
@@ -54,8 +44,12 @@ def _load_strike_index_from_cache() -> bool:
         with open(_STRIKE_INDEX_CACHE_PATH) as f:
             payload = json.load(f)
         meta = payload.get("_meta", {})
-        n_now = _count_expiry_dirs()
-        if n_now < 0 or meta.get("n_expiries") != n_now:
+        built_at = meta.get("built_at", 0)
+        try:
+            dir_mtime = os.path.getmtime(_STRIKE_INDEX_BASE_DIR)
+        except OSError:
+            return False
+        if dir_mtime > built_at:
             return False
         _strike_index.update({k: v for k, v in payload.items() if k != "_meta"})
         logger.info("Strike index loaded from disk cache (%d expiries)", len(_strike_index))
