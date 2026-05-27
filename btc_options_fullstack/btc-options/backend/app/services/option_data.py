@@ -60,6 +60,34 @@ def get_spot_at_or_before(timestamp: int) -> float:
     return float(res[0]) if res and res[0] is not None else 0.0
 
 
+def load_spot_series(t_start: int, t_end: int) -> list[dict]:
+    """All 1-minute BTC spot marks in [t_start, t_end], sorted ascending.
+
+    Returns [{"time": <unix_secs>, "close": <usdt_per_btc>}].
+    One DuckDB read for the full window — avoids per-bar queries in the bar loop.
+    """
+    conn = get_conn()
+    df = conn.execute(
+        f"SELECT timestamp_unix AS time, mark_close AS close "
+        f"FROM read_parquet('{SPOT_DATA_PATH}') "
+        f"WHERE timestamp_unix >= {int(t_start)} AND timestamp_unix <= {int(t_end)} "
+        f"  AND mark_close IS NOT NULL "
+        f"ORDER BY timestamp_unix ASC"
+    ).df()
+    if df.empty:
+        return []
+    out: list[dict] = []
+    for _, r in df.iterrows():
+        try:
+            cf = float(r["close"])
+        except (TypeError, ValueError):
+            continue
+        if cf != cf:  # NaN
+            continue
+        out.append({"time": int(r["time"]), "close": cf})
+    return out
+
+
 # ── ATM strike resolution ─────────────────────────────────────────────────────
 
 def atm_strike_for(timestamp: int, expiry: str) -> int:
@@ -137,6 +165,74 @@ def strike_for_strike_type(
     return sorted_strikes[idx]
 
 
+# ── Batch chain helpers ──────────────────────────────────────────────────────
+#
+# The per-strike helpers (get_mark_at_or_before, get_oi_at_or_before) open a
+# parquet file per call. On Windows Docker bind-mounts each cold open is 5+
+# seconds, so scanning a 100-strike chain across 4 legs becomes ~20 min/day.
+#
+# These helpers do ONE DuckDB glob query per (expiry, option_type, timestamp)
+# triple, leaning on hive partitioning to extract `strike` from the path and
+# a window function to keep only the latest row per strike. That's a single
+# file-system roundtrip; DuckDB parallelises the individual reads internally.
+
+def get_marks_for_chain(
+    expiry: str, option_type: Literal["CE", "PE"], timestamp: int,
+) -> dict[int, tuple[float, int]]:
+    """Return {strike: (mark_close, ts)} for every strike of (expiry, type)
+    with mark > 0 at or before `timestamp`. One query for the whole chain.
+    """
+    glob = f"{OPTIONS_BASE_DIR}/expiry={expiry}/strike=*/{option_type}.parquet"
+    conn = get_conn()
+    sql = (
+        f"SELECT strike, mark_close, timestamp_unix "
+        f"FROM read_parquet('{glob}', hive_partitioning=true) "
+        f"WHERE timestamp_unix <= {int(timestamp)} "
+        f"QUALIFY ROW_NUMBER() OVER (PARTITION BY strike ORDER BY timestamp_unix DESC) = 1"
+    )
+    try:
+        rows = conn.execute(sql).fetchall()
+    except Exception:
+        return {}
+    out: dict[int, tuple[float, int]] = {}
+    for strike, mark, ts in rows:
+        if mark is None or ts is None:
+            continue
+        if float(mark) > 0:
+            out[int(strike)] = (float(mark), int(ts))
+    return out
+
+
+def get_chain_snapshot(
+    expiry: str, option_type: Literal["CE", "PE"], timestamp: int,
+) -> dict[int, dict]:
+    """Return {strike: {'mark': float, 'oi': float, 'ts': int}} for the chain.
+    Same one-shot batch read as get_marks_for_chain, but pulls oi_close too.
+    """
+    glob = f"{OPTIONS_BASE_DIR}/expiry={expiry}/strike=*/{option_type}.parquet"
+    conn = get_conn()
+    sql = (
+        f"SELECT strike, mark_close, oi_close, timestamp_unix "
+        f"FROM read_parquet('{glob}', hive_partitioning=true) "
+        f"WHERE timestamp_unix <= {int(timestamp)} "
+        f"QUALIFY ROW_NUMBER() OVER (PARTITION BY strike ORDER BY timestamp_unix DESC) = 1"
+    )
+    try:
+        rows = conn.execute(sql).fetchall()
+    except Exception:
+        return {}
+    out: dict[int, dict] = {}
+    for strike, mark, oi, ts in rows:
+        if mark is None or ts is None:
+            continue
+        if float(mark) <= 0:
+            continue
+        import math as _math
+        oi_val = 0.0 if oi is None or _math.isnan(float(oi)) else float(oi)
+        out[int(strike)] = {"mark": float(mark), "oi": oi_val, "ts": int(ts)}
+    return out
+
+
 def strike_for_closest_premium(
     timestamp: int, expiry: str,
     option_type: Literal["CE", "PE"], target_premium: float,
@@ -144,15 +240,12 @@ def strike_for_closest_premium(
     """Find the strike whose mark price at `timestamp` is closest to `target_premium`."""
     if target_premium <= 0:
         return 0
-    strikes = get_strikes_for_expiry(expiry)
-    if not strikes:
+    marks_map = get_marks_for_chain(expiry, option_type, timestamp)
+    if not marks_map:
         return 0
     best_strike = 0
     best_diff = float("inf")
-    for k in strikes:
-        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
-        if mark <= 0:
-            continue
+    for k, (mark, _ts) in marks_map.items():
         d = abs(mark - target_premium)
         if d < best_diff:
             best_diff = d
@@ -174,8 +267,8 @@ def strike_for_closest_delta(
     spot = get_spot_at_or_before(timestamp)
     if spot <= 0:
         return 0
-    strikes = get_strikes_for_expiry(expiry)
-    if not strikes:
+    marks_map = get_marks_for_chain(expiry, option_type, timestamp)
+    if not marks_map:
         return 0
 
     expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
@@ -188,10 +281,8 @@ def strike_for_closest_delta(
     best_strike = 0
     best_diff = float("inf")
     flag = "call" if option_type == "CE" else "put"
-    for k in sorted(strikes):
-        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
-        if mark <= 0:
-            continue
+    for k in sorted(marks_map.keys()):
+        mark, _ts = marks_map[k]
         iv = implied_vol(mark, spot, k, T, 0.0, flag)
         if not iv or iv <= 0:
             continue
@@ -220,8 +311,8 @@ def strike_for_closest_delta_below(
     spot = get_spot_at_or_before(timestamp)
     if spot <= 0:
         return 0
-    strikes = get_strikes_for_expiry(expiry)
-    if not strikes:
+    marks_map = get_marks_for_chain(expiry, option_type, timestamp)
+    if not marks_map:
         return 0
 
     expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
@@ -236,10 +327,8 @@ def strike_for_closest_delta_below(
     above: list[tuple[float, int]] = []
 
     flag = "call" if option_type == "CE" else "put"
-    for k in sorted(strikes):
-        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
-        if mark <= 0:
-            continue
+    for k in sorted(marks_map.keys()):
+        mark, _ts = marks_map[k]
         iv = implied_vol(mark, spot, k, T, 0.0, flag)
         if not iv or iv <= 0:
             continue
@@ -277,8 +366,8 @@ def strikes_pool_for_delta_below(
     spot = get_spot_at_or_before(timestamp)
     if spot <= 0:
         return []
-    strikes = get_strikes_for_expiry(expiry)
-    if not strikes:
+    marks_map = get_marks_for_chain(expiry, option_type, timestamp)
+    if not marks_map:
         return []
 
     expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
@@ -292,10 +381,8 @@ def strikes_pool_for_delta_below(
     below: list[tuple[int, float, float]] = []   # (strike, abs_delta, mark)
     above: list[tuple[int, float, float]] = []
 
-    for k in sorted(strikes):
-        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
-        if mark <= 0:
-            continue
+    for k in sorted(marks_map.keys()):
+        mark, _ts = marks_map[k]
         iv = implied_vol(mark, spot, k, T, 0.0, flag)
         if not iv or iv <= 0:
             continue
@@ -328,8 +415,8 @@ def strike_for_highest_oi(
     spot = get_spot_at_or_before(timestamp)
     if spot <= 0:
         return 0
-    strikes = get_strikes_for_expiry(expiry)
-    if not strikes:
+    chain = get_chain_snapshot(expiry, option_type, timestamp)
+    if not chain:
         return 0
 
     expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(
@@ -343,16 +430,18 @@ def strike_for_highest_oi(
     best_strike = 0
     best_oi = 0.0
 
-    for k in sorted(strikes):
+    for k in sorted(chain.keys()):
         # OTM filter (strict)
         if option_type == "CE" and k <= spot:
             continue
         if option_type == "PE" and k >= spot:
             continue
 
-        mark, _ = get_mark_at_or_before(expiry, k, option_type, timestamp)
-        if mark <= 0:
-            continue
+        snap = chain[k]
+        mark = snap["mark"]
+        oi = snap["oi"]
+        if oi <= 0:
+            continue  # cheap rejection before IV solve
         iv = implied_vol(mark, spot, k, T, 0.0, flag)
         if not iv or iv <= 0:
             continue
@@ -361,9 +450,6 @@ def strike_for_highest_oi(
         except Exception:
             continue
         if abs(g.delta) > cap:
-            continue
-        oi = get_oi_at_or_before(expiry, k, option_type, timestamp)
-        if oi <= 0:
             continue
         if oi > best_oi:
             best_oi = oi

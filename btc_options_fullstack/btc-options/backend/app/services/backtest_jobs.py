@@ -27,6 +27,7 @@ class JobState:
     progress: dict[str, Any] = field(default_factory=lambda: {
         "days_done": 0, "days_total": 0, "current_date": None,
     })
+    trades: list[dict] = field(default_factory=list)  # appended live during run
     result: Optional[dict] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -85,6 +86,13 @@ def update_progress(job_id: str, days_done: int, days_total: int,
     if job.status == "queued":
         job.status = "running"
         job.started_at = time.time()
+
+
+def append_trade(job_id: str, trade: dict) -> None:
+    """Append a completed-day trade to the job's live trades list."""
+    job = _jobs.get(job_id)
+    if job:
+        job.trades.append(trade)
 
 
 def mark_done(job_id: str, result: dict) -> None:

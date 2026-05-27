@@ -17,7 +17,10 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+import time
+
 from app.services import backtest as backtest_service
+from app.services import backtest_cache
 from app.services import backtest_jobs
 
 logger = logging.getLogger(__name__)
@@ -113,6 +116,8 @@ class BacktestStatusResponse(BaseModel):
     progress: BacktestProgress
     error: Optional[str] = None
     result: Optional[dict] = None
+    trades: Optional[list[dict]] = None  # live partial trades during run
+    cached: bool = False                  # True when served from cache
 
 
 # ── Worker pool ──────────────────────────────────────────────────────────────
@@ -140,6 +145,11 @@ async def _run_job(job_id: str, params: dict[str, Any]) -> None:
             # cancel() already marked status="cancelled"; don't overwrite
             return
         backtest_jobs.mark_done(job_id, result)
+        # Persist successful runs so identical re-submissions hit the cache.
+        try:
+            backtest_cache.save(backtest_cache.cache_key(params), result)
+        except Exception:
+            logger.exception("backtest_cache.save failed for job %s", job_id)
     except Exception as e:
         logger.exception(f"Backtest job {job_id} failed")
         backtest_jobs.mark_error(job_id, str(e))
@@ -150,6 +160,21 @@ async def _run_job(job_id: str, params: dict[str, Any]) -> None:
 @router.post("/backtest", response_model=BacktestSubmitResponse)
 async def submit_backtest(req: BacktestRequest):
     params = req.model_dump()
+    # Cache check — identical params produce identical results, so skip the run.
+    key = backtest_cache.cache_key(params)
+    cached = backtest_cache.load(key)
+    if cached is not None:
+        job = backtest_jobs.submit(params)
+        # Pre-fill as done with cached result + trades so the status endpoint
+        # returns everything immediately without a second poll. Skip
+        # update_progress so started_at stays None — that's our cached-hit signal.
+        n = len(cached.get("trades", []))
+        job.trades = list(cached.get("trades", []))
+        job.progress["days_done"] = n
+        job.progress["days_total"] = n
+        backtest_jobs.mark_done(job.job_id, cached)
+        logger.info("backtest_cache HIT key=%s job=%s", key, job.job_id)
+        return BacktestSubmitResponse(job_id=job.job_id, status=job.status)
     job = backtest_jobs.submit(params)
     job.task = asyncio.create_task(_run_job(job.job_id, params))
     return BacktestSubmitResponse(job_id=job.job_id, status=job.status)
@@ -163,10 +188,14 @@ async def get_backtest_status(job_id: str):
 
     eta: Optional[float] = None
     if job.started_at and job.progress["days_done"] > 0:
-        elapsed = (job.finished_at or asyncio.get_event_loop().time()) - job.started_at
+        # job.started_at uses time.time(); keep the same time base for elapsed.
+        elapsed = (job.finished_at or time.time()) - job.started_at
         per_day = elapsed / job.progress["days_done"]
         remaining = max(0, job.progress["days_total"] - job.progress["days_done"])
         eta = round(per_day * remaining, 1)
+
+    # Cache-hit jobs are pre-filled as done with no real run, so flag them.
+    is_cached = job.status == "done" and job.started_at is None
 
     return BacktestStatusResponse(
         job_id=job.job_id,
@@ -179,6 +208,8 @@ async def get_backtest_status(job_id: str):
         ),
         error=job.error,
         result=job.result if job.status == "done" else None,
+        trades=job.trades if job.status in ("running", "done") else None,
+        cached=is_cached,
     )
 
 

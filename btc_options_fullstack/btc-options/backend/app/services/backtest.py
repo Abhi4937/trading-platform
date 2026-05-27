@@ -21,6 +21,7 @@ Aggregate: equity curve, daily P&L bars, win rate, Sharpe, max DD, expectancy.
 
 from __future__ import annotations
 
+import bisect
 import math
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -37,6 +38,7 @@ from .option_data import (
     get_spot_at_or_before,
     list_expiries_for,
     load_leg_series,
+    load_spot_series,
     resolve_expiry,
     strike_at_offset,
     strike_for_strike_type,
@@ -455,9 +457,25 @@ def _simulate_day(
     ]
     leg_flags = ["call" if leg["type"] == "CE" else "put" for leg in resolved_legs]
 
+    # Pre-load spot series for the hold period (one DuckDB read → O(log n) lookup per bar).
+    _spot_ts: list[int] = []
+    _spot_px: list[float] = []
+    try:
+        for sb in load_spot_series(entry_ts, actual_exit_ts + 300):
+            _spot_ts.append(sb["time"])
+            _spot_px.append(sb["close"])
+    except Exception:
+        pass
+
+    def _spot_lookup(t: int) -> float:
+        if not _spot_ts:
+            return 0.0
+        pos = bisect.bisect_right(_spot_ts, t) - 1
+        return _spot_px[pos] if pos >= 0 else 0.0
+
     def _deltas_at(t: int, marks: list[float]) -> list[float]:
         """Compute per-leg BS delta at time t using current marks (best-effort)."""
-        sp = get_spot_at_or_before(t) or spot_at_entry
+        sp = _spot_lookup(t) or spot_at_entry
         out: list[float] = []
         for i, mk in enumerate(marks):
             try:
@@ -574,7 +592,7 @@ def _simulate_day(
     if sl_triggered:
         exit_marks     = sl_exit_marks
         actual_exit_ts = sl_exit_ts
-        spot_at_exit   = get_spot_at_or_before(sl_exit_ts) or spot_at_entry
+        spot_at_exit   = _spot_lookup(sl_exit_ts) or spot_at_entry
         gross = 0.0
         leg_fills = []
         for leg, em, xm, ed, eiv in zip(resolved_legs, entry_marks, exit_marks, entry_deltas, entry_ivs):
@@ -851,7 +869,11 @@ def run_backtest(
     params: dict[str, Any],
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
-    """Run the full backtest. Updates job progress as days complete."""
+    """Run the full backtest sequentially. Updates job progress as days complete.
+
+    Sequential is correct here: Windows Docker bind-mount is single-threaded for
+    cold parquet opens, so multi-process workers contend without gaining throughput.
+    """
     # Pre-filter to entry-eligible weekdays so progress reflects real work,
     # not the full calendar span. _simulate_day still re-checks defensively.
     weekday_mask = params.get("weekday_mask", set(range(7)))
@@ -871,6 +893,7 @@ def run_backtest(
         except Exception as e:
             t = _skipped(d, f"error: {e}")
         trades.append(t)
+        backtest_jobs.append_trade(job_id, t)
         backtest_jobs.update_progress(job_id, i, days_total, d.isoformat())
 
     summary = _compute_summary(trades)

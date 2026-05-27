@@ -290,4 +290,6 @@ export interface BacktestStatusResponse {
   progress: BacktestProgress;
   error: string | null;
   result: BacktestResult | null;
+  trades?: BacktestTrade[] | null;   // live partial trades during run; full list on done
+  cached?: boolean;                  // true when result was served from disk cache
 }

@@ -232,6 +232,12 @@ export const BacktestDashboard: React.FC = () => {
   const running = status && (status.status === 'queued' || status.status === 'running');
   const busy = submitting || !!running;
 
+  // Live trades: from final result when done, or from streaming partial list while running.
+  // Filter skipped days — they have no P&L and clutter the table.
+  const liveTrades = result?.trades
+    ?? status?.trades?.filter(t => !t.skipped)
+    ?? [];
+
   return (
     <div style={{
       height: 'calc(100vh - 60px)',
@@ -298,14 +304,44 @@ export const BacktestDashboard: React.FC = () => {
                 <CardLight title="Daily P&L">
                   <BacktestDailyPnlBars data={result.equity_curve} height={200} />
                 </CardLight>
+              </>
+            )}
 
-                <BacktestTradeLogTable
-                  trades={result.trades}
-                  summary={result.summary}
-                  onSelectTrade={setSelectedTrade}
-                  selectedTradeKey={selectedTrade
-                    ? `${selectedTrade.date}|${selectedTrade.entry_time ?? ''}` : null}
-                />
+            {liveTrades.length > 0 && (
+              <>
+                <div style={{
+                  background: '#0d1421', border: '1px solid #1a2d42',
+                  borderRadius: 8, padding: 14,
+                }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    marginBottom: 8,
+                  }}>
+                    <span style={{
+                      color: '#7a9bb5', fontSize: 11, fontWeight: 600,
+                      textTransform: 'uppercase', letterSpacing: 0.4,
+                    }}>
+                      Trade Log
+                    </span>
+                    {running && (
+                      <span style={{
+                        background: '#1a3a5c', color: '#60a5fa',
+                        fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                        padding: '2px 7px', borderRadius: 10,
+                        textTransform: 'uppercase',
+                      }}>
+                        Live · {liveTrades.length} trades
+                      </span>
+                    )}
+                  </div>
+                  <BacktestTradeLogTable
+                    trades={liveTrades}
+                    summary={result?.summary}
+                    onSelectTrade={setSelectedTrade}
+                    selectedTradeKey={selectedTrade
+                      ? `${selectedTrade.date}|${selectedTrade.entry_time ?? ''}` : null}
+                  />
+                </div>
 
                 {selectedTrade && selectedTradeAnalytics && (
                   <CardLight title={`Trade Analytics — ${selectedTrade.date} ${selectedTrade.entry_time ?? ''}`}>
