@@ -6,8 +6,10 @@
 #
 # Picks the first free slot in 0-9, brings up docker-backend-session-N-1
 # on port 8000+N, writes a lock file, then prints instructions for starting
-# the matching frontend. Slot 0 is primary (live ticker enabled); rest are
-# secondary (DISABLE_LIVE_TICKER=1).
+# the matching frontend. Slot 0 is the permanent primary (live ticker ON,
+# recorder ON, owns disk writes). Slots 1-9 are secondary: live ticker ON
+# (read-only) so the live chain works without REST polling, but recorder
+# OFF (DISABLE_TICKER_RECORDER=1) so only slot 0 writes parquet/disk.
 #
 # Options:
 #   --build   Force docker image rebuild (needed after pip/Dockerfile changes)
@@ -115,8 +117,9 @@ BACKEND_PORT=$((8000 + SLOT))
 FRONTEND_PORT=$((3000 + SLOT))
 REDIS_DB=$SLOT
 CONTAINER="docker-backend-session-${SLOT}-1"
-DISABLE_TICKER=1   # slots 1-9 are always secondary
-IS_PRIMARY="no — live ticker runs in docker-backend-1 (:8000)"
+DISABLE_TICKER=0       # slots 1-9 still get live ticker WS feed (read-only)
+DISABLE_RECORDER=1     # but only slot 0 records ticks to disk (avoid write clash)
+IS_PRIMARY="no — live ticker ON (read-only), recorder OFF (slot 0 owns disk writes)"
 
 # Write lock before releasing mutex
 cat > "$LOCK_DIR/${BACKEND_PORT}.lock" <<EOF
@@ -168,6 +171,7 @@ export SESSION_SLOT="$SLOT"
 export BACKEND_PORT="$BACKEND_PORT"
 export REDIS_DB="$REDIS_DB"
 export DISABLE_LIVE_TICKER="$DISABLE_TICKER"
+export DISABLE_TICKER_RECORDER="${DISABLE_RECORDER:-0}"
 
 docker compose \
     -p "btc_session_${SLOT}" \

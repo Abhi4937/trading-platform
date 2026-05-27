@@ -173,9 +173,10 @@ async def get_data_range():
         # max_ts: latest actual recorded price from spot parquet — not expiry folder name
         # This correctly reflects the last date data was collected, not the last contract expiry
         conn = get_conn()
-        spot_max = conn.execute(
+        row = conn.execute(
             f"SELECT MAX(timestamp_unix) FROM read_parquet('{SPOT_DATA_PATH_RANGE}')"
-        ).fetchone()[0]
+        ).fetchone()
+        spot_max = row[0] if row else None
         max_ts = int(spot_max) if spot_max else min_ts
 
         return {"min_ts": min_ts, "max_ts": max_ts}

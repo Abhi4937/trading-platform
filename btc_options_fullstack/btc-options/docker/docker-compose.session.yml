@@ -28,6 +28,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/${REDIS_DB}
       - DISABLE_LIVE_TICKER=${DISABLE_LIVE_TICKER}
+      - DISABLE_TICKER_RECORDER=${DISABLE_TICKER_RECORDER}
     networks:
       - docker_default
     volumes:

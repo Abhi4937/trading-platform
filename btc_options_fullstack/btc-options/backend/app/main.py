@@ -61,12 +61,19 @@ async def lifespan(app: FastAPI):
     logger.info("Startup — Strike index built")
     ws_task = None
     merge_task = None
-    if not os.environ.get("DISABLE_LIVE_TICKER"):
+    # env vars come in as strings — "0"/"false"/empty mean OFF, anything else ON
+    def _env_flag(name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
+
+    if not _env_flag("DISABLE_LIVE_TICKER"):
         ws_task = asyncio.create_task(run_delta_ws())
         logger.info("Startup — Delta WebSocket client started")
-        await start_recorder()
-        merge_task = asyncio.create_task(merge_schedule_loop())
-        logger.info("Startup — live recorder + merge scheduler started")
+        if not _env_flag("DISABLE_TICKER_RECORDER"):
+            await start_recorder()
+            merge_task = asyncio.create_task(merge_schedule_loop())
+            logger.info("Startup — live recorder + merge scheduler started")
+        else:
+            logger.info("Startup — ticker recorder DISABLED (DISABLE_TICKER_RECORDER is set) — live data ON, no disk writes")
     else:
         logger.info("Startup — live ticker DISABLED (DISABLE_LIVE_TICKER is set)")
     # M7 best-combo grid: load from disk if present (instant), otherwise leave
