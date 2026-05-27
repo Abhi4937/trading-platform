@@ -852,7 +852,13 @@ def run_backtest(
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Run the full backtest. Updates job progress as days complete."""
-    dates = list(_iter_dates(params["start_date"], params["end_date"]))
+    # Pre-filter to entry-eligible weekdays so progress reflects real work,
+    # not the full calendar span. _simulate_day still re-checks defensively.
+    weekday_mask = params.get("weekday_mask", set(range(7)))
+    dates = [
+        d for d in _iter_dates(params["start_date"], params["end_date"])
+        if d.weekday() in weekday_mask
+    ]
     days_total = len(dates)
     backtest_jobs.update_progress(job_id, 0, days_total, None)
 

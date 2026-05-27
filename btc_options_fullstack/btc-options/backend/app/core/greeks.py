@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal
 
 
@@ -28,7 +29,8 @@ class Greeks:
     price_bs: float    # theoretical price
 
 
-def compute_greeks(S, K, T, r, sigma, option_type: Literal["call","put"]) -> Greeks:
+@lru_cache(maxsize=200_000)
+def _compute_greeks_cached(S, K, T, r, sigma, option_type: Literal["call","put"]) -> Greeks:
     if T <= 1e-6 or sigma <= 1e-6 or S <= 0 or K <= 0:
         intrinsic = max(0.0,S-K) if option_type=="call" else max(0.0,K-S)
         return Greeks(iv=sigma,delta=0.0,gamma=0.0,theta=0.0,vega=0.0,rho=0.0,price_bs=intrinsic)
@@ -51,9 +53,23 @@ def compute_greeks(S, K, T, r, sigma, option_type: Literal["call","put"]) -> Gre
                   price_bs=round(max(0.0,price),4))
 
 
-def implied_vol(market_price, S, K, T, r, option_type, max_iter=100, tol=1e-6) -> float:
+def compute_greeks(S, K, T, r, sigma, option_type: Literal["call","put"]) -> Greeks:
+    # Round inputs to sensible buckets so functionally-equivalent calls hit the
+    # cache. Spot to 1 USD, strike is integer, T to ~1s precision, sigma to 1bp.
+    return _compute_greeks_cached(
+        round(float(S), 0),
+        round(float(K), 0),
+        round(float(T), 8),
+        round(float(r), 6),
+        round(float(sigma), 6),
+        option_type,
+    )
+
+
+@lru_cache(maxsize=200_000)
+def _implied_vol_cached(market_price, S, K, T, r, option_type) -> float:
     if T <= 1e-6 or market_price <= 0: return 0.0
-    
+
     intrinsic = max(0.0, S - K) if option_type == "call" else max(0.0, K - S)
     if market_price <= intrinsic:
         return 0.0001 # Floor for options priced at intrinsic
@@ -63,29 +79,42 @@ def implied_vol(market_price, S, K, T, r, option_type, max_iter=100, tol=1e-6) -
     low, high = 0.001, 5.0
     for _ in range(12): # 12 steps narrows the window to ~0.1% width
         mid = (low + high) / 2
-        theo_price = compute_greeks(S, K, T, r, mid, option_type).price_bs
+        theo_price = _compute_greeks_cached(S, K, T, r, round(mid, 6), option_type).price_bs
         if theo_price < market_price:
             low = mid
         else:
             high = mid
-    
+
     # 2. Newton-Raphson to finish with high precision
     sigma = (low + high) / 2
     for _ in range(10):
-        g = compute_greeks(S, K, T, r, sigma, option_type)
+        g = _compute_greeks_cached(S, K, T, r, round(sigma, 6), option_type)
         diff = g.price_bs - market_price
-        if abs(diff) < tol:
+        if abs(diff) < 1e-6:
             break
         vf = g.vega * 100 # Vega is per 1% move, multiply by 100 for absolute derivative
-        if abs(vf) < 1e-10: 
+        if abs(vf) < 1e-10:
             break # Vega is too small for Newton, stick with Bisection result
-        
+
         prev_sigma = sigma
         sigma -= diff / vf
-        
+
         # If Newton jumps out of our bisection bracket, revert and break
         if sigma < low or sigma > high:
             sigma = prev_sigma
             break
-            
+
     return round(sigma, 6)
+
+
+def implied_vol(market_price, S, K, T, r, option_type, max_iter=100, tol=1e-6) -> float:
+    # max_iter/tol are stable constants in practice; omit from cache key.
+    # Round inputs to the same buckets as compute_greeks for cross-hit reuse.
+    return _implied_vol_cached(
+        round(float(market_price), 2),
+        round(float(S), 0),
+        round(float(K), 0),
+        round(float(T), 8),
+        round(float(r), 6),
+        option_type,
+    )
