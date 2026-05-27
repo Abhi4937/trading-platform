@@ -2385,3 +2385,29 @@ this as acceptable.
 - **Part G backfill RUNNING:** `docker logs -f backfill_may_1779305520` — 4 fridays (2026-04-24 → 2026-05-15)
 - **Pending:** Part I grid rebuild → Part F prewarm (see HANDOFF.md for exact commands)
 - **Files Touched:** `backend/app/api/m7_results.py` (M), `backend/app/api/m7_best_combo.py` (M), `backend/app/api/m7_pivot_profile.py` (M), `backend/app/analytics/m7_batch_backtester.py` (M), `backend/app/scripts/prewarm_m7_sweep.py` (new), `frontend/src/services/m7_api.ts` (M), `frontend/src/components/m7/M7IvBandBestComboTable.tsx` (M), `HANDOFF.md` (M)
+
+## Session 44 (2026-05-27) — Live ticker on secondary slots + backtest perf hunt
+- **Status:** 3 commits shipped + 5 files uncommitted (batch-read + cache + streaming + parallel — left on disk for next session because end-to-end backtest never completed to validate).
+- **Branch:** `feature/black-screen-fix` (3 ahead of origin, pushed)
+- **Commits:**
+  - `859a794` — `historical.py` strike-index freshness check: O(N) `_count_expiry_dirs` (883 dirs over Windows bind-mount = minutes) → single `os.path.getmtime()` vs cache `built_at`. Also `config.py` CORS for `localhost:3001-3009`.
+  - `38991da` — Split `DISABLE_LIVE_TICKER` into `DISABLE_LIVE_TICKER` (full off) + `DISABLE_TICKER_RECORDER` (WS feed ON, disk writes OFF). Fixed env-flag parsing — `os.environ.get` returns `"0"` which is truthy in Python; new `_env_flag` helper. `claim_session.sh` updated for slots 1-9. `data-range` NoneType guard.
+  - `07e7e10` — `backtest.py` pre-filter dates to `weekday_mask` (859→123 progress denominator). `greeks.py` `@lru_cache(maxsize=200_000)` on `compute_greeks` + `implied_vol` with input bucketing.
+- **Uncommitted on disk** (next session must commit after end-to-end validation):
+  - `backend/app/services/backtest_jobs.py` — `trades` field + `append_trade` helper
+  - `backend/app/services/backtest_cache.py` (NEW) — 2-tier memory+disk cache for completed results, keyed by sha256 of canonical params JSON
+  - `backend/app/api/backtest.py` — cache check on POST, trades+cached in status response, fixed ETA time-base bug (`loop.time()` vs `time.time()`)
+  - `backend/app/services/backtest.py` — `ProcessPoolExecutor` with `BACKTEST_WORKERS` env (default 4), streams trades per completed day
+  - `backend/app/services/option_data.py` — Batch chain reads (`get_marks_for_chain`, `get_chain_snapshot`) using DuckDB glob + hive partitioning + `QUALIFY ROW_NUMBER()` — replaces per-strike loops in 5 strike-resolver functions
+- **Perf measurements** (slot 2, single `_simulate_day(date(2026, 4, 3))` of user's 4-leg Friday→Sunday strategy):
+  - **Baseline (before any session-44 changes):** 1263.1s per Friday (mostly cold parquet opens on Windows bind-mount; ~200-400 file opens just for `closest_delta` strike resolution × 4 legs)
+  - **After Greeks LRU only:** ~890s (modest gain; bar loop dominated)
+  - **After batch-read chain via glob:** 890.7s — same `net_pnl=-4.7192`, same `LegSL` exit, correctness preserved. The batch-read killed the closest_delta scan but the per-bar `get_spot_at_or_before` loop (~3,480 bars × 4 legs) is now the dominant cost.
+  - **Parallelization (ProcessPoolExecutor)** does NOT help — Windows Docker bind-mount is effectively single-threaded for cold file opens; 4 workers contending = same wall time or slightly worse.
+- **Open bugs flagged for next session:**
+  1. `POST /api/v1/historical/backtest` takes 15.3s (should be <100ms)
+  2. `/data-range` takes 17s due to full DuckDB MAX scan instead of parquet stats
+  3. **Per-bar `get_spot_at_or_before(t)` in `_deltas_at`** = next bottleneck; fix is to pre-load spot bar range once per day
+- **Architectural insight saved as memory:** Live data via Delta WS feed (filling in-process `ticker_store`) is decoupled from disk recorder. Secondary slots can read-only without write clash. App.tsx ALWAYS mounts `useOptionChain` regardless of tab, so disabling the upstream WS forces a slow REST fallback that holds the GIL.
+- **End state:** All session-44 containers/frontends stopped at user's request. `docker-backend-1` (slot 0) untouched. Cache directory `/home/abhis/btc-data/derived/backtests/` doesn't exist yet (no backtest ever completed end-to-end with cache enabled).
+- **Files Touched:** `backend/app/api/historical.py`, `backend/app/core/config.py`, `backend/app/main.py`, `backend/app/services/backtest.py`, `backend/app/services/backtest_jobs.py`, `backend/app/services/backtest_cache.py` (new), `backend/app/services/option_data.py`, `backend/app/api/backtest.py`, `backend/app/core/greeks.py`, `docker/docker-compose.session.yml`, `scripts/claim_session.sh`, `HANDOFF.md` (M), `docs/memories/work_log_claude.md` (M), `docs/memories/current_state.md` (M)

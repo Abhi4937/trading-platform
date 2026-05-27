@@ -35,9 +35,59 @@ If anything looks off, the code lives at:
 - `frontend/src/services/m7_api.ts:FetchBestComboArgs` (`premium_sl_pcts` arg + serialisation)
 
 ## Last Session
-**Who:** Claude (Sonnet 4.6)
-**Date:** 2026-05-22 (Session 43 — Stage-1 per-trade modals)
-**Branch:** `mainbranch-gemini_claude`
+**Who:** Claude (Sonnet 4.6 → Opus 4.7 mid-session)
+**Date:** 2026-05-27 (Session 44 — Live ticker on secondary slots + backtest perf hunt)
+**Branch:** `feature/black-screen-fix`
+
+### Session 44 — Shipped (committed + pushed)
+
+| Commit | What |
+|--------|------|
+| `859a794` | `historical.py` — replace O(N) `_count_expiry_dirs()` strike-index freshness check with single `os.path.getmtime()` vs cache `built_at`. Cold-start scan over 883 expiry dirs dropped from minutes to ~1ms. `config.py` — extend `CORS_ORIGINS` to cover `localhost:3001-3009`. |
+| `38991da` | Split `DISABLE_LIVE_TICKER` into two gates: `DISABLE_LIVE_TICKER` still kills WS+recorder+merge (full off), new `DISABLE_TICKER_RECORDER` keeps the Delta WS feed alive but skips disk writes. Fix env-flag parsing (`"0"` was being treated truthy). `claim_session.sh` now sets `DISABLE_LIVE_TICKER=0 + DISABLE_TICKER_RECORDER=1` for slots 1-9. `historical.py:178` — `data-range` NoneType guard on `fetchone()`. |
+| `07e7e10` | `backtest.py` — pre-filter dates to `weekday_mask` before per-day loop (progress denominator now reflects real entry days, not full calendar span; user's 859-day range collapsed to ~123 Fridays). `greeks.py` — `@lru_cache(maxsize=200_000)` on `compute_greeks` + `implied_vol` with input bucketing (spot to 1 USD, T to 8dp, sigma/IV to 1bp, mark to 1¢). Synthetic test: 5000 repeated `implied_vol()` calls dropped 3s → 7ms. |
+
+### Session 44 — UNCOMMITTED on `feature/black-screen-fix` (this is the cliff-edge)
+
+| File | What |
+|------|------|
+| `backend/app/services/backtest_jobs.py` | Added `trades: list[dict]` field to `JobState` + `append_trade(job_id, trade)` helper for live partial-trades streaming. |
+| `backend/app/services/backtest_cache.py` | **NEW.** Two-tier (memory LRU + disk JSON at `/home/abhis/btc-data/derived/backtests/<sha256_16>.json`) cache for completed backtest results. Key = canonical JSON of params. |
+| `backend/app/api/backtest.py` | Cache check on `POST /backtest` (hit → return pre-filled done job instantly). `cached: bool` + `trades: list` added to status response. Fixed ETA time-base bug (`asyncio.loop.time()` mixed with `time.time()` → produced -1.6e11 sec ETAs). |
+| `backend/app/services/backtest.py` | `run_backtest` now uses `ProcessPoolExecutor` with `BACKTEST_WORKERS` env var (default 4). Streams trades via `backtest_jobs.append_trade` per completed day. Sequential fallback kept for debugging (`BACKTEST_WORKERS=1`). |
+| `backend/app/services/option_data.py` | **Batch chain reads** via DuckDB glob + `hive_partitioning=true` + `QUALIFY ROW_NUMBER() OVER (PARTITION BY strike ORDER BY ts DESC) = 1`. New helpers `get_marks_for_chain` + `get_chain_snapshot` replace per-strike `get_mark_at_or_before` loops in `strike_for_closest_delta`, `strike_for_closest_delta_below`, `strikes_pool_for_delta_below`, `strike_for_closest_premium`, `strike_for_highest_oi`. Strategy IV/delta math unchanged. |
+
+### Session 44 — What the perf hunt revealed (in order of investigation)
+
+1. **User opened slot 1, hit CORS error** (port 3001 wasn't in `CORS_ORIGINS`). Fixed in `config.py`, then discovered `backend/.env` (gitignored) **overrides** the in-code default — had to extend the .env list locally too (not committed; secrets file).
+2. **`/data-range` was ERRORing** with `'NoneType' object is not subscriptable` AND taking 19.4s. Fixed the NoneType; perf bug still there (DuckDB full MAX scan on spot parquet).
+3. **User reported live Delta REST calls "from backtest"** — actually not from backtest. Root cause: `App.tsx:43` always mounts `useOptionChain(selectedExpiry, true)` which opens `/ws/chain`. On slots with `DISABLE_LIVE_TICKER=1`, the WS handler (`backend/app/api/ws.py:32-37`) fell through to a per-second REST fallback hammering Delta API at ~50 calls/sec/expiry. This was holding the GIL and starving the backtest worker. Fixed by splitting the env gate.
+4. **Backtest progress showing 18/859** for a Friday-only strategy — UX confusion; calendar day count, not entry day count. Pre-filtered dates.
+5. **Greeks lru_cache landed but only ~30% per-day speedup**, not the projected 5-10×. Real bottleneck was elsewhere.
+6. **Profiled `_simulate_day` directly** inside slot 2 with a single call (`date(2026, 4, 3)`, user's strategy) → **1263 seconds = 21 minutes per Friday**. Stdout filled with DuckDB query progress bars, meaning each cold parquet open on the Windows Docker bind-mount was taking >5s. ~200-400 per-strike opens for `closest_delta` × 4 legs at entry alone.
+7. **Parallelization (ProcessPoolExecutor) doesn't help** — Windows Docker bind-mount is effectively single-threaded for cold file opens. 4 workers contending = same wall time, slightly worse from contention. Slot 2 with 4 workers got 0/4 done in 90s when slot 1 was running.
+8. **Batch-read glob fix re-tested** on the same `date(2026, 4, 3)` single-call → **890.7s** (vs 1263s baseline, vs prediction ~60s). Same `net_pnl=-4.7192` and `exit_reason=LegSL` → correctness preserved. The 30% improvement is from killing the closest_delta scan; remaining 890s is dominated by the **bar-loop spot reads** (`get_spot_at_or_before(t)` called once per bar × ~3,480 bars × 4 legs) which I didn't refactor.
+
+### Session 44 — Outstanding bugs / suspicious things
+
+1. **`POST /api/v1/historical/backtest` took 15.3s** for a single submission on slot 1 (per backend log). Should be near-instant — it only does a cache key hash + disk `os.path.exists()` + `submit()`. Worth investigating; maybe disk `exists()` on Windows bind-mount is slow when the dir doesn't exist yet, or pydantic validation of nested leg models is unexpectedly slow.
+2. **`/data-range` still takes ~17s** despite the NoneType fix — the underlying DuckDB `SELECT MAX(timestamp_unix) FROM read_parquet(SPOT_DATA_PATH)` is doing a full scan instead of using parquet statistics. Should investigate `pragma enable_object_cache` or pre-cache the value.
+3. **User said "ran 3 complete, none showing"** after restart — only 1 POST in 30 min of logs, no completed runs, cache dir never created. Most likely user was running on old code that didn't have the cache save, or the runs were still in-flight when they restarted. Worth checking with them next session.
+4. **Per-bar `get_spot_at_or_before(t)` in `_deltas_at`** (`backtest.py:458-473`) — this is the next bottleneck. Each bar opens the spot parquet via DuckDB. ~3,480 bars/day on Windows bind-mount = the remaining 890s. Fix: pre-load the spot bar range once via `load_spot_series` (analog to `load_leg_series`) and index into it; should drop per-day from ~15 min to seconds.
+
+### Session 44 — End state
+
+- All session containers/frontends stopped at user's request.
+- `docker-backend-1` (slot 0, port 8000) left running (4-day uptime, predates this session).
+- Branch `feature/black-screen-fix` is **3 commits ahead of origin** = pushed; the 5 uncommitted files above are **on disk only**.
+- No backtest ever ran end-to-end with the new cache enabled → `/home/abhis/btc-data/derived/backtests/` directory does not exist yet.
+
+### Session 44 — Suggested next steps
+
+1. **Fix the bar-loop spot bottleneck first** — pre-load spot series once per day in `_simulate_day`, look up by timestamp instead of querying parquet per bar. Should drop per-Friday from ~15 min to <30s.
+2. **Commit the uncommitted batch-read + cache + streaming work** once item 1 lands and a real end-to-end backtest completes successfully.
+3. **Investigate the 15s POST and the 17s `/data-range`** — neither is justified by the work they do.
+4. **Remove the dead `_count_expiry_dirs` helper** — already done in `859a794`, just noting.
 
 ### Session 43 — Shipped
 
@@ -61,7 +111,13 @@ If anything looks off, the code lives at:
 - **SL-chip Playwright verification** — see open follow-up at top of this file (Session 40, commit `3f3a145`)
 - **Pivot Profile UI verification** — commit `5f78994` (Session 40); Playwright screenshot still needed
 
-## Previous Session
+## Previous Session — Session 43
+**Who:** Claude (Sonnet 4.6)
+**Date:** 2026-05-22 (Session 43 — Stage-1 per-trade modals)
+**Branch:** `mainbranch-gemini_claude`
+(Details in commit `a7e500c`; superseded as "Last Session" by Session 44.)
+
+## Previous Session — Session 42
 **Who:** Claude (Opus 4.7)
 **Date:** 2026-05-22 (Session 42 — Per-session backend isolation + strike-index cache)
 **Branch:** `mainbranch-gemini_claude`

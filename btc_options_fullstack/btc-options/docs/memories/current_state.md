@@ -2,6 +2,28 @@
 
 ## Active Projects
 
+- **Backtest engine perf push (Session 44, 2026-05-27, PARTIALLY COMMITTED on `feature/black-screen-fix`):**
+  Goal: make the Historical Backtest usable for multi-year ranges. Baseline measured:
+  **1263s per Friday** for a 4-leg `closest_delta` strategy. After 3 shipped commits
+  (`859a794`/`38991da`/`07e7e10` — strike-index mtime check, live-ticker gate split,
+  weekday pre-filter, Greeks LRU cache) + 5 uncommitted files (batch chain reads
+  via DuckDB glob, ProcessPoolExecutor day loop, 2-tier result cache, live trade
+  streaming): current per-Friday = **890.7s**, correctness preserved (same
+  `net_pnl=-4.7192`, same `LegSL` exit).
+  - **Root cause of remaining 890s:** per-bar `get_spot_at_or_before(t)` calls
+    in `_deltas_at` (~3,480 bars × 4 legs per Friday) — each is a cold DuckDB
+    parquet open on Windows bind-mount.
+  - **Parallelization (ProcessPoolExecutor) does not help** — Windows Docker
+    bind-mount is single-threaded for cold file opens; workers just contend.
+  - **Next fix**: pre-load spot bar series once per `_simulate_day` (analog
+    to `load_leg_series`) and index lookups instead of per-bar parquet queries.
+    Expected per-Friday: <30s.
+  - **Uncommitted files** (do not commit until end-to-end backtest validates):
+    `backend/app/services/backtest.py`, `backtest_jobs.py`, `backtest_cache.py`
+    (new), `option_data.py`, `backend/app/api/backtest.py`.
+  - **Outstanding bugs**: `POST /backtest` takes 15s (root cause unknown);
+    `/data-range` takes 17s due to full DuckDB scan.
+
 - **Stage-1 Partial Exit Dashboard (Phase 9, Sessions 41/40/39, COMMITTED `6b6539f` + `8976ecd`):**
   Full dashboard integration complete. POST `/api/v1/m7/stage1_analysis` with SHA1-keyed L1+L2 cache,
   `M7Stage1Panel.tsx` with 4×5 heatmap + band cards + verdict chips. Under tight per-band filters
