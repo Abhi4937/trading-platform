@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Calendar Sweep — Mockup (Phase 0)</title>
+<style>
+  :root{
+    --bg:#0a0e17; --card:#0d1421; --bd:#1a2d42; --bd2:#131c28;
+    --tx:#cfd9e3; --tx2:#7a9bb5; --tx3:#586e7e;
+    --gain:#3fb950; --loss:#f85149; --warn:#f0b300; --acc:#1f6feb;
+    --slope:#d29922; --ivrv:#7d4cdb; --near:#f0b300; --far:#1f6feb; --gap:#7d4cdb;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+       font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       font-size:12px;font-variant-numeric:tabular-nums;padding:16px 20px 60px}
+  h1{font-size:16px;font-weight:700;margin:0 0 2px}
+  .sub{font-size:11px;color:var(--tx2);margin-bottom:14px}
+  .mockwarn{display:inline-block;font-size:10px;color:var(--warn);border:1px solid var(--warn);
+            border-radius:3px;padding:1px 6px;margin-left:8px;font-weight:600;vertical-align:middle}
+  .panel{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:12px;margin-bottom:14px}
+  .panel-title{font-size:11px;font-weight:700;color:var(--tx);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+  .panel-title small{font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx2);margin-left:8px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .lbl{font-size:10px;color:var(--tx2);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+
+  /* buttons / toggles */
+  .btn{background:var(--card);border:1px solid var(--bd);color:var(--tx2);
+       border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600}
+  .btn.act{background:var(--acc);color:#fff;border-color:var(--acc)}
+  .btn.sm{padding:3px 9px;font-size:10px}
+  .grp{display:flex;gap:4px}
+
+  /* dataset toggle */
+  .dstoggle{display:flex;gap:8px}
+  .ds{flex:1;background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:10px 12px;cursor:pointer}
+  .ds.act{background:#10243f;border-color:var(--acc)}
+  .ds .t{font-size:13px;font-weight:700;color:var(--tx2)}
+  .ds.act .t{color:#fff}
+  .ds .d{font-size:10px;color:var(--tx3);margin-top:3px;line-height:1.35}
+  .ds.act .d{color:var(--tx2)}
+
+  /* KPI strip */
+  .kpis{display:flex;gap:10px}
+  .kpi{flex:1;background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:10px 14px}
+  .kpi .k{font-size:10px;color:var(--tx2);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  .kpi .v{font-size:18px;color:var(--tx);font-weight:600;margin-top:4px}
+  .pos{color:var(--gain)} .neg{color:var(--loss)}
+
+  /* table */
+  .tblwrap{overflow-x:auto;border:1px solid var(--bd);border-radius:6px}
+  table{border-collapse:collapse;width:100%;font-size:11.5px;white-space:nowrap}
+  th,td{padding:6px 8px;text-align:right;border-bottom:1px solid var(--bd2)}
+  th{background:#0c1726;color:var(--tx2);font-size:10px;text-transform:uppercase;letter-spacing:.3px;
+     font-weight:600;position:sticky;top:0;border-bottom:1px solid var(--bd)}
+  td:first-child,th:first-child{text-align:left}
+  .grphdr th{background:#091320;color:var(--tx3);font-size:9px;border-bottom:1px solid var(--bd2)}
+  tr:hover td{background:#0c1a2b}
+  .idcell{font-family:ui-monospace,Menlo,Consolas,monospace}
+  .badge{display:inline-block;font-size:9px;border-radius:3px;padding:1px 5px;margin-left:5px;font-weight:600}
+  .b-rank{color:var(--tx2);border:1px solid var(--bd)}
+  .b-gap{background:var(--slope);color:#0a0e17}
+  .rule{color:var(--warn);font-weight:600}
+  .na{color:var(--tx3)}
+  .foot{font-size:10px;color:var(--tx3);margin-top:8px;line-height:1.5}
+
+  /* pivot heatmap */
+  .pivot td,.pivot th{text-align:center;border:1px solid var(--bd2);padding:5px 6px}
+  .pivot td:first-child{text-align:left;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--tx2)}
+  .cell .n{font-size:13px;font-weight:700}
+  .cell .s{font-size:9px;color:rgba(255,255,255,.7);margin-top:1px}
+  .empty{background:#0b121d;color:var(--tx3)}
+
+  /* chart */
+  .chartwrap{background:#0a0e17;border:1px solid var(--bd);border-radius:6px;padding:8px}
+  svg{display:block;width:100%;height:auto}
+  .legend{display:flex;gap:16px;font-size:10px;color:var(--tx2);margin:6px 2px 0;flex-wrap:wrap}
+  .legend i{display:inline-block;width:11px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .statcards{display:flex;gap:10px;margin-top:10px}
+  .statcards .kpi .v{font-size:15px}
+  .hidden{display:none}
+  .twocol{display:grid;grid-template-columns:1.55fr 1fr;gap:14px}
+  @media(max-width:1100px){.twocol{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<h1>Backwardation Calendar Sweep <span class="mockwarn">MOCKUP · Phase 0 · sample data</span></h1>
+<div class="sub">Every backwardation observation (<b>gap ≥ 5pp</b>) traded as a double-calendar, analysed through the M7 "best combo" machinery. Real scan: 13,254 obs at gap ≥ 5pp → <b>11,243 unique</b> after physical-pair dedupe → <b>~33.7k</b> candidate trades (×3 Δ). The <span style="color:var(--tx3)">minimal (&lt;5pp)</span> bucket — 70% of raw rows, flat term structure — is excluded. Sample numbers below.</div>
+
+<!-- 1. DATASET TOGGLE -->
+<div class="panel">
+  <div class="lbl" style="margin-bottom:8px">Dataset</div>
+  <div class="dstoggle">
+    <div class="ds"><div class="t">◆ Δ-match</div><div class="d">Today's behavior — strikes picked by closest |Δ| from below.</div></div>
+    <div class="ds"><div class="t">◆ Δ+Price match</div><div class="d">Strikes jointly optimized on Δ and entry price.</div></div>
+    <div class="ds act"><div class="t">◆ Calendar sweep</div><div class="d">Every backwardation observation (gap ≥ 5pp) as a double calendar — SELL near CE+PE, BUY far CE+PE; strike per side set by the near-leg nearest |Δ| (0.30/0.40/0.50), and the far leg reuses the same strike (its delta floats with the extra DTE). Hold to near-expiry settlement.</div></div>
+  </div>
+</div>
+
+<!-- 2. KPI STRIP -->
+<div class="kpis" style="margin-bottom:14px">
+  <div class="kpi"><div class="k">Trades</div><div class="v">32,354</div></div>
+  <div class="kpi"><div class="k">Wins</div><div class="v">20,577</div></div>
+  <div class="kpi"><div class="k">Win rate</div><div class="v pos">63.6%</div></div>
+  <div class="kpi"><div class="k">Avg net P&L</div><div class="v pos">+$26.40</div></div>
+  <div class="kpi"><div class="k">Total net P&L</div><div class="v pos">+$854k</div></div>
+  <div class="kpi"><div class="k">Avg debit</div><div class="v">−$216.00</div></div>
+  <div class="kpi"><div class="k">Avg margin</div><div class="v">$98.00</div></div>
+</div>
+
+<!-- COVERAGE CONTROLS -->
+<div class="panel">
+  <div class="panel-title">Coverage funnel <small>gap ≥ 5pp · physical-pair dedupe upstream · no silent caps</small></div>
+  <div class="row" style="margin-bottom:10px">
+    <span class="lbl">De-overlap:</span>
+    <div class="grp">
+      <button class="btn sm act">Every observation</button>
+      <button class="btn sm">One per session (peak-gap)</button>
+    </div>
+    <span style="font-size:10px;color:var(--tx3)">Selector-label collisions (same physical near/far expiry under two pair names) are deduped upstream → canonical pair kept by DTE-distance. This toggle handles the remaining <i>temporal</i> overlap: many hourly entries on the same session settle together. "One per session" keeps the peak-gap entry per (17:30→17:30 session · pair · Δ).</span>
+  </div>
+  <div class="tblwrap" style="max-width:820px">
+    <table>
+      <tr class="grphdr"><th>Funnel (gap ≥ 5pp)</th><th>current-next</th><th>next-next_to_next</th><th>all pairs</th></tr>
+      <tr><td>Observations (gap ≥ 5pp)</td><td>1,213</td><td>1,402</td><td>13,254</td></tr>
+      <tr><td>− duplicate physical pair (selector collision → canonical kept)</td><td class="na">—</td><td class="na">—</td><td class="na">−2,011</td></tr>
+      <tr><td>= unique observations</td><td>1,213</td><td>1,402</td><td>11,243</td></tr>
+      <tr><td>× 3 Δ = candidate trades</td><td>3,639</td><td>4,206</td><td>33,729</td></tr>
+      <tr><td>Skipped — far unpriced / no Δ strike / no settlement marks</td><td class="na">141</td><td class="na">156</td><td class="na">1,375</td></tr>
+      <tr><td><b>Entered</b></td><td><b>3,498</b></td><td><b>4,050</b></td><td><b>32,354</b></td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- 3. PRIMARY GRID -->
+<div class="panel">
+  <div class="panel-title">Best expiry combination per Gap bucket <small>for each gap bucket, pick the expiry pair (+ Δ) that wins on the chosen score — entry hour aggregated</small></div>
+  <div class="row" style="margin-bottom:10px">
+    <span class="lbl">Score:</span>
+    <select class="btn" style="color:var(--tx)"><option>Avg net P&L</option><option>Composite score (v1)</option><option>Sharpe (per trade)</option><option>Ret / margin</option></select>
+    <span class="lbl" style="margin-left:10px">Δ:</span>
+    <div class="grp"><button class="btn sm act">All</button><button class="btn sm">0.50</button><button class="btn sm">0.40</button><button class="btn sm">0.30</button></div>
+    <span class="lbl" style="margin-left:10px">Pair:</span>
+    <button class="btn sm">All (10)</button>
+    <button class="btn sm" style="margin-left:auto">◇ Pro metrics</button>
+    <button class="btn sm">⤓ Excel</button>
+  </div>
+  <div class="tblwrap">
+    <table id="grid">
+      <thead>
+        <tr class="grphdr">
+          <th colspan="4" style="text-align:left">Identity (relabeled)</th>
+          <th colspan="7" style="text-align:left">Calendar legs (new)</th>
+          <th colspan="3" style="text-align:left">Score</th>
+          <th colspan="8" style="text-align:left">Metrics (representative subset of ~100)</th>
+        </tr>
+        <tr>
+          <th>Gap bucket</th><th>Expiry pair</th><th>Δ</th><th>Exit rule</th>
+          <th>Near exp</th><th>Far exp</th><th>Near IV</th><th>Far IV</th><th>Gap pp</th><th>Near DTE</th><th>Far DTE</th>
+          <th>Avg net</th><th>n</th><th>Win %</th>
+          <th>Total net</th><th>Avg max MTM (W)</th><th>Avg min MTM (W)</th><th>Ret/margin</th><th>Ret/credit</th><th>Avg debit</th><th>Avg margin</th><th>Avg exit time</th>
+        </tr>
+      </thead>
+      <tbody><!-- rows injected --></tbody>
+    </table>
+  </div>
+  <div class="foot">
+    <span class="rule">hold_to_settlement</span> — single exit rule (cap 12:00 UTC on near expiry). Strangle-only columns (premium-SL streaks, rule/SL hits, losing-streak) render <span class="na">—</span> → N/A.
+    &nbsp;·&nbsp; <b>(+ ~70 more M7 metric columns reused as-is)</b> — net/win/loss splits, exit-MTM blocks, %-return blocks, Pro metrics (Sharpe/Sortino/Calmar/VaR/CVaR), path peak-trough timing.
+  </div>
+</div>
+
+<div class="twocol">
+  <!-- 4. PIVOT HEATMAP -->
+  <div class="panel">
+    <div class="panel-title">Pivot Profile by Gap bucket <small>Pair × gap-bucket · avg net P&L (win% · n)</small></div>
+    <div class="row" style="margin-bottom:10px">
+      <div class="grp"><button class="btn sm act">All</button><button class="btn sm">Winners</button><button class="btn sm">Losers</button></div>
+    </div>
+    <div class="tblwrap">
+      <table class="pivot" id="pivot">
+        <thead><tr><th>Pair \ Gap</th><th>[5,10)</th><th>[10,15)</th><th>[15,20)</th><th>[20,25)</th><th>[25,30)+</th></tr></thead>
+        <tbody><!-- rows injected --></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 5. PER-TRADE CHART -->
+  <div class="panel">
+    <div class="panel-title">Per-trade MTM + near/far IV <small>sample: current-next · Δ0.50 · 2024-03-25 17:00</small></div>
+    <div style="font-size:10px;color:var(--tx2);margin:-4px 0 8px;line-height:1.7">
+      <b>Legs — strike set by near-leg |Δ|≈0.50; far leg reuses the same strike (delta floats):</b><br>
+      SELL near CE @ 88,000 (Δ +0.50) · SELL near PE @ 87,000 (Δ −0.50) ·
+      BUY far CE @ <b>88,000</b> (Δ +0.54) · BUY far PE @ <b>87,000</b> (Δ −0.46)
+      <span style="color:var(--tx3)">— same strikes across expiries; far delta floats with DTE → true calendar</span>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <div class="grp"><button class="btn sm act" id="btnmtm" onclick="setView('mtm')">Net P&L</button><button class="btn sm" id="btniv" onclick="setView('iv')">IV (near / far / gap)</button></div>
+    </div>
+    <div class="chartwrap">
+      <svg id="chart" viewBox="0 0 560 300" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="statcards">
+      <div class="kpi"><div class="k">Final net P&L</div><div class="v pos">+$612.40</div></div>
+      <div class="kpi"><div class="k">Max MTM</div><div class="v pos">+$705.10</div></div>
+      <div class="kpi"><div class="k">Min MTM</div><div class="v neg">−$181.30</div></div>
+      <div class="kpi"><div class="k">Near-IV Δ</div><div class="v neg">−207.3 → 79.9</div></div>
+      <div class="kpi"><div class="k">Gap Δ (entry→exit)</div><div class="v">189.7 → 1.8 pp</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- sample grid data (anchored on real current-next bucket peaks) ----
+const C = {tx:'#cfd9e3',tx2:'#7a9bb5',tx3:'#586e7e',gain:'#3fb950',loss:'#f85149',
+           near:'#f0b300',far:'#1f6feb',gap:'#7d4cdb',bd:'#1a2d42'};
+// 22 fields, fixed order:
+// [0]bucket [1]pair [2]Δ [3]hr [4]near [5]far [6]niv [7]fiv [8]gap [9]ndte [10]fdte
+// [11]avgnet [12]n [13]win [14]totnet [15]maxw [16]minw [17]retm [18]retc [19]debit [20]margin [21]exit
+const rows = [
+  ['[5,10)','current-next',0.40,'23:00','2025-01-18','2025-01-19',47.9,37.9,8.4,'1.0d','2.0d', 19.40, 907,'63.1%','+$17.6k', 188, -71, '12.9%','9.2%','−$211','$88','11:55 (18h)'],
+  ['[10,15)','next-next_to_next',0.50,'12:00','2025-08-18','2025-08-19',51.3,36.4,12.6,'1.0d','2.0d', 31.20, 2331,'66.4%','+$72.7k', 244, -68, '21.0%','15.4%','−$203','$94','11:48 (23h)'],
+  ['[15,20)','current-weekly',0.40,'11:00','2025-07-14','2025-07-15',65.1,45.2,17.1,'1.0d','3.0d', 44.80, 887,'69.0%','+$39.7k', 301, -55, '29.1%','21.8%','−$205','$97','11:51 (1d 1h)'],
+  ['[20,25)','current-next',0.50,'13:00','2024-11-06','2024-11-07',94.1,69.4,22.3,'1.0d','2.0d', 58.30, 438,'71.2%','+$25.5k', 372, -49, '38.4%','27.0%','−$216','$104','11:46 (22h)'],
+  ['[25,30)','current-next',0.30,'14:00','2025-10-11','2025-10-12',68.6,39.0,27.1,'1.0d','2.0d', 66.10, 270,'68.9%','+$17.8k', 412, -82, '41.0%','29.6%','−$223','$108','11:53 (21h)'],
+  ['[30,35)','current-next',0.50,'00:00','2024-01-09','2024-01-10',64.9,30.0,32.4,'1.0d','2.0d', 71.40, 183,'70.5%','+$13.1k', 455, -77, '44.2%','31.2%','−$229','$112','11:40 (1d 12h)'],
+  ['[35,40)+','current-next',0.40,'07:00','2026-02-23','2026-02-24',108.4,68.6,38.8,'1.0d','2.0d', 84.90, 217,'72.8%','+$18.4k', 561, -94, '49.7%','35.4%','−$240','$118','11:49 (1d 5h)'],
+];
+const ID0 = [0,1,2,3]; // identity cols indices for first-col badge
+const tb = document.querySelector('#grid tbody');
+rows.forEach((r,i)=>{
+  const tr=document.createElement('tr');
+  const cell=(v,cls='')=>`<td class="${cls}">${v}</td>`;
+  const sign=v=>v>0?'pos':(v<0?'neg':'');
+  const fmt=v=>(v>0?'+':'')+'$'+v.toFixed(2);
+  tr.innerHTML =
+    `<td class="idcell">${r[0]}<span class="badge b-gap">${r[8].toFixed(1)}pp</span><span class="badge b-rank">#${i%3+1}</span></td>`+
+    `<td class="idcell">${r[1]}</td>`+
+    cell(r[2].toFixed(2))+`<td class="rule">hold_to_settlement</td>`+
+    cell(r[4],'idcell')+cell(r[5],'idcell')+
+    `<td style="color:${C.near}">${r[6].toFixed(1)}%</td>`+`<td style="color:${C.far}">${r[7].toFixed(1)}%</td>`+`<td style="color:${C.gap};font-weight:600">${r[8].toFixed(1)}</td>`+
+    cell(r[9],'na')+cell(r[10],'na')+
+    `<td class="${sign(r[11])}" style="font-weight:700">${fmt(r[11])}</td>`+
+    cell(r[12].toLocaleString())+`<td class="pos">${r[13]}</td>`+
+    `<td class="${sign(1)}">${r[14]}</td>`+
+    `<td class="pos">${fmt(r[15])}</td><td class="neg">${fmt(r[16])}</td>`+
+    `<td class="pos">${r[17]}</td><td class="pos">${r[18]}</td>`+
+    cell(r[19])+cell(r[20])+cell(r[21]);
+  tb.appendChild(tr);
+});
+
+// ---- pivot heatmap ----
+const pairs=['weekly-next_weekly','next-next_to_next','next-next_weekly','next_to_next-next_weekly','current-next','next_to_next-weekly','current-next_to_next','current-next_weekly','next-weekly','current-weekly'];
+// avg-net per [bucket] roughly increasing with gap; null = no data
+const pv = {
+ 'weekly-next_weekly':[ [14.2,62,890],[null],[null],[null],[null] ],
+ 'next-next_to_next':[ [16.9,64,1102],[31.2,66,612],[42.1,68,180],[null],[null] ],
+ 'next-next_weekly':[ [18.3,65,640],[28.0,67,150],[39.4,69,28],[null],[null] ],
+ 'next_to_next-next_weekly':[ [15.1,63,470],[26.6,66,98],[null],[null],[null] ],
+ 'current-next':[ [19.4,63,907],[33.5,66,259],[44.8,69,105],[58.3,71,68],[72.6,70,108] ],
+ 'next_to_next-weekly':[ [13.7,62,360],[24.8,65,52],[null],[null],[null] ],
+ 'current-next_to_next':[ [17.2,64,370],[29.1,66,88],[40.0,68,15],[null],[null] ],
+ 'current-next_weekly':[ [20.1,65,280],[31.0,67,52],[null],[null],[null] ],
+ 'next-weekly':[ [15.6,63,200],[null],[null],[null],[null] ],
+ 'current-weekly':[ [18.9,64,180],[27.3,66,60],[44.8,69,18],[null],[null] ],
+};
+function heat(v){ // green scale by magnitude (all positive here)
+  const t=Math.min(1,v/75); const r=Math.round(20+ (63-20)*(1-t));
+  return `rgba(63,185,80,${(0.12+0.55*t).toFixed(2)})`;
+}
+const ptb=document.querySelector('#pivot tbody');
+pairs.forEach(p=>{
+  const tr=document.createElement('tr'); let h=`<td>${p}</td>`;
+  pv[p].forEach(c=>{
+    if(!c||c[0]==null){h+=`<td class="empty">·</td>`;return;}
+    h+=`<td class="cell" style="background:${heat(c[0])}"><div class="n">+$${c[0].toFixed(0)}</div><div class="s">${c[1]}% · n=${c[2].toLocaleString()}</div></td>`;
+  });
+  tr.innerHTML=h; ptb.appendChild(tr);
+});
+
+// ---- chart (SVG, two views) ----
+const W=560,H=300,padL=44,padR=44,padT=14,padB=26, x0=padL,x1=W-padR, y0=H-padB,y1=padT;
+const N=40;
+const xs=i=>x0+(x1-x0)*i/(N-1);
+function path(arr,min,max){return arr.map((v,i)=>`${i?'L':'M'}${xs(i).toFixed(1)} ${(y0-(y0-y1)*(v-min)/(max-min)).toFixed(1)}`).join(' ');}
+// MTM path: dip then strong recovery (near IV crush in deep backwardation)
+const mtm=[]; for(let i=0;i<N;i++){const t=i/(N-1); mtm.push( -180*Math.exp(-t*9)*Math.sin(t*9) + 720*(1-Math.exp(-t*2.6)) - 30 );}
+mtm[0]=0;
+// IV series: near starts ~207 crushing to ~80; far ~82 stable ~78; gap = near-far
+const niv=[],fiv=[],gap=[];
+for(let i=0;i<N;i++){const t=i/(N-1); const n=80+127*Math.exp(-t*3.1); const f=82-4*t; niv.push(n);fiv.push(f);gap.push(n-f);}
+function axis(min,max,fmt,color){
+  let g='';for(let k=0;k<=4;k++){const v=min+(max-min)*k/4;const y=y0-(y0-y1)*k/4;
+    g+=`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="#131c28"/>`;
+    g+=`<text x="${x0-6}" y="${y+3}" fill="${color||C.tx3}" font-size="9" text-anchor="end">${fmt(v)}</text>`;}
+  return g;
+}
+function setView(v){
+  document.getElementById('btnmtm').classList.toggle('act',v==='mtm');
+  document.getElementById('btniv').classList.toggle('act',v==='iv');
+  const svg=document.getElementById('chart'); const lg=document.getElementById('legend');
+  if(v==='mtm'){
+    const mn=Math.min(...mtm,0),mx=Math.max(...mtm);
+    const zeroY=y0-(y0-y1)*(0-mn)/(mx-mn);
+    // area fill split at zero (approx single fill)
+    svg.innerHTML = axis(mn,mx,x=>'$'+x.toFixed(0))
+      + `<line x1="${x0}" y1="${zeroY}" x2="${x1}" y2="${zeroY}" stroke="#2a3a4d" stroke-dasharray="3 3"/>`
+      + `<path d="${path(mtm,mn,mx)} L${x1} ${zeroY} L${x0} ${zeroY} Z" fill="rgba(63,185,80,.16)"/>`
+      + `<path d="${path(mtm,mn,mx)}" fill="none" stroke="${C.gain}" stroke-width="2"/>`;
+    lg.innerHTML=`<span><i style="background:${C.gain}"></i>Net MTM ($)</span>`;
+  } else {
+    const all=[...niv,...fiv]; const mn=0,mx=Math.max(...all)*1.05;
+    svg.innerHTML = axis(mn,mx,x=>x.toFixed(0)+'%')
+      + `<path d="${path(niv,mn,mx)}" fill="none" stroke="${C.near}" stroke-width="2"/>`
+      + `<path d="${path(fiv,mn,mx)}" fill="none" stroke="${C.far}" stroke-width="2"/>`
+      + `<path d="${path(gap,mn,mx)}" fill="none" stroke="${C.gap}" stroke-width="1.5" stroke-dasharray="5 3"/>`;
+    lg.innerHTML=`<span><i style="background:${C.near}"></i>Near ATM IV</span><span><i style="background:${C.far}"></i>Far ATM IV</span><span><i style="background:${C.gap}"></i>Gap (near−far)</span>`;
+  }
+}
+setView('mtm');
+</script>
+</body>
+</html>
