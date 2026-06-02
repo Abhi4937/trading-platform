@@ -60,9 +60,16 @@ _GRID_FALLBACK_PATH = os.path.join(m7r.M7_BASE_DIR, "m7_best_combo_grid_v4.parqu
 GRID_PARQUET_PATH_PRICE_MATCHED = os.path.join(
     m7r.M7_BASE_DIR, "m7_best_combo_grid_v6_price_matched.parquet",
 )
+# Calendar sweep grid — single hold_to_settlement rule, so it's cheap to build
+# on demand (unlike the 110-rule delta_match grid). Lives under the calendar dir.
+GRID_PARQUET_PATH_CALENDAR = os.path.join(
+    m7r.CAL_BASE_DIR, "calendar_best_combo_grid.parquet",
+)
 
 
 def _grid_path_for_dataset(dataset: str) -> str:
+    if dataset == "calendar":
+        return GRID_PARQUET_PATH_CALENDAR
     return (GRID_PARQUET_PATH_PRICE_MATCHED if dataset == "price_match"
             else GRID_PARQUET_PATH)
 
@@ -125,7 +132,13 @@ def _rule_variants(dataset: str = "delta_match") -> list[tuple[str, dict]]:
     Phase 3 (future session): capital-based rules with proper per-trade K sizing.
 
     price_match: 243 variants (unchanged for backwards compat).
+
+    calendar: a single hold_to_settlement rule — the exit is precomputed into
+    the calendar trades row, so there is no rule sweep.
     """
+    if dataset == "calendar":
+        return [("hold_to_settlement", {})]
+
     out: list[tuple[str, dict]] = []
     sl_grid = _PREMIUM_SL_PCTS if dataset == "delta_match" else [50, 75, 100]
     for sl in sl_grid:
@@ -404,14 +417,14 @@ def _build_grid(
     for i, (rule_label, rule_dict) in enumerate(variants):
         # Track whether the cache existed before our call so we know whether
         # to evict afterwards. (Cache hit → leave it alone; cache miss → drop.)
-        m7r._load_trades()  # ensure mtime is fresh
+        m7r._load_trades(dataset)  # ensure mtime is fresh
         rule_key = (
             __import__("json").dumps(rule_dict or {}, sort_keys=True),
             m7r._TRADES_MTIME,
         )
         was_cached_before = rule_key in m7r._EXIT_CACHE
 
-        derived = m7r._derive_exits({}, rule_dict)
+        derived = m7r._derive_exits({}, rule_dict, dataset)
         if progress_cb is not None:
             progress_cb(i + 1, len(variants))
 

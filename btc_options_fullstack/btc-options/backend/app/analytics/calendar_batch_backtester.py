@@ -589,7 +589,11 @@ def build_trade(obs: dict, delta: float,
         "entry_atm_iv_band": gap_bucket,             # gap bucket
         "expiry_bucket": pair,                        # pair (pre-set, not DTE-derived)
         "delta_target": float(delta),
-        "entry_hour_ist": int(hour_ist),
+        # Hours are aggregated ("∑ All hours") — best combo is per gap bucket × pair × Δ,
+        # NOT per entry hour (user decision 2026-06-02). Use a sentinel so the grid groups
+        # all hours into one cell; the real entry hour is carried in entry_hour_actual.
+        "entry_hour_ist": -1,
+        "entry_hour_actual": int(hour_ist),
         # ── identity / context ──
         "friday_date_ist": near_exp,                 # near-expiry = path partition key
         "session_date_ist": session_date_ist(entry_ts),

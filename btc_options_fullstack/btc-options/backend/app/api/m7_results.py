@@ -52,6 +52,14 @@ TRADES_PATH_PRICE_MATCHED = os.path.join(M7_BASE_DIR, "m7_trades_price_matched.p
 PATHS_GLOB_PRICE_MATCHED = os.path.join(M7_BASE_DIR,
                                          "m7_paths_price_matched/friday_date=*/part.parquet")
 
+# Backwardation double-calendar sweep dataset — written by
+# app.analytics.calendar_batch_backtester. Single hold_to_settlement rule with the
+# exit precomputed into the trades row, so _derive_exits short-circuits (no path scan).
+# Grid keys are pre-mapped: entry_atm_iv_band=gap_bucket, expiry_bucket=pair.
+CAL_BASE_DIR = "/home/abhis/btc-data/derived/calendar"
+TRADES_PATH_CALENDAR = os.path.join(CAL_BASE_DIR, "calendar_trades.parquet")
+PATHS_GLOB_CALENDAR = os.path.join(CAL_BASE_DIR, "calendar_paths/friday_date=*/part.parquet")
+
 
 def _trades_path_for_dataset(dataset: str) -> str:
     """Resolve the on-disk trades parquet for the requested dataset.
@@ -60,6 +68,8 @@ def _trades_path_for_dataset(dataset: str) -> str:
     file is newer → we fall back to it automatically until re-enrichment runs.
     For price_match: single canonical path (no enriched variant for v1).
     """
+    if dataset == "calendar":
+        return TRADES_PATH_CALENDAR
     if dataset == "price_match":
         return TRADES_PATH_PRICE_MATCHED
     if os.path.exists(TRADES_ENRICHED_PATH):
@@ -75,6 +85,8 @@ PATHS_FLAT_PRICE_MATCHED = os.path.join(M7_BASE_DIR, "m7_paths_price_matched_fla
 
 
 def _paths_glob_for_dataset(dataset: str) -> str:
+    if dataset == "calendar":
+        return PATHS_GLOB_CALENDAR
     if dataset == "price_match":
         flat = PATHS_FLAT_PRICE_MATCHED
         return flat if os.path.exists(flat) else PATHS_GLOB_PRICE_MATCHED
@@ -87,6 +99,7 @@ def _paths_glob_for_dataset(dataset: str) -> str:
 _TRADES_BY_DATASET: dict[str, tuple[Optional[pd.DataFrame], float]] = {
     "delta_match": (None, 0.0),
     "price_match": (None, 0.0),
+    "calendar": (None, 0.0),
 }
 
 # Back-compat aliases — code paths that still reference _TRADES_DF / _TRADES_MTIME
@@ -548,7 +561,15 @@ def _derive_exits(filters: dict, exit_rule: dict,
         return.
     """
     # Ensure trades cache is fresh before computing the cache key.
-    _load_trades(dataset)
+    df_trades = _load_trades(dataset)
+
+    # Calendar dataset: a single hold_to_settlement rule with the exit already
+    # precomputed into every trade row. No exit-rule sweep, no path scan —
+    # the trades frame IS the derived-exits frame. Short-circuit the L1/L2/DuckDB
+    # machinery entirely.
+    if dataset == "calendar":
+        return df_trades if df_trades.empty else _apply_filters(df_trades, filters)
+
     _, trades_mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
     rule_key = (dataset, json.dumps(exit_rule or {}, sort_keys=True), trades_mtime)
     full = _EXIT_CACHE.get(rule_key)
