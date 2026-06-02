@@ -117,14 +117,15 @@ def hhmm(minute_of_day: int) -> str:
     return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d}"
 
 
-def _run_signature(start: date, end: date, cadence: int) -> dict:
-    return {"start": start.isoformat(), "end": end.isoformat(), "cadence": cadence}
+def _run_signature(start: date, end: date, cadence: int, window: tuple) -> dict:
+    return {"start": start.isoformat(), "end": end.isoformat(),
+            "cadence": cadence, "window": list(window)}
 
 
-def save_checkpoint(start: date, end: date, cadence: int,
+def save_checkpoint(start: date, end: date, cadence: int, window: tuple,
                     last_done: date, n_obs: int) -> None:
     """Atomically record the last fully-completed date so a killed run resumes."""
-    payload = {**_run_signature(start, end, cadence),
+    payload = {**_run_signature(start, end, cadence, window),
                "last_done_date": last_done.isoformat(), "n_obs": n_obs}
     tmp = CHECKPOINT_PATH + ".tmp"
     with open(tmp, "w") as fh:
@@ -132,7 +133,7 @@ def save_checkpoint(start: date, end: date, cadence: int,
     os.replace(tmp, CHECKPOINT_PATH)
 
 
-def load_checkpoint(start: date, end: date, cadence: int) -> date | None:
+def load_checkpoint(start: date, end: date, cadence: int, window: tuple) -> date | None:
     """Return the last-done date IF a checkpoint matches this run's signature
     and the CSV still exists; else None (fresh run)."""
     if not (os.path.exists(CHECKPOINT_PATH) and os.path.exists(CSV_PATH)):
@@ -142,9 +143,9 @@ def load_checkpoint(start: date, end: date, cadence: int) -> date | None:
             cp = json.load(fh)
     except Exception:
         return None
-    if {k: cp.get(k) for k in ("start", "end", "cadence")} != \
-            _run_signature(start, end, cadence):
-        return None  # different parameters — don't resume into a mismatched CSV
+    if {k: cp.get(k) for k in ("start", "end", "cadence", "window")} != \
+            _run_signature(start, end, cadence, window):
+        return None  # different parameters/window — don't resume into a mismatched CSV
     try:
         return date.fromisoformat(cp["last_done_date"])
     except Exception:
@@ -278,6 +279,11 @@ def atm_iv_from_day_marks(
 
 def run(args: argparse.Namespace) -> None:
     t0 = _time.time()
+    if args.tag:
+        global CSV_PATH, SUMMARY_PATH, CHECKPOINT_PATH
+        CSV_PATH = f"{DERIVED_DIR}/backwardation_scan_{args.tag}.csv"
+        SUMMARY_PATH = f"{DERIVED_DIR}/backwardation_scan_summary_{args.tag}.md"
+        CHECKPOINT_PATH = f"{DERIVED_DIR}/backwardation_scan_{args.tag}.checkpoint.json"
     min_d, max_d = detect_date_range()
     start = date.fromisoformat(args.start) if args.start else min_d
     end = date.fromisoformat(args.end) if args.end else max_d
@@ -285,18 +291,22 @@ def run(args: argparse.Namespace) -> None:
         end = min(end, start + timedelta(days=args.max_days - 1))
 
     cadence = args.cadence_min
-    minutes = list(range(SAMPLE_START_MIN, SAMPLE_END_MIN + 1, cadence))
+    win_lo = args.start_hour * 60
+    win_hi = args.end_hour * 60
+    window = (win_lo, win_hi)
+    minutes = list(range(win_lo, win_hi + 1, cadence))
 
     os.makedirs(DERIVED_DIR, exist_ok=True)
 
     # Resume support: if a matching checkpoint + CSV exist, continue from the
     # day after the last completed date and rebuild aggregates from the CSV.
-    resume_after = None if args.no_resume else load_checkpoint(start, end, cadence)
+    resume_after = None if args.no_resume else load_checkpoint(start, end, cadence, window)
     total_days = (end - start).days + 1
 
     print(f"[bwscan] options data range: {min_d} -> {max_d}", flush=True)
     print(f"[bwscan] scanning {start} -> {end}  ({total_days} days) "
-          f"@ {cadence}-min cadence ({len(minutes)} samples/day)", flush=True)
+          f"@ {cadence}-min cadence, {args.start_hour:02d}:00-{args.end_hour:02d}:00 IST "
+          f"({len(minutes)} samples/day)", flush=True)
     print(f"[bwscan] pairs: {', '.join('-'.join(p) for p in PAIRS)}", flush=True)
 
     if resume_after is not None:
@@ -327,8 +337,8 @@ def run(args: argparse.Namespace) -> None:
 
             # Preload the day's spot once (single warm parquet); small lookback so
             # an early sample still has an at-or-before bar.
-            day_start = ist_timestamp(d, SAMPLE_START_MIN)
-            day_end = ist_timestamp(d, SAMPLE_END_MIN)
+            day_start = ist_timestamp(d, win_lo)
+            day_end = ist_timestamp(d, win_hi)
             spot_series = load_spot_series(day_start - 7200, day_end)
 
             if spot_series:
@@ -416,7 +426,7 @@ def run(args: argparse.Namespace) -> None:
 
             fh.flush()
             os.fsync(fh.fileno())
-            save_checkpoint(start, end, cadence, d, n_obs)
+            save_checkpoint(start, end, cadence, window, d, n_obs)
             days_done += 1
 
             remaining = (end - d).days
@@ -497,10 +507,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", default=None, help="YYYY-MM-DD (default: latest data)")
     p.add_argument("--cadence-min", type=int, default=DEFAULT_CADENCE_MIN,
                    dest="cadence_min", help="intraday sample spacing in minutes")
+    p.add_argument("--start-hour", type=int, default=9, dest="start_hour",
+                   help="first intraday sample hour, IST (default 9 = 09:00)")
+    p.add_argument("--end-hour", type=int, default=23, dest="end_hour",
+                   help="last intraday sample hour, IST (default 23 = 23:00, full day)")
     p.add_argument("--max-days", type=int, default=0, dest="max_days",
                    help="cap number of days from start (0 = no cap; for testing)")
     p.add_argument("--no-resume", action="store_true", dest="no_resume",
                    help="ignore any checkpoint and restart from scratch")
+    p.add_argument("--tag", default="", dest="tag",
+                   help="output filename suffix (keeps separate CSV/summary/checkpoint)")
     return p.parse_args()
 
 
