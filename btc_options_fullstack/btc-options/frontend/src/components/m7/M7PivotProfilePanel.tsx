@@ -261,6 +261,7 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
         <M7TradeDiagnosticModal
           tradeId={selectedTrade.tradeId}
           exitRule={selectedTrade.rule}
+          dataset={dataset}
           onClose={() => setSelectedTrade(null)} />
       )}
     </section>

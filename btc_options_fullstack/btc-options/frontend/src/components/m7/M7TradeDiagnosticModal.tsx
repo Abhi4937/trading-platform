@@ -12,12 +12,14 @@ import {
   type M7TradeHypothesis,
 } from '../../services/m7_api';
 import type { M7ExitRule } from '../../types/m7';
+import type { M7Dataset } from '../../services/m7_api';
 import { M7TradePathChart } from './M7TradePathChart';
 
 interface Props {
   tradeId: string;
   exitRule?: M7ExitRule;
   onClose: () => void;
+  dataset?: M7Dataset;
 }
 
 type Tab = 'overview' | 'per_leg' | 'vol' | 'skew' | 'spot' | 'greeks' | 'path';
@@ -57,7 +59,7 @@ function fmtPct(v: number | null | undefined, digits = 2): string {
   return `${(v * 100).toFixed(digits)}%`;
 }
 
-export function M7TradeDiagnosticModal({ tradeId, exitRule, onClose }: Props) {
+export function M7TradeDiagnosticModal({ tradeId, exitRule, onClose, dataset }: Props) {
   const [data, setData] = useState<M7TradeDiagnosticResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
@@ -171,7 +173,7 @@ export function M7TradeDiagnosticModal({ tradeId, exitRule, onClose }: Props) {
               {/* M7TradePathChart is its own modal; we render it inline by
                   passing a noop onClose. Keeps the chart canvas inside this
                   tab pane. */}
-              <PathTabEmbed tradeId={tradeId} />
+              <PathTabEmbed tradeId={tradeId} dataset={dataset} />
             </div>
           )}
         </div>
@@ -488,13 +490,13 @@ function GreeksTab({ d }: { d: M7TradeDiagnosticResponse }) {
   );
 }
 
-function PathTabEmbed({ tradeId }: { tradeId: string }) {
+function PathTabEmbed({ tradeId, dataset }: { tradeId: string; dataset?: M7Dataset }) {
   // M7TradePathChart is itself a modal; render with a noop onClose
   // to embed the chart canvas inside this tab.
   // We override the position to fill the tab pane.
   return (
     <div style={{ position: 'relative', minHeight: 540 }}>
-      <M7TradePathChart tradeId={tradeId} onClose={() => { /* no-op inside tab */ }} />
+      <M7TradePathChart tradeId={tradeId} dataset={dataset} onClose={() => { /* no-op inside tab */ }} />
     </div>
   );
 }

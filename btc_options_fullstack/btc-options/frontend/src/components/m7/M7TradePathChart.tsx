@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   createChart, IChartApi, LineSeries, BaselineSeries, CandlestickSeries,
 } from 'lightweight-charts';
-import { fetchM7Path } from '../../services/m7_api';
+import { fetchM7Path, type M7Dataset } from '../../services/m7_api';
 import type { M7PathResponse } from '../../types/m7';
 import {
   emaSeries, rsiSeries, bbandsSeries, atrSeries, macdSeries,
@@ -36,9 +36,10 @@ function lossCauseColor(c: string | null | undefined): string {
   } as Record<string, string>)[c] || '#7a9bb5';
 }
 
-export function M7TradePathChart({ tradeId, onClose }: {
-  tradeId: string; onClose: () => void;
+export function M7TradePathChart({ tradeId, onClose, dataset }: {
+  tradeId: string; onClose: () => void; dataset?: M7Dataset;
 }) {
+  const isCal = dataset === 'calendar';
   const wrap = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [data, setData] = useState<M7PathResponse | null>(null);
@@ -49,12 +50,12 @@ export function M7TradePathChart({ tradeId, onClose }: {
   );
 
   useEffect(() => {
-    fetchM7Path(tradeId).then(setData).catch(e => console.error(e));
+    fetchM7Path(tradeId, dataset).then(setData).catch(e => console.error(e));
     fetch(`/api/v1/m7/trade_context_ohlc?trade_id=${encodeURIComponent(tradeId)}` +
           `&pad_minutes_before=120&pad_minutes_after=30`)
       .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
       .then(setCtx).catch(e => console.error('trade_context_ohlc:', e));
-  }, [tradeId]);
+  }, [tradeId, dataset]);
 
   useEffect(() => {
     if (!wrap.current) return;
@@ -169,22 +170,34 @@ export function M7TradePathChart({ tradeId, onClose }: {
     } else if (view === 'premium' && data) {
       const c = chart.addSeries(LineSeries, { color: '#3fb950', lineWidth: 1 });
       const p = chart.addSeries(LineSeries, { color: '#f85149', lineWidth: 1 });
-      c.setData(data.rows.map(r => ({ time: r.ts as any, value: r.call_mark })));
-      p.setData(data.rows.map(r => ({ time: r.ts as any, value: r.put_mark })));
+      // Calendar paths don't carry per-leg marks — skip missing points cleanly.
+      c.setData(data.rows.filter(r => r.call_mark != null).map(r => ({ time: r.ts as any, value: r.call_mark })));
+      p.setData(data.rows.filter(r => r.put_mark != null).map(r => ({ time: r.ts as any, value: r.put_mark })));
     } else if (view === 'iv' && data) {
-      const c = chart.addSeries(LineSeries, { color: '#3fb950', lineWidth: 1 });
-      const p = chart.addSeries(LineSeries, { color: '#f85149', lineWidth: 1 });
-      const a = chart.addSeries(LineSeries, { color: '#1f6feb', lineWidth: 2 });
-      c.setData(data.rows.map(r => ({ time: r.ts as any, value: r.call_iv * 100 })));
-      p.setData(data.rows.map(r => ({ time: r.ts as any, value: r.put_iv * 100 })));
-      a.setData(data.rows.map(r => ({ time: r.ts as any, value: r.atm_iv_now * 100 })));
+      if (isCal) {
+        // Calendar double calendar: overlay near-IV, far-IV, and the gap (near − far).
+        const near = chart.addSeries(LineSeries, { color: '#f0b300', lineWidth: 2 });
+        const far = chart.addSeries(LineSeries, { color: '#1f6feb', lineWidth: 2 });
+        const gap = chart.addSeries(LineSeries, { color: '#7d4cdb', lineWidth: 1, lineStyle: 2 });
+        near.setData(data.rows.filter(r => r.near_iv != null).map(r => ({ time: r.ts as any, value: (r.near_iv as number) * 100 })));
+        far.setData(data.rows.filter(r => r.far_iv != null).map(r => ({ time: r.ts as any, value: (r.far_iv as number) * 100 })));
+        gap.setData(data.rows.filter(r => r.iv_gap != null).map(r => ({ time: r.ts as any, value: (r.iv_gap as number) * 100 })));
+      } else {
+        const c = chart.addSeries(LineSeries, { color: '#3fb950', lineWidth: 1 });
+        const p = chart.addSeries(LineSeries, { color: '#f85149', lineWidth: 1 });
+        const a = chart.addSeries(LineSeries, { color: '#1f6feb', lineWidth: 2 });
+        c.setData(data.rows.map(r => ({ time: r.ts as any, value: r.call_iv * 100 })));
+        p.setData(data.rows.map(r => ({ time: r.ts as any, value: r.put_iv * 100 })));
+        a.setData(data.rows.map(r => ({ time: r.ts as any, value: r.atm_iv_now * 100 })));
+      }
     } else if (view === 'delta' && data) {
       const c = chart.addSeries(LineSeries, { color: '#3fb950', lineWidth: 1 });
       const p = chart.addSeries(LineSeries, { color: '#f85149', lineWidth: 1 });
       const n = chart.addSeries(LineSeries, { color: '#1f6feb', lineWidth: 2 });
-      c.setData(data.rows.map(r => ({ time: r.ts as any, value: r.call_delta })));
-      p.setData(data.rows.map(r => ({ time: r.ts as any, value: r.put_delta })));
-      n.setData(data.rows.map(r => ({ time: r.ts as any, value: r.net_delta })));
+      // Calendar paths don't carry per-leg greeks — skip missing points cleanly.
+      c.setData(data.rows.filter(r => r.call_delta != null).map(r => ({ time: r.ts as any, value: r.call_delta })));
+      p.setData(data.rows.filter(r => r.put_delta != null).map(r => ({ time: r.ts as any, value: r.put_delta })));
+      n.setData(data.rows.filter(r => r.net_delta != null).map(r => ({ time: r.ts as any, value: r.net_delta })));
     }
     chart.timeScale().fitContent();
     return () => { chart.remove(); chartRef.current = null; };
@@ -267,8 +280,13 @@ export function M7TradePathChart({ tradeId, onClose }: {
                   value={`$${Math.max(...data.rows.map(r => r.gross_pnl_usd)).toFixed(2)}`} />
             <Stat label="Min gross P&L"
                   value={`$${Math.min(...data.rows.map(r => r.gross_pnl_usd)).toFixed(2)}`} />
-            <Stat label="ATM IV change (entry → exit)"
-                  value={`${((data.rows[data.rows.length - 1].atm_iv_now - data.rows[0].atm_iv_now) * 100).toFixed(2)} pts`} />
+            {isCal ? (
+              <Stat label="Gap change (entry → exit)"
+                    value={`${(((data.rows[data.rows.length - 1].iv_gap ?? 0) - (data.rows[0].iv_gap ?? 0)) * 100).toFixed(2)} pts`} />
+            ) : (
+              <Stat label="ATM IV change (entry → exit)"
+                    value={`${((data.rows[data.rows.length - 1].atm_iv_now - data.rows[0].atm_iv_now) * 100).toFixed(2)} pts`} />
+            )}
           </div>
         )}
       </div>

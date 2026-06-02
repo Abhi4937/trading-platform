@@ -110,6 +110,8 @@ export interface M7PathRow {
   theta_per_vega_combined: number;
   gross_pnl_usd: number; net_pnl_unwind_usd: number;
   pnl_pct_of_credit: number; pnl_pct_of_margin: number;
+  // Calendar-sweep path columns (dataset='calendar'); absent for delta/price match.
+  near_iv?: number; far_iv?: number; iv_gap?: number;
 }
 
 export interface M7PathResponse {

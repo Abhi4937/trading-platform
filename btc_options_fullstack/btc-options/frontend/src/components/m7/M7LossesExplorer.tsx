@@ -754,6 +754,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
         <M7TradeDiagnosticModal
           tradeId={selectedTradeId}
           exitRule={exitRule}
+          dataset={dataset}
           onClose={() => setSelectedTradeId(null)}
         />
       )}
