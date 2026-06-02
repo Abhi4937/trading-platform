@@ -559,9 +559,12 @@ def _grid_path_is_valid(path: str) -> bool:
     if not os.path.exists(path):
         return False
     grid_mtime = os.path.getmtime(path)
-    # Heuristic: if the grid path name hints at price_match, validate against
-    # the price-matched trades parquet; otherwise the delta-match one.
-    if "price_matched" in os.path.basename(path):
+    # Heuristic: route validation to the right trades parquet + rule-variant
+    # count by inspecting the grid path name.
+    if path == GRID_PARQUET_PATH_CALENDAR or "calendar" in path:
+        trades_path = m7r.TRADES_PATH_CALENDAR
+        dataset_for_count = "calendar"
+    elif "price_matched" in os.path.basename(path):
         trades_path = m7r.TRADES_PATH_PRICE_MATCHED
         dataset_for_count = "price_match"
     else:
@@ -905,7 +908,9 @@ def _try_load_grid_from_disk(dataset: str = "delta_match") -> Optional[pd.DataFr
     price_match: only the v6 price-matched grid is supported (no v4
     fallback).
     """
-    if dataset == "price_match":
+    if dataset == "calendar":
+        candidate_paths = (GRID_PARQUET_PATH_CALENDAR,)
+    elif dataset == "price_match":
         candidate_paths = (GRID_PARQUET_PATH_PRICE_MATCHED,)
     else:
         candidate_paths = (GRID_PARQUET_PATH, _GRID_FALLBACK_PATH)
@@ -922,7 +927,9 @@ def _try_load_grid_from_disk(dataset: str = "delta_match") -> Optional[pd.DataFr
             # considers allowed expiries (filtered cells get a score too
             # but sort to the bottom; the expiry drop happens first so
             # they don't pollute the scale).
-            if "expiry_bucket" in df.columns:
+            # Calendar: expiry_bucket holds PAIR names (not DTE buckets), so the
+            # _ALLOWED_EXPIRIES drop does not apply — keep all pairs.
+            if dataset != "calendar" and "expiry_bucket" in df.columns:
                 df = df[df["expiry_bucket"].isin(_ALLOWED_EXPIRIES)].copy()
             df = _apply_composite_filters(df)
             df = _attach_composite_score_v2(df, group_keys=("iv_band",))
@@ -933,23 +940,32 @@ def _try_load_grid_from_disk(dataset: str = "delta_match") -> Optional[pd.DataFr
     return None
 
 
-def _persist_grid_to_disk(df: pd.DataFrame) -> None:
+def _persist_grid_to_disk(df: pd.DataFrame, dataset: str = "delta_match") -> None:
     """Write the grid to parquet so future restarts skip the rebuild."""
     if df is None or df.empty:
         return
+    out_path = _grid_path_for_dataset(dataset)
     try:
         out = _flatten_for_parquet(df)
-        # Pyarrow rejects pure-NaN object cols; coerce to float where safe.
+        # Pyarrow rejects pure-NaN / mixed object cols; coerce numeric-or-null
+        # object columns to float (so all-None metric cols — common in the
+        # calendar grid — become a clean float NaN column). Genuine string
+        # columns are left as object. (errors="ignore" was removed in pandas
+        # 2.2+/3.0, so do the guarded coercion by hand.)
+        _STRING_COLS = ("iv_band", "expiry_bucket", "rule_label", "rule_category")
         for c in out.columns:
-            if out[c].dtype == object:
-                # Try numeric coercion; leave strings alone
-                if c in ("iv_band", "expiry_bucket", "rule_label"):
-                    continue
-                with pd.option_context("future.no_silent_downcasting", True):
-                    out[c] = pd.to_numeric(out[c], errors="ignore")
-        out.to_parquet(GRID_PARQUET_PATH, index=False)
+            if out[c].dtype != object or c in _STRING_COLS:
+                continue
+            coerced = pd.to_numeric(out[c], errors="coerce")
+            # Keep the coercion only if it didn't turn a real (non-null) value
+            # into NaN — i.e. the column is genuinely numeric-or-null.
+            non_null = out[c].notna()
+            if bool((coerced.notna() | ~non_null).all()):
+                out[c] = coerced
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        out.to_parquet(out_path, index=False)
         log.info("M7 best-combo grid persisted to %s (%d cells)",
-                 GRID_PARQUET_PATH, len(out))
+                 out_path, len(out))
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to persist M7 best-combo grid: %s", exc)
 
