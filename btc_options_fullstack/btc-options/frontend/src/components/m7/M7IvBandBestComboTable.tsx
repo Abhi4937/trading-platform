@@ -1337,9 +1337,9 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             <thead>
               <tr style={{ textAlign: 'left' }}>
                 {/* — Identity — */}
-                <th style={th}>IV band <InfoIcon text="ATM IV bucket at entry hour. 0-20 = annualized IV in [0%, 20%); 20-30 = [20%, 30%); …; 100+ = ≥ 100%." /></th>
-                <th style={th}>Best entry hr <InfoIcon text="Hour-of-day IST when the trade was opened (Friday). The grid is swept per entry hour; this column shows the hour that won for this band." /></th>
-                <th style={th}>Best expiry <InfoIcon text="Expiry bucket: current = same Saturday settlement; next = following Sunday; next_to_next = following Monday; weekly/biweekly/monthly = standard Delta expiries." /></th>
+                <th style={th}>{datasetProp === 'calendar' ? 'Gap bucket' : 'IV band'} <InfoIcon text={datasetProp === 'calendar' ? "Backwardation gap bucket = near-expiry ATM IV − far-expiry ATM IV, in percentage points. [5,10) = gap in [5pp,10pp); the <5pp 'minimal' bucket is excluded." : "ATM IV bucket at entry hour. 0-20 = annualized IV in [0%, 20%); 20-30 = [20%, 30%); …; 100+ = ≥ 100%."} /></th>
+                <th style={th}>Best entry hr <InfoIcon text={datasetProp === 'calendar' ? "Aggregated for the calendar sweep (∑ all hours) — best combo is per gap bucket × pair × Δ, not per entry hour." : "Hour-of-day IST when the trade was opened (Friday). The grid is swept per entry hour; this column shows the hour that won for this band."} /></th>
+                <th style={th}>{datasetProp === 'calendar' ? 'Best pair' : 'Best expiry'} <InfoIcon text={datasetProp === 'calendar' ? "Expiry pair (near-far selector pair) that wins for this gap bucket, e.g. current-next, weekly-next_weekly. Same strike across both expiries." : "Expiry bucket: current = same Saturday settlement; next = following Sunday; next_to_next = following Monday; weekly/biweekly/monthly = standard Delta expiries."} /></th>
                 <th style={th}>Best Δ <InfoIcon text="Target delta of each strangle/straddle leg at entry. 0.50 = ATM, 0.10 = OTM." /></th>
                 <th style={th}>Exit rule <InfoIcon text="Combined exit predicate (OR-of-clauses). SL{X} = premium stop-loss at X% (one leg's mark ≥ entry × (1+X/100)). MaxProfit Y% = exit when total MTM ≥ Y% of credit. MarginTgt Y% = exit when total MTM ≥ Y% of margin (take-profit). Exit @HH:MM = fixed Saturday IST exit. Whichever fires first wins; if none fires the trade rides to Sat 17:30 settlement (hard cap)." /></th>
 

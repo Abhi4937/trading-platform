@@ -13,7 +13,7 @@ const BASE = '/api/v1/m7';
 
 // Joint Δ+Price-match dataset toggle. Default = today's pure-Δ behavior;
 // 'price_match' reads the parallel parquet built by m7_batch_backtester_joint.
-export type M7Dataset = 'delta_match' | 'price_match';
+export type M7Dataset = 'delta_match' | 'price_match' | 'calendar';
 
 // Append the dataset query param IFF it's a non-default value. Used by every
 // M7 endpoint that reads trades/paths/grid so the toggle threads through.

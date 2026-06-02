@@ -49,7 +49,7 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 // Allowed dataset values. Used to validate the persisted localStorage value
 // on first mount — falls back to delta_match if the stored entry is stale or
 // not in this whitelist.
-const DATASET_VALUES: M7Dataset[] = ['delta_match', 'price_match'];
+const DATASET_VALUES: M7Dataset[] = ['delta_match', 'price_match', 'calendar'];
 
 function isValidDataset(v: unknown): v is M7Dataset {
   return typeof v === 'string' && (DATASET_VALUES as string[]).includes(v);
@@ -214,6 +214,11 @@ function DatasetToggle({
               onClick={() => onChange('price_match')}
               title="Strikes jointly optimized to minimize both Δ deviation AND premium asymmetry, with fallback to Δ-only when no joint match fits within tolerance.">
         ◆ Δ+Price match
+      </button>
+      <button style={btn(dataset === 'calendar')}
+              onClick={() => onChange('calendar')}
+              title="Backwardation double calendar (gap ≥ 5pp): SELL near CE+PE, BUY far CE+PE; strike per side by near-leg nearest |Δ| (0.30/0.40/0.50), far reuses the same strike. Hold to near-expiry settlement. Best combo = best expiry pair per gap bucket (hours aggregated). IV band → Gap bucket, Expiry → Pair.">
+        ◆ Calendar sweep
       </button>
     </div>
   );
