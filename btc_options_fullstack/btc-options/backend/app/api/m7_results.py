@@ -3687,11 +3687,15 @@ def get_losses_distribution(
         _load_trades(dataset)  # refresh mtime for this dataset's cache key
         _, ds_mtime = _TRADES_BY_DATASET.get(dataset, (None, 0.0))
         cold_rules: list[str] = []
-        for rule_key, rule_dict in rule_dicts.items():
-            cache_key = (dataset, rule_key, ds_mtime)
-            if _EXIT_CACHE.get(cache_key) is None:
-                cold_rules.append(rule_key)
-                _warmup_rule_async(rule_dict, dataset=dataset)
+        # Calendar exits are precomputed in the trades row → _derive_exits short-circuits
+        # and never populates _EXIT_CACHE, so the cold-cache warmup precheck doesn't apply
+        # (it would otherwise report every rule "cold" forever → perpetual 0 losers).
+        if dataset != "calendar":
+            for rule_key, rule_dict in rule_dicts.items():
+                cache_key = (dataset, rule_key, ds_mtime)
+                if _EXIT_CACHE.get(cache_key) is None:
+                    cold_rules.append(rule_key)
+                    _warmup_rule_async(rule_dict, dataset=dataset)
         if cold_rules:
             return {
                 "n_losses": 0, "n_total": 0, "loss_rate": 0.0,
