@@ -646,10 +646,16 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       JSON.stringify(exitHourFilter), JSON.stringify(slFilter)]);
 
   const isWarming = resp?.status === 'warming';
-  const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
   // Dataset-aware labels + calendar flag for relabels / control hiding.
   const L = dimLabels(datasetProp);
   const isCal = L.isCal;
+  const rawRows: M7IvBandBestComboRow[] = resp?.rows ?? [];
+  // Calendar: order rows low→high by gap-bucket start (e.g. [5,10) before [10,15)).
+  const rows: M7IvBandBestComboRow[] = isCal
+    ? [...rawRows].sort((a, b) =>
+        (parseInt(String(a.iv_band).replace(/^\[/, ''), 10) || 0)
+        - (parseInt(String(b.iv_band).replace(/^\[/, ''), 10) || 0))
+    : rawRows;
 
   // Notify the parent whenever the per-band rows change. Keyed on the rows'
   // (iv_band, expiry, delta, rule_label) signature so we don't churn the
