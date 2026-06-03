@@ -785,7 +785,7 @@ def _simulate_day(
         "net_pnl":         round(net_pnl, 4),
         "margin_used":     margin_used,
         "max_mtm":         round(max_mtm, 4),
-        "max_mtm_time":    _fmt_ist(max_mtm_ts),
+        "max_mtm_time":    _fmt_ist_full(max_mtm_ts),
         "max_pnl_net":     round(max_pnl_net, 4),
         "max_leg_marks":   [
             {"type": leg["type"], "strike": leg["strike"], "mark": round(mk, 4)}
@@ -796,7 +796,7 @@ def _simulate_day(
             for leg, dv in zip(resolved_legs, max_leg_deltas)
         ],
         "min_mtm":         round(min_mtm, 4),
-        "min_mtm_time":    _fmt_ist(min_mtm_ts),
+        "min_mtm_time":    _fmt_ist_full(min_mtm_ts),
         "min_pnl_net":     round(min_pnl_net, 4),
         "min_leg_marks":   [
             {"type": leg["type"], "strike": leg["strike"], "mark": round(mk, 4)}
@@ -855,6 +855,11 @@ def _skipped(d: date, reason: str, entry_ts: Optional[int] = None) -> dict:
 def _fmt_ist(unix_sec: int) -> str:
     dt = datetime.fromtimestamp(int(unix_sec) + IST_OFFSET_SEC, tz=timezone.utc)
     return dt.strftime("%H:%M:%S IST")
+
+
+def _fmt_ist_full(unix_sec: int) -> str:
+    dt = datetime.fromtimestamp(int(unix_sec) + IST_OFFSET_SEC, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S IST")
 
 
 def _date_ist(unix_sec: int) -> str:

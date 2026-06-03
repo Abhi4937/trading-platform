@@ -224,10 +224,11 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
     XLSX.writeFile(wb, `backtest_${firstName}_${lastName}.xlsx`);
   };
 
-  const Th: React.FC<{k: SortKey, children: React.ReactNode, align?: 'left' | 'right' | 'center'}> =
-    ({ k, children, align }) => (
+  const Th: React.FC<{k: SortKey, children: React.ReactNode, align?: 'left' | 'right' | 'center', title?: string}> =
+    ({ k, children, align, title }) => (
       <th
         onClick={() => onSort(k)}
+        title={title}
         style={{
           padding: '6px 10px', textAlign: align ?? 'left',
           cursor: 'pointer', userSelect: 'none',
@@ -322,7 +323,7 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
               <th style={{ ...thStyle, textAlign: 'right' }} title="Structural baseline credit% from calibration (DTE × Δ × spot)">Struct%</th>
               <Th k="iv_regime_premium_pct" align="right">IV-Prem%</Th>
               <Th k="excess_over_fair_pct" align="right">Excess%</Th>
-              <Th k="quality_score" align="right">Qty</Th>
+              <Th k="quality_score" align="right" title="Calibration quality score (0-100) + size band (S=Strong / S=Standard / M=Marginal / K=Skip)">Score</Th>
               <th style={thStyle}>Leg</th>
               <th style={thStyle} title="Expiry of this leg">Expiry</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>Entry</th>
@@ -346,6 +347,7 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
               <th style={{ ...thStyle, textAlign: 'right' }} title="Exit brokerage at end-of-trade marks">X.Brk</th>
               <th style={{ ...thStyle, textAlign: 'right' }} title="Exit brokerage at peak-MTM marks">Pk.Brk</th>
               <Th k="net_pnl"       align="right">Net</Th>
+              <th style={{ ...thStyle, textAlign: 'right' }} title="MTM at actual exit time (gross − entry slip only; no brokerage, no exit slip)">Exit MTM</th>
               <th style={{ ...thStyle, textAlign: 'right' }} title="Max MTM (gross − entry slip)">Max MTM</th>
               <th style={{ ...thStyle, textAlign: 'right' }} title="Max MTM − entry brk − peak exit slip − peak exit brk">Max Net</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>Min MTM</th>
@@ -363,7 +365,7 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
                 return (
                   <tr key={i} style={{ background: bg }}>
                     <td style={{ ...tdStyle, background: bg, borderBottom: tradeBorder }}>{t.date}</td>
-                    <td style={{ ...tdStyle, background: bg, borderBottom: tradeBorder }} colSpan={38}>
+                    <td style={{ ...tdStyle, background: bg, borderBottom: tradeBorder }} colSpan={39}>
                       <span style={{ color: '#4a6a85', fontStyle: 'italic' }}>
                         skipped — {t.skip_reason}
                       </span>
@@ -373,22 +375,22 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
               }
 
               const tone = t.net_pnl >= 0 ? '#00e5a0' : '#ff4d6a';
-              const ce   = legSummary(t.legs, 'CE');
-              const pe   = legSummary(t.legs, 'PE');
-              const absD = Math.abs((ce?.entry_delta ?? 0) + (pe?.entry_delta ?? 0));
+              // Net delta across all legs (sums raw deltas — CE +, PE −, cancels for delta-neutral)
+              const absD = Math.abs(t.legs.reduce((sum, l) => sum + (l.entry_delta ?? 0), 0));
+              const N = Math.max(1, t.legs.length);
 
               const s  = (extra?: React.CSSProperties): React.CSSProperties =>
                 ({ ...tdStyle,  background: bg, ...extra });
               const sr = (extra?: React.CSSProperties): React.CSSProperties =>
                 ({ ...tdRight, background: bg, ...extra });
 
-              const fmtLeg = (l: typeof ce, type: 'CE' | 'PE') => (
+              const fmtLegCell = (l: BacktestTrade['legs'][number]) => (
                 <>
                   <span style={{
-                    color: type === 'CE' ? '#58a6ff' : '#ffa940',
+                    color: l.type === 'CE' ? '#58a6ff' : '#ffa940',
                     fontSize: 9, fontWeight: 700, marginRight: 4,
-                  }}>{type}</span>
-                  {l ? `${l.action === 'BUY' ? '+' : '-'}${l.qty} ${l.strike}` : '—'}
+                  }}>{l.type}</span>
+                  {`${l.action === 'BUY' ? '+' : '-'}${l.qty} ${l.strike}`}
                 </>
               );
 
@@ -403,126 +405,137 @@ export const BacktestTradeLogTable: React.FC<Props> = ({ trades, summary, onSele
 
               return (
                 <React.Fragment key={i}>
-                  {/* Row 1 — CE + all shared columns (rowSpan=2) */}
-                  <tr {...rowClickProps}>
-                    <td rowSpan={2} style={s({ borderBottom: tradeBorder, ...selStyle })}>
-                      {t.date}{t.is_reentry && <span style={{ color: '#ffa940', marginLeft: 4 }}>↻</span>}
-                    </td>
-                    <td rowSpan={2} style={s({ borderBottom: tradeBorder, color: t.exit_date && t.exit_date !== t.date ? '#ffa940' : '#7a9bb5' })}>
-                      {t.exit_date ?? '—'}
-                    </td>
-                    <td rowSpan={2} style={s({ borderBottom: tradeBorder })}>{t.entry_time}</td>
-                    <td rowSpan={2} style={s({ borderBottom: tradeBorder })}>{t.exit_time}</td>
-                    <td rowSpan={2} style={s({ borderBottom: tradeBorder })}>{t.exit_reason}</td>
-                    {/* Strangle analytics chips (rowSpan=2) */}
-                    <td rowSpan={2} style={s({ borderBottom: tradeBorder, textAlign: 'center' })}>
-                      {t.pattern ? (
-                        <span style={{
-                          display: 'inline-block', padding: '2px 6px', fontSize: 10,
-                          fontWeight: 700, borderRadius: 3, color: 'white',
-                          background: PATTERN_COLOR[t.pattern] ?? '#475569',
-                        }}>{t.pattern}</span>
-                      ) : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder, color: '#c9d1d9' })}
-                        title={t.fair_credit_at_ivp != null ? `Fair (incl. IV regime): ${(t.fair_credit_at_ivp * 100).toFixed(3)}%` : ''}>
-                      {t.credit_pct != null ? `${(t.credit_pct * 100).toFixed(3)}%` : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder, color: '#7a9bb5' })}
-                        title="Structural baseline credit% from calibration (DTE × Δ × spot, IV-neutral)">
-                      {t.structural_credit_pct != null ? `${(t.structural_credit_pct * 100).toFixed(3)}%` : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({
-                      borderBottom: tradeBorder,
-                      color: t.iv_regime_premium_pct == null ? '#7a9bb5'
-                            : t.iv_regime_premium_pct > 0 ? '#00e5a0' : '#ff4d6a',
-                    })} title="Extra credit% from current IV vs structural baseline (fair − structural)">
-                      {t.iv_regime_premium_pct != null ? `${t.iv_regime_premium_pct >= 0 ? '+' : ''}${(t.iv_regime_premium_pct * 100).toFixed(3)}%` : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({
-                      borderBottom: tradeBorder,
-                      color: t.excess_over_fair_pct == null ? '#7a9bb5'
-                            : t.excess_over_fair_pct > 0 ? '#00e5a0' : '#ff4d6a',
-                    })} title="Actual credit% − fair credit. Positive = market paying more than historical fair.">
-                      {t.excess_over_fair_pct != null ? `${t.excess_over_fair_pct >= 0 ? '+' : ''}${(t.excess_over_fair_pct * 100).toFixed(3)}%` : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>
-                      {t.quality_score != null ? (
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4 }}>
-                          <span style={{ color: '#c9d1d9' }}>{t.quality_score.toFixed(0)}</span>
-                          {t.size_band && (
-                            <span style={{
-                              padding: '1px 5px', fontSize: 9, fontWeight: 700,
-                              borderRadius: 3, color: 'white',
-                              background: BAND_COLOR[t.size_band] ?? '#475569',
-                            }}>{t.size_band[0].toUpperCase()}</span>
-                          )}
-                        </div>
-                      ) : '—'}
-                    </td>
-                    {/* CE-specific cells */}
-                    <td style={s({ fontFamily: 'monospace', fontSize: 11, color: '#7a9bb5', borderBottom: legBorder })}>{fmtLeg(ce, 'CE')}</td>
-                    <td style={s({ fontSize: 11, color: '#7a9bb5', borderBottom: legBorder })} title={ce?.expiry}>{fmtExpiry(ce?.expiry)}</td>
-                    <td style={sr({ borderBottom: legBorder })}>{ce ? ce.entry_mark.toFixed(2) : '—'}</td>
-                    <td style={sr({ borderBottom: legBorder })}>{ce ? ce.exit_mark.toFixed(2) : '—'}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: legBorder })}>{fmtNum(t.max_leg_marks?.find(m => m.type === 'CE')?.mark)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: legBorder })}>{fmtNum(t.max_leg_deltas?.find(d => d.type === 'CE')?.delta, 3)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: legBorder })}>{fmtNum(t.min_leg_marks?.find(m => m.type === 'CE')?.mark)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: legBorder })}>{fmtNum(t.min_leg_deltas?.find(d => d.type === 'CE')?.delta, 3)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: legBorder })}>{ce?.entry_delta != null ? ce.entry_delta.toFixed(3) : '—'}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: legBorder })}>{ce?.entry_iv != null && ce.entry_iv > 0 ? ce.entry_iv.toFixed(1) : '—'}</td>
-                    {/* Shared cells — rowSpan=2 */}
-                    <td rowSpan={2} style={sr({ color: absD < 0.05 ? '#00e5a0' : '#c9d1d9', borderBottom: tradeBorder })}>
-                      {(ce?.entry_delta != null || pe?.entry_delta != null) ? absD.toFixed(3) : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>
-                      {t.entry_atm_iv != null && t.entry_atm_iv > 0 ? t.entry_atm_iv.toFixed(1) : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>
-                      {t.entry_hv != null && t.entry_hv > 0 ? t.entry_hv.toFixed(1) : '—'}
-                    </td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.spot_at_entry, 0)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.spot_at_exit, 0)}</td>
-                    <td rowSpan={2} style={sr({ color: t.gross_pnl >= 0 ? '#00e5a0' : '#ff4d6a', borderBottom: tradeBorder })}>{fmtSigned(t.gross_pnl)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.entry_slip)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.exit_slip)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.peak_exit_slip)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.entry_brk)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.exit_brk)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.peak_exit_brk)}</td>
-                    <td rowSpan={2} style={sr({ color: tone, fontWeight: 700, borderBottom: tradeBorder })}>{fmtSigned(t.net_pnl)}</td>
-                    <td rowSpan={2} style={sr({ color: '#00e5a0', borderBottom: tradeBorder })}>
-                      {fmtSigned(t.max_mtm)}
-                      {t.max_mtm_time && <div style={{ color: '#7a9bb5', fontSize: 10 }}>{t.max_mtm_time}</div>}
-                    </td>
-                    <td rowSpan={2} style={sr({ color: t.max_pnl_net >= 0 ? '#00e5a0' : '#ff4d6a', borderBottom: tradeBorder })}>{fmtSigned(t.max_pnl_net)}</td>
-                    <td rowSpan={2} style={sr({ color: '#ff4d6a', borderBottom: tradeBorder })}>
-                      {fmtSigned(t.min_mtm)}
-                      {t.min_mtm_time && <div style={{ color: '#7a9bb5', fontSize: 10 }}>{t.min_mtm_time}</div>}
-                    </td>
-                    <td rowSpan={2} style={sr({ color: t.min_pnl_net >= 0 ? '#00e5a0' : '#ff4d6a', borderBottom: tradeBorder })}>{fmtSigned(t.min_pnl_net)}</td>
-                    <td rowSpan={2} style={sr({ borderBottom: tradeBorder })}>
-                      {t.margin_used != null ? `$${t.margin_used.toFixed(0)}` : '—'}
-                    </td>
-                  </tr>
-                  {/* Row 2 — PE leg only */}
-                  <tr>
-                    <td style={s({ fontFamily: 'monospace', fontSize: 11, color: '#7a9bb5', borderBottom: tradeBorder })}>{fmtLeg(pe, 'PE')}</td>
-                    <td style={s({ fontSize: 11, color: '#7a9bb5', borderBottom: tradeBorder })} title={pe?.expiry}>{fmtExpiry(pe?.expiry)}</td>
-                    <td style={sr({ borderBottom: tradeBorder })}>{pe ? pe.entry_mark.toFixed(2) : '—'}</td>
-                    <td style={sr({ borderBottom: tradeBorder })}>{pe ? pe.exit_mark.toFixed(2) : '—'}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>{fmtNum(t.max_leg_marks?.find(m => m.type === 'PE')?.mark)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>{fmtNum(t.max_leg_deltas?.find(d => d.type === 'PE')?.delta, 3)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>{fmtNum(t.min_leg_marks?.find(m => m.type === 'PE')?.mark)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>{fmtNum(t.min_leg_deltas?.find(d => d.type === 'PE')?.delta, 3)}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>{pe?.entry_delta != null ? pe.entry_delta.toFixed(3) : '—'}</td>
-                    <td style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>{pe?.entry_iv != null && pe.entry_iv > 0 ? pe.entry_iv.toFixed(1) : '—'}</td>
-                  </tr>
+                  {t.legs.map((leg, legIdx) => {
+                    const isFirst = legIdx === 0;
+                    const isLast  = legIdx === t.legs.length - 1;
+                    const border  = isLast ? tradeBorder : legBorder;
+                    // Match peak/trough marks+deltas by (strike, type) so multi-CE/PE legs disambiguate
+                    const maxM = t.max_leg_marks?.find(m => m.type === leg.type && m.strike === leg.strike);
+                    const minM = t.min_leg_marks?.find(m => m.type === leg.type && m.strike === leg.strike);
+                    const maxD = t.max_leg_deltas?.find(d => d.type === leg.type && d.strike === leg.strike);
+                    const minD = t.min_leg_deltas?.find(d => d.type === leg.type && d.strike === leg.strike);
+
+                    return (
+                      <tr key={legIdx} {...rowClickProps}>
+                        {isFirst && (
+                          <>
+                            <td rowSpan={N} style={s({ borderBottom: tradeBorder, ...selStyle })}>
+                              {t.date}{t.is_reentry && <span style={{ color: '#ffa940', marginLeft: 4 }}>↻</span>}
+                            </td>
+                            <td rowSpan={N} style={s({ borderBottom: tradeBorder, color: t.exit_date && t.exit_date !== t.date ? '#ffa940' : '#7a9bb5' })}>
+                              {t.exit_date ?? '—'}
+                            </td>
+                            <td rowSpan={N} style={s({ borderBottom: tradeBorder })}>{t.entry_time}</td>
+                            <td rowSpan={N} style={s({ borderBottom: tradeBorder })}>{t.exit_time}</td>
+                            <td rowSpan={N} style={s({ borderBottom: tradeBorder })}>{t.exit_reason}</td>
+                            <td rowSpan={N} style={s({ borderBottom: tradeBorder, textAlign: 'center' })}>
+                              {t.pattern ? (
+                                <span style={{
+                                  display: 'inline-block', padding: '2px 6px', fontSize: 10,
+                                  fontWeight: 700, borderRadius: 3, color: 'white',
+                                  background: PATTERN_COLOR[t.pattern] ?? '#475569',
+                                }}>{t.pattern}</span>
+                              ) : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder, color: '#c9d1d9' })}
+                                title={t.fair_credit_at_ivp != null ? `Fair (incl. IV regime): ${(t.fair_credit_at_ivp * 100).toFixed(3)}%` : ''}>
+                              {t.credit_pct != null ? `${(t.credit_pct * 100).toFixed(3)}%` : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder, color: '#7a9bb5' })}
+                                title="Structural baseline credit% from calibration (DTE × Δ × spot, IV-neutral)">
+                              {t.structural_credit_pct != null ? `${(t.structural_credit_pct * 100).toFixed(3)}%` : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({
+                              borderBottom: tradeBorder,
+                              color: t.iv_regime_premium_pct == null ? '#7a9bb5'
+                                    : t.iv_regime_premium_pct > 0 ? '#00e5a0' : '#ff4d6a',
+                            })} title="Extra credit% from current IV vs structural baseline (fair − structural)">
+                              {t.iv_regime_premium_pct != null ? `${t.iv_regime_premium_pct >= 0 ? '+' : ''}${(t.iv_regime_premium_pct * 100).toFixed(3)}%` : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({
+                              borderBottom: tradeBorder,
+                              color: t.excess_over_fair_pct == null ? '#7a9bb5'
+                                    : t.excess_over_fair_pct > 0 ? '#00e5a0' : '#ff4d6a',
+                            })} title="Actual credit% − fair credit. Positive = market paying more than historical fair.">
+                              {t.excess_over_fair_pct != null ? `${t.excess_over_fair_pct >= 0 ? '+' : ''}${(t.excess_over_fair_pct * 100).toFixed(3)}%` : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>
+                              {t.quality_score != null ? (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4 }}>
+                                  <span style={{ color: '#c9d1d9' }}>{t.quality_score.toFixed(0)}</span>
+                                  {t.size_band && (
+                                    <span style={{
+                                      padding: '1px 5px', fontSize: 9, fontWeight: 700,
+                                      borderRadius: 3, color: 'white',
+                                      background: BAND_COLOR[t.size_band] ?? '#475569',
+                                    }}>{t.size_band[0].toUpperCase()}</span>
+                                  )}
+                                </div>
+                              ) : '—'}
+                            </td>
+                          </>
+                        )}
+                        {/* Per-leg cells — one row per leg */}
+                        <td style={s({ fontFamily: 'monospace', fontSize: 11, color: '#7a9bb5', borderBottom: border })}>{fmtLegCell(leg)}</td>
+                        <td style={s({ fontSize: 11, color: '#7a9bb5', borderBottom: border })} title={leg.expiry}>{fmtExpiry(leg.expiry)}</td>
+                        <td style={sr({ borderBottom: border })}>{leg.entry_mark.toFixed(2)}</td>
+                        <td style={sr({ borderBottom: border })}>{leg.exit_mark.toFixed(2)}</td>
+                        <td style={sr({ color: '#7a9bb5', borderBottom: border })}>{fmtNum(maxM?.mark)}</td>
+                        <td style={sr({ color: '#7a9bb5', borderBottom: border })}>{fmtNum(maxD?.delta, 3)}</td>
+                        <td style={sr({ color: '#7a9bb5', borderBottom: border })}>{fmtNum(minM?.mark)}</td>
+                        <td style={sr({ color: '#7a9bb5', borderBottom: border })}>{fmtNum(minD?.delta, 3)}</td>
+                        <td style={sr({ color: '#7a9bb5', borderBottom: border })}>{leg.entry_delta != null ? leg.entry_delta.toFixed(3) : '—'}</td>
+                        <td style={sr({ color: '#7a9bb5', borderBottom: border })}>{leg.entry_iv != null && leg.entry_iv > 0 ? leg.entry_iv.toFixed(1) : '—'}</td>
+                        {isFirst && (
+                          <>
+                            <td rowSpan={N} style={sr({ color: absD < 0.05 ? '#00e5a0' : '#c9d1d9', borderBottom: tradeBorder })}>
+                              {t.legs.some(l => l.entry_delta != null) ? absD.toFixed(3) : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>
+                              {t.entry_atm_iv != null && t.entry_atm_iv > 0 ? t.entry_atm_iv.toFixed(1) : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({ color: '#7a9bb5', borderBottom: tradeBorder })}>
+                              {t.entry_hv != null && t.entry_hv > 0 ? t.entry_hv.toFixed(1) : '—'}
+                            </td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.spot_at_entry, 0)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.spot_at_exit, 0)}</td>
+                            <td rowSpan={N} style={sr({ color: t.gross_pnl >= 0 ? '#00e5a0' : '#ff4d6a', borderBottom: tradeBorder })}>{fmtSigned(t.gross_pnl)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.entry_slip)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.exit_slip)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.peak_exit_slip)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.entry_brk)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.exit_brk)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>{fmtNum(t.peak_exit_brk)}</td>
+                            <td rowSpan={N} style={sr({ color: tone, fontWeight: 700, borderBottom: tradeBorder })}>{fmtSigned(t.net_pnl)}</td>
+                            <td rowSpan={N} style={sr({
+                              color: (t.gross_pnl - t.entry_slip) >= 0 ? '#00e5a0' : '#ff4d6a',
+                              borderBottom: tradeBorder,
+                            })} title="gross_pnl − entry_slip">
+                              {fmtSigned(t.gross_pnl - t.entry_slip)}
+                            </td>
+                            <td rowSpan={N} style={sr({ color: '#00e5a0', borderBottom: tradeBorder })}>
+                              {fmtSigned(t.max_mtm)}
+                              {t.max_mtm_time && <div style={{ color: '#7a9bb5', fontSize: 10 }}>{t.max_mtm_time}</div>}
+                            </td>
+                            <td rowSpan={N} style={sr({ color: t.max_pnl_net >= 0 ? '#00e5a0' : '#ff4d6a', borderBottom: tradeBorder })}>{fmtSigned(t.max_pnl_net)}</td>
+                            <td rowSpan={N} style={sr({ color: '#ff4d6a', borderBottom: tradeBorder })}>
+                              {fmtSigned(t.min_mtm)}
+                              {t.min_mtm_time && <div style={{ color: '#7a9bb5', fontSize: 10 }}>{t.min_mtm_time}</div>}
+                            </td>
+                            <td rowSpan={N} style={sr({ color: t.min_pnl_net >= 0 ? '#00e5a0' : '#ff4d6a', borderBottom: tradeBorder })}>{fmtSigned(t.min_pnl_net)}</td>
+                            <td rowSpan={N} style={sr({ borderBottom: tradeBorder })}>
+                              {t.margin_used != null ? `$${t.margin_used.toFixed(0)}` : '—'}
+                            </td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </React.Fragment>
               );
             })}
             {sorted.length === 0 && (
-              <tr><td style={tdStyle} colSpan={39}>
+              <tr><td style={tdStyle} colSpan={40}>
                 <div style={{ textAlign: 'center', color: '#4a6a85', padding: 24 }}>No rows</div>
               </td></tr>
             )}

@@ -133,14 +133,20 @@ def strike_for_strike_type(
       - For Call:  ITM = strikes < spot,  OTM = strikes > spot
       - For Put :  ITM = strikes > spot,  OTM = strikes < spot
     Depth N counts in strike-list positions away from ATM.
+
+    Strike universe is the chain snapshot at `timestamp` (only strikes with a
+    valid mark at/before that moment). The filesystem strike index is NOT used
+    here because it includes "ghost strikes" — folders that exist on disk but
+    whose parquet has no rows at entry_ts. Using them would resolve to strikes
+    with mark=0 and cause the trade to skip.
     """
     spot = get_spot_at_or_before(timestamp)
     if spot <= 0:
         return 0
-    strikes = get_strikes_for_expiry(expiry)
-    if not strikes:
+    marks_map = get_marks_for_chain(expiry, option_type, timestamp)
+    if not marks_map:
         return 0
-    sorted_strikes = sorted(strikes)
+    sorted_strikes = sorted(marks_map.keys())
     atm = min(sorted_strikes, key=lambda k: abs(k - spot))
     atm_idx = sorted_strikes.index(atm)
 

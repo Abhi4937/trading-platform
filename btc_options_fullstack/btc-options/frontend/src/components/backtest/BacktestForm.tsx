@@ -112,6 +112,8 @@ export const BacktestForm: React.FC<Props> = ({ busy, onSubmit }) => {
   );
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saveName, setSaveName] = useState('');
+  // Tracks which saved strategy was last loaded — enables the Update button
+  const [loadedStrategyName, setLoadedStrategyName] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`${API_BASE}/historical/data-range`).then(r => r.json()).then((r: any) => {
@@ -168,18 +170,28 @@ export const BacktestForm: React.FC<Props> = ({ busy, onSubmit }) => {
     const list = Array.from(new Set([...savedNames, trimmed])).sort();
     writePersisted(SAVED_LIST_KEY, list);
     setSavedNames(list);
+    setLoadedStrategyName(trimmed);
     setShowSaveDialog(false);
     setSaveName('');
   };
+  const updateStrategy = () => {
+    if (!loadedStrategyName) return;
+    if (!confirm(`Overwrite saved strategy "${loadedStrategyName}" with current form state?`)) return;
+    writePersisted(K(`strategy:${loadedStrategyName}`), snapshot());
+  };
   const loadStrategy = (name: string) => {
     const s = readPersisted<any>(K(`strategy:${name}`));
-    if (s) restoreSnapshot(s);
+    if (s) {
+      restoreSnapshot(s);
+      setLoadedStrategyName(name);
+    }
   };
   const deleteStrategy = (name: string) => {
     clearPersisted(K(`strategy:${name}`));
     const list = savedNames.filter(n => n !== name);
     writePersisted(SAVED_LIST_KEY, list);
     setSavedNames(list);
+    if (loadedStrategyName === name) setLoadedStrategyName(null);
   };
 
   // ── Leg actions ─────────────────────────────────────────────────────────────
@@ -304,6 +316,17 @@ export const BacktestForm: React.FC<Props> = ({ busy, onSubmit }) => {
               <option value="">Delete saved…</option>
               {savedNames.map(n => <option key={n} value={n}>{n}</option>)}
             </select>
+          )}
+          {loadedStrategyName && (
+            <button onClick={updateStrategy}
+              title={`Overwrite "${loadedStrategyName}" with current form state`}
+              style={{
+                background: '#0d8c4f', color: '#fff', border: 'none',
+                borderRadius: 4, padding: '5px 12px', fontSize: 11,
+                fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+              }}>
+              🔄 Update "{loadedStrategyName}"
+            </button>
           )}
           <button onClick={() => setShowSaveDialog(true)}
             style={{
@@ -759,9 +782,9 @@ const InlineField: React.FC<{ label: string; children: React.ReactNode }> = ({ l
   </div>
 );
 
-const Stack: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+const Stack: React.FC<{ label: string; title?: string; children: React.ReactNode }> = ({ label, title, children }) => (
   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-    <label style={{ fontSize: 11, color: '#c9d1d9' }}>{label}</label>
+    <label style={{ fontSize: 11, color: '#c9d1d9' }} title={title}>{label}</label>
     {children}
   </div>
 );

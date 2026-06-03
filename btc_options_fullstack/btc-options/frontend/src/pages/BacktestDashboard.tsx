@@ -1,24 +1,21 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { backtestApi } from '../services/backtest_api';
 import { historicalApi } from '../services/historical_api';
 import type {
   BacktestRequest, BacktestResult, BacktestStatusResponse,
 } from '../types/backtest';
-import type { SpotOhlcBar, IndicatorConfig, IndicatorPoint } from '../types/historical';
 import { BacktestForm } from '../components/backtest/BacktestForm';
 import { BacktestProgressBar } from '../components/backtest/BacktestProgressBar';
 import { BacktestEquityChart } from '../components/backtest/BacktestEquityChart';
 import { BacktestDailyPnlBars } from '../components/backtest/BacktestDailyPnlBars';
 import { BacktestStatsPanel } from '../components/backtest/BacktestStatsPanel';
 import { BacktestTradeLogTable } from '../components/backtest/BacktestTradeLogTable';
-import { SpotChart } from '../components/historical/SpotChart';
-import { IndicatorConfigPanel } from '../components/historical/IndicatorConfigPanel';
 import { StrangleAnalyticsPanel } from '../components/strangle/StrangleAnalyticsPanel';
 import type {
   AnalyticsContext, AnalyticsLeg, CalibrationBucket,
 } from '../utils/strangleAnalytics';
 import type { BacktestTrade } from '../types/backtest';
-import { readPersisted, writePersisted, clearPersisted, usePersistedState } from '../hooks/usePersistedState';
+import { readPersisted, writePersisted, clearPersisted } from '../hooks/usePersistedState';
 
 const POLL_MS = 1000;
 const RESULT_KEY = 'backtest:lastResult';
@@ -38,11 +35,6 @@ export const BacktestDashboard: React.FC = () => {
   useEffect(() => {
     if (status?.status === 'done') writePersisted(RESULT_KEY, status);
   }, [status]);
-
-  // ── Spot/leg chart with technical indicators (shares config with Historical) ──
-  const [indicatorConfigs, setIndicatorConfigs] = usePersistedState<IndicatorConfig[]>('historical:indicators', []);
-  const [chartSource, setChartSource] = usePersistedState<'spot' | 'leg'>('backtest:chartSource', 'spot');
-  const [chartTimeframe] = usePersistedState<string>('historical:chartTimeframe', '5m');
 
   // ── Strangle analytics for selected trade ──
   const [selectedTrade, setSelectedTrade] = useState<BacktestTrade | null>(null);
@@ -142,42 +134,6 @@ export const BacktestDashboard: React.FC = () => {
 
     return () => controller.abort();
   }, [selectedTrade]);
-  const [spotOhlc, setSpotOhlc] = useState<SpotOhlcBar[]>([]);
-  const [indicatorData, setIndicatorData] = useState<Record<string, IndicatorPoint[]>>({});
-  const indicatorAbortRef = useRef<AbortController | null>(null);
-
-  // Use the backtest's start date for the chart context.
-  const chartWindow = useMemo(() => {
-    const startDate = readPersisted<string>('backtest:startDate');
-    if (!startDate) return null;
-    const start = Math.floor(new Date(startDate + 'T00:00:00+05:30').getTime() / 1000);
-    const end   = start + 24 * 3600 - 60;
-    return { start, end };
-  }, [status?.status]);  // re-evaluate when a new run completes
-
-  useEffect(() => {
-    if (!chartWindow) return;
-    if (indicatorAbortRef.current) indicatorAbortRef.current.abort();
-    indicatorAbortRef.current = new AbortController();
-    const sig = indicatorAbortRef.current.signal;
-
-    const ohlcP = historicalApi.getSpotOhlc(chartWindow.start, chartWindow.end, chartTimeframe, sig);
-    const indP = indicatorConfigs.length === 0
-      ? Promise.resolve({ indicators: {} as Record<string, IndicatorPoint[]> })
-      : historicalApi.getSpotIndicators(chartWindow.start, chartWindow.end, chartTimeframe, indicatorConfigs, sig);
-
-    Promise.all([ohlcP, indP])
-      .then(([ohlcRes, indRes]) => {
-        setSpotOhlc(ohlcRes.data ?? []);
-        setIndicatorData(indRes.indicators ?? {});
-      })
-      .catch(err => {
-        if (err?.name !== 'AbortError') console.error('backtest spot chart fetch failed', err);
-      });
-
-    return () => indicatorAbortRef.current?.abort();
-  }, [chartWindow, chartTimeframe, indicatorConfigs]);
-
   // Polling loop driven by jobId.
   useEffect(() => {
     if (!jobId) return;
@@ -272,25 +228,6 @@ export const BacktestDashboard: React.FC = () => {
                 etaSeconds={status.progress.eta_seconds}
                 onCancel={handleCancel}
               />
-            )}
-
-            {chartWindow && (
-              <>
-                <IndicatorConfigPanel
-                  configs={indicatorConfigs}
-                  setConfigs={setIndicatorConfigs}
-                  source={chartSource}
-                  setSource={setChartSource}
-                  vwapAvailable={chartSource === 'spot'}
-                />
-                <SpotChart
-                  ohlc={spotOhlc}
-                  configs={indicatorConfigs}
-                  indicators={indicatorData}
-                  height={420}
-                  premiumMode={chartSource === 'leg'}
-                />
-              </>
             )}
 
             {result && (
