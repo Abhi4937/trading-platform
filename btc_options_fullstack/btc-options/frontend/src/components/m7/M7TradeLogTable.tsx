@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { fetchM7Trades } from '../../services/m7_api';
+import { fetchM7Trades, type M7Dataset } from '../../services/m7_api';
 import type { M7Filters, M7TradeRow } from '../../types/m7';
 
-export function M7TradeLogTable({ filters, onSelect }: {
-  filters: M7Filters; onSelect: (tradeId: string) => void;
+export function M7TradeLogTable({ filters, onSelect, dataset }: {
+  filters: M7Filters; onSelect: (tradeId: string) => void; dataset?: M7Dataset;
 }) {
+  const isCal = dataset === 'calendar';
   const [rows, setRows] = useState<M7TradeRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -15,10 +16,11 @@ export function M7TradeLogTable({ filters, onSelect }: {
 
   useEffect(() => {
     setLoading(true);
-    fetchM7Trades({ ...filters, limit, offset, sort_by: sortBy, sort_dir: sortDir })
+    // dataset must be threaded — without it the log hits the delta_match parquet.
+    fetchM7Trades({ ...filters, limit, offset, sort_by: sortBy, sort_dir: sortDir }, dataset)
       .then(r => { setRows(r.rows); setTotal(r.total); })
       .finally(() => setLoading(false));
-  }, [JSON.stringify(filters), offset, sortBy, sortDir]);
+  }, [JSON.stringify(filters), offset, sortBy, sortDir, dataset]);
 
   const click = (col: string) => {
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -57,13 +59,13 @@ export function M7TradeLogTable({ filters, onSelect }: {
             <thead>
               <tr style={{ borderBottom: '1px solid #1a2d42' }}>
                 {th('friday_date_ist', 'Friday')}
-                {th('entry_hour_ist', 'Entry hr')}
+                {th(isCal ? 'entry_hour_actual' : 'entry_hour_ist', 'Entry hr')}
                 {th('expiry_date', 'Expiry')}
                 {th('delta_target', 'Δ', 'right')}
                 {th('call_strike', 'CE strike', 'right')}
                 {th('put_strike', 'PE strike', 'right')}
-                {th('credit_usd', 'Credit $', 'right')}
-                {th('entry_atm_iv_band', 'IV band')}
+                {th('credit_usd', isCal ? 'Debit $' : 'Credit $', 'right')}
+                {th('entry_atm_iv_band', isCal ? 'Gap bucket' : 'IV band')}
                 {th('total_entry_cost_usd', 'Cost $', 'right')}
                 {th('margin_used_usd_at_entry', 'Margin $', 'right')}
               </tr>
@@ -76,7 +78,7 @@ export function M7TradeLogTable({ filters, onSelect }: {
                     onMouseEnter={e => (e.currentTarget.style.background = '#0d1421')}
                     onMouseLeave={e => (e.currentTarget.style.background = '')}>
                   <td style={{ padding: 5 }}>{r.friday_date_ist}</td>
-                  <td style={{ padding: 5 }}>{String(r.entry_hour_ist).padStart(2, '0')}:00</td>
+                  <td style={{ padding: 5 }}>{String(isCal ? (r.entry_hour_actual ?? 0) : r.entry_hour_ist).padStart(2, '0')}:00</td>
                   <td style={{ padding: 5 }}>{r.expiry_date}</td>
                   <td style={{ padding: 5, textAlign: 'right' }}>
                     {r.delta_target != null ? r.delta_target.toFixed(2) : '—'}
@@ -84,7 +86,7 @@ export function M7TradeLogTable({ filters, onSelect }: {
                   </td>
                   <td style={{ padding: 5, textAlign: 'right' }}>{r.call_strike != null ? r.call_strike.toLocaleString() : '—'}</td>
                   <td style={{ padding: 5, textAlign: 'right' }}>{r.put_strike != null ? r.put_strike.toLocaleString() : '—'}</td>
-                  <td style={{ padding: 5, textAlign: 'right' }}>{r.credit_usd != null ? `$${r.credit_usd.toFixed(2)}` : '—'}</td>
+                  <td style={{ padding: 5, textAlign: 'right' }}>{r.credit_usd != null ? `$${(isCal ? -r.credit_usd : r.credit_usd).toFixed(2)}` : '—'}</td>
                   <td style={{ padding: 5 }}>{r.entry_atm_iv_band ?? '—'}</td>
                   <td style={{ padding: 5, textAlign: 'right' }}>{r.total_entry_cost_usd != null ? `$${r.total_entry_cost_usd.toFixed(2)}` : '—'}</td>
                   <td style={{ padding: 5, textAlign: 'right' }}>

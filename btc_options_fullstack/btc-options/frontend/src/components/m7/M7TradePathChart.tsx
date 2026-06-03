@@ -250,10 +250,13 @@ export function M7TradePathChart({ tradeId, onClose, dataset }: {
 
         <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
           <button style={btn('pnl')} onClick={() => setView('pnl')}>Gross P&L</button>
-          <button style={btn('premium')} onClick={() => setView('premium')}>Premium (CE/PE)</button>
-          <button style={btn('iv')} onClick={() => setView('iv')}>IV (CE/PE/ATM)</button>
-          <button style={btn('delta')} onClick={() => setView('delta')}>Δ (CE/PE/Net)</button>
-          <button style={btn('spot')} onClick={() => setView('spot')} title="Spot candlesticks + indicators">Spot + Indicators</button>
+          {/* Calendar paths record only near/far IV + gap + spot — no per-leg
+              premium/Δ series, and the OHLC context fetch isn't dataset-aware —
+              so hide those tabs for calendar (they'd render empty). */}
+          {!isCal && <button style={btn('premium')} onClick={() => setView('premium')}>Premium (CE/PE)</button>}
+          <button style={btn('iv')} onClick={() => setView('iv')}>{isCal ? 'IV (near/far/gap)' : 'IV (CE/PE/ATM)'}</button>
+          {!isCal && <button style={btn('delta')} onClick={() => setView('delta')}>Δ (CE/PE/Net)</button>}
+          {!isCal && <button style={btn('spot')} onClick={() => setView('spot')} title="Spot candlesticks + indicators">Spot + Indicators</button>}
         </div>
 
         {view === 'spot' && (

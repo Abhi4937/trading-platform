@@ -85,6 +85,11 @@ export interface M7TradeRow {
   excess_over_fair_pct?: number | null;
   ctx_pattern?: string | null;
   ctx_gex_regime?: string | null;
+  // Calendar-only: real entry hour (entry_hour_ist is forced to -1 sentinel
+  // there) and the net entry debit (far premium − near premium).
+  entry_hour_actual?: number | null;
+  net_debit_usd?: number | null;
+  expiry_bucket?: string | null;
 }
 
 export interface M7TradesResponse {

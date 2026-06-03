@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { fetchM7Aggregate } from '../../services/m7_api';
+import { fetchM7Aggregate, type M7Dataset } from '../../services/m7_api';
 import type { M7AggregateRow, M7ExitRule, M7Filters } from '../../types/m7';
 
 interface Props {
@@ -10,10 +10,23 @@ interface Props {
   filters: M7Filters;
   exitRule: M7ExitRule;
   fmt?: (v: number) => string;
+  // When set, the /aggregate call is parameterized to this dataset. Without it
+  // the request hits the default (delta_match) parquet — wrong for calendar.
+  dataset?: M7Dataset;
+  // Optional scope: aggregate by a THIRD dimension (scopeKey) and keep only the
+  // rows where scopeKey === scopeVal, client-side. Used to scope a heatmap to one
+  // gap bucket WITHOUT a backend filter — gap labels like "[5,10)" contain commas
+  // that the /aggregate filter parser splits on (it would never match).
+  scopeKey?: string;
+  scopeVal?: string;
+  // Optional friendly axis labels for the corner cell (default to the raw keys).
+  rowLabel?: string;
+  colLabel?: string;
 }
 
 export function M7AggregateHeatmap({
-  title, rowKey, colKey, metric, filters, exitRule, fmt,
+  title, rowKey, colKey, metric, filters, exitRule, fmt, dataset, scopeKey, scopeVal,
+  rowLabel, colLabel,
 }: Props) {
   const [rows, setRows] = useState<M7AggregateRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -22,11 +35,17 @@ export function M7AggregateHeatmap({
   useEffect(() => {
     setLoading(true);
     setErr(null);
-    fetchM7Aggregate({ ...filters, dimensions: `${rowKey},${colKey}`, metric }, exitRule)
-      .then(r => setRows(r.rows))
+    const dims = scopeKey ? `${rowKey},${colKey},${scopeKey}` : `${rowKey},${colKey}`;
+    fetchM7Aggregate({ ...filters, dimensions: dims, metric }, exitRule, dataset)
+      .then(r => {
+        const all = r.rows;
+        setRows(scopeKey && scopeVal != null
+          ? all.filter(x => String(x[scopeKey]) === scopeVal)
+          : all);
+      })
       .catch(e => setErr(String(e)))
       .finally(() => setLoading(false));
-  }, [JSON.stringify(filters), JSON.stringify(exitRule), rowKey, colKey, metric]);
+  }, [JSON.stringify(filters), JSON.stringify(exitRule), rowKey, colKey, metric, dataset, scopeKey, scopeVal]);
 
   // Build pivot — smart sort that handles numeric values, IV bands ("100+" → last),
   // and expiry buckets in chronological order.
@@ -34,6 +53,9 @@ export function M7AggregateHeatmap({
     const score = (v: string): number => {
       // IV band like "100+" → max
       if (v === '100+') return 1000;
+      // Gap bucket like "[5,10)" / "[10,15)" → lower bound (calendar)
+      const gapMatch = v.match(/^\[(\d+),/);
+      if (gapMatch) return Number(gapMatch[1]);
       // IV band like "30-40" → use lower bound
       const ivMatch = v.match(/^(\d+)-(\d+)$/);
       if (ivMatch) return Number(ivMatch[1]);
@@ -51,7 +73,11 @@ export function M7AggregateHeatmap({
       if (isFinite(n)) return n;
       return Number.MAX_SAFE_INTEGER;
     };
-    return [...vals].sort((a, b) => score(a) - score(b));
+    return [...vals].sort((a, b) => {
+      const d = score(a) - score(b);
+      // Tie (e.g. two non-numeric pair labels) → stable alphabetical order.
+      return d !== 0 ? d : a.localeCompare(b);
+    });
   };
   const rowVals = sortValues(Array.from(new Set(rows.map(r => String(r[rowKey])))));
   const colVals = sortValues(Array.from(new Set(rows.map(r => String(r[colKey])))));
@@ -64,8 +90,10 @@ export function M7AggregateHeatmap({
 
   const colorFor = (v: number | null) => {
     if (v == null || isNaN(v)) return '#0d1421';
-    const isPnl = metric.includes('pnl');
-    if (isPnl) {
+    // P&L and return/margin metrics are signed → diverging green/red ramp
+    // centered on zero. win_rate / count use a sequential blue ramp.
+    const isDiverging = metric.includes('pnl') || metric.includes('return');
+    if (isDiverging) {
       const t = Math.min(1, Math.abs(v) / span);
       return v >= 0
         ? `rgba(63, 185, 80, ${0.15 + 0.55 * t})`
@@ -98,7 +126,7 @@ export function M7AggregateHeatmap({
           <table style={{ borderCollapse: 'collapse', fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>
             <thead>
               <tr>
-                <th style={{ padding: '4px 8px', color: '#7a9bb5', textAlign: 'left' }}>{rowKey} \ {colKey}</th>
+                <th style={{ padding: '4px 8px', color: '#7a9bb5', textAlign: 'left' }}>{rowLabel ?? rowKey} \ {colLabel ?? colKey}</th>
                 {colVals.map(c => (
                   <th key={c} style={{
                     padding: '4px 8px', color: '#7a9bb5', textAlign: 'center',

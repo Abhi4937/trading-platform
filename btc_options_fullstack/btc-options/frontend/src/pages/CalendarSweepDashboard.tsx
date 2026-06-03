@@ -3,10 +3,13 @@ import { fetchM7Summary, type M7LossesCell } from '../services/m7_api';
 import type { M7ExitRule, M7Filters, M7Summary } from '../types/m7';
 import type { M7IvBandBestComboRow } from '../services/m7_api';
 import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers';
+import { CalendarTimeframePanel } from '../components/m7/CalendarTimeframePanel';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
 import { M7IvBandBestComboTable } from '../components/m7/M7IvBandBestComboTable';
 import { M7LossesExplorer } from '../components/m7/M7LossesExplorer';
 import { M7PivotProfilePanel } from '../components/m7/M7PivotProfilePanel';
+import { M7TradeLogTable } from '../components/m7/M7TradeLogTable';
+import { M7TradePathChart } from '../components/m7/M7TradePathChart';
 
 // Backwardation double-calendar sweep — a dedicated, gap-band-grounded dashboard.
 // Reuses the dataset-parameterized M7 components hardwired to dataset="calendar":
@@ -33,6 +36,7 @@ export function CalendarSweepDashboard() {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [metric] = useState<string>('avg_net_pnl');
   const [error, setError] = useState<string | null>(null);
+  const [selectedTrade, setSelectedTrade] = useState<string | null>(null);
 
   const dFilters = useDebouncedValue(filters, 250);
   const dExitRule = useDebouncedValue(exitRule, 250);
@@ -115,10 +119,20 @@ export function CalendarSweepDashboard() {
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric}
                               dataset={DATASET} />
 
+      <CalendarTimeframePanel filters={dFilters} exitRule={dExitRule} />
+
       <M7LossesExplorer filters={dFilters} exitRule={dExitRule} metric={dMetric}
                         cells={dBestCells} dataset={DATASET} />
 
       <M7PivotProfilePanel dataset={DATASET} cells={dBestCells} />
+
+      <div style={{ marginTop: 10 }}>
+        <M7TradeLogTable filters={dFilters} dataset={DATASET} onSelect={setSelectedTrade} />
+      </div>
+      {selectedTrade && (
+        <M7TradePathChart tradeId={selectedTrade} dataset={DATASET}
+                          onClose={() => setSelectedTrade(null)} />
+      )}
     </div>
   );
 }

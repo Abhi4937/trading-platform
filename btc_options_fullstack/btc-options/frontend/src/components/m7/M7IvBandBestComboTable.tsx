@@ -332,8 +332,12 @@ interface Props {
 }
 
 export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChange, dataset: datasetProp }: Props = {}) {
+  // Calendar (a debit spread) is ranked by capital efficiency by default —
+  // % return on margin — and persists under its own LS key so it never
+  // clobbers the M7 (delta/price-match) "avg net P&L" default.
+  const primaryLsKey = datasetProp === 'calendar' ? 'primary_cal' : 'primary';
   const [primary, setPrimary] = useState<M7Ranking>(
-    () => loadLS('primary', 'avg_net_pnl'));
+    () => loadLS(primaryLsKey, datasetProp === 'calendar' ? 'avg_pct_return_on_margin' : 'avg_net_pnl'));
   const [family, setFamily] = useState<M7RuleFamily>(
     () => loadLS('family', 'all'));
   // Per-family Pure/Tiebreak preference — flipping families recalls the mode
@@ -465,7 +469,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
   } | null>(null);
 
   // Persist state changes
-  useEffect(() => { saveLS('primary',           primary);         }, [primary]);
+  useEffect(() => { saveLS(primaryLsKey,        primary);         }, [primary]);
   useEffect(() => { saveLS('family',            family);          }, [family]);
   useEffect(() => { saveLS('modeByFamily',      modeByFamily);    }, [modeByFamily]);
   useEffect(() => { saveLS('secondary',         secondary);       }, [secondary]);
