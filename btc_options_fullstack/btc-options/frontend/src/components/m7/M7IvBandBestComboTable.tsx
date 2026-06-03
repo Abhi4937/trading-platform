@@ -1853,7 +1853,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           )}
         </div>
       )}
-      <M7BestComboMissedFridaysTable args={missedFridaysArgs} />
+      {!isCal && <M7BestComboMissedFridaysTable args={missedFridaysArgs} />}
       {drilldown && (
         <M7RuleComparisonModal
           band={drilldown.band}

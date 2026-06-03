@@ -5,7 +5,6 @@ import type { M7IvBandBestComboRow } from '../services/m7_api';
 import { M7BestComboPathMarkers } from '../components/m7/M7BestComboPathMarkers';
 import { M7HeadlineStrip } from '../components/m7/M7HeadlineStrip';
 import { M7IvBandBestComboTable } from '../components/m7/M7IvBandBestComboTable';
-import { M7BestComboCoverageTable } from '../components/m7/M7BestComboCoverageTable';
 import { M7LossesExplorer } from '../components/m7/M7LossesExplorer';
 import { M7PivotProfilePanel } from '../components/m7/M7PivotProfilePanel';
 
@@ -113,7 +112,6 @@ export function CalendarSweepDashboard() {
         onSelectionsChange={handleSelectionsChange}
         dataset={DATASET}
       />
-      <M7BestComboCoverageTable dataset={DATASET} />
       <M7BestComboPathMarkers filters={dFilters} exitRule={dExitRule} metric={dMetric}
                               dataset={DATASET} />
 
