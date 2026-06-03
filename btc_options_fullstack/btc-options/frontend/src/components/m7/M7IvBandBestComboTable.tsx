@@ -1473,14 +1473,14 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
 
                 {/* — % returns — */}
                 <th style={thR}>Ret / margin <InfoIcon text="Mean per-trade ratio: net_pnl ÷ margin_at_entry. Capital-efficiency view of the strategy." /></th>
-                <th style={thR}>Ret / credit <InfoIcon text="Mean per-trade ratio: net_pnl ÷ credit_collected. ROI on premium captured." /></th>
+                {!isCal && <th style={thR}>Ret / credit <InfoIcon text="Mean per-trade ratio: net_pnl ÷ credit_collected. ROI on premium captured." /></th>}
                 <th style={thR}>Ret/margin (W) <InfoIcon text="Ret/margin restricted to winning trades only." /></th>
-                <th style={thR}>Ret/credit (W) <InfoIcon text="Ret/credit restricted to winning trades only." /></th>
-                <th style={thR}>Peak % <InfoIcon text="Mean of per-trade max_mtm ÷ credit. Average peak unrealized return as % of credit — shows what was theoretically achievable before exit. For time-based / take-profit exits, the gap to actual exit reveals what was 'left on the table'." /></th>
-                <th style={thR}>Trough % <InfoIcon text="Mean of per-trade min_mtm ÷ credit. Average trough unrealized return as % of credit. Negative — shows how deep the trade dipped below water at any point." /></th>
+                {!isCal && <th style={thR}>Ret/credit (W) <InfoIcon text="Ret/credit restricted to winning trades only." /></th>}
+                {!isCal && <th style={thR}>Peak % <InfoIcon text="Mean of per-trade max_mtm ÷ credit. Average peak unrealized return as % of credit — shows what was theoretically achievable before exit. For time-based / take-profit exits, the gap to actual exit reveals what was 'left on the table'." /></th>}
+                {!isCal && <th style={thR}>Trough % <InfoIcon text="Mean of per-trade min_mtm ÷ credit. Average trough unrealized return as % of credit. Negative — shows how deep the trade dipped below water at any point." /></th>}
 
                 {/* — Capital (all values are scaled to the sized lot count when sizing is on) — */}
-                <th style={thR}>Avg credit <InfoIcon text="Mean upfront credit collected per trade at the sized lot count (scales linearly with lots vs the 100-lot backtester baseline)." /></th>
+                <th style={thR}>{isCal ? 'Avg debit' : 'Avg credit'} <InfoIcon text={isCal ? "Mean net entry debit per trade — (far premium − near premium) × qty. A calendar pays for the longer-dated far leg, so the net entry premium is a debit (positive = cost)." : "Mean upfront credit collected per trade at the sized lot count (scales linearly with lots vs the 100-lot backtester baseline)."} /></th>
                 <th style={thR}>Avg margin <InfoIcon text="Mean portfolio margin required at the sized lot count (29-scenario engine, linear in qty). When sizing is off this falls back to the 100-lot baseline." /></th>
                 <th style={thR}>Lots <InfoIcon text="Lot count chosen by the sizing engine for this band's picked combo. lots = floor(min(deployable_capital × 100 / avg_margin, |DD threshold| × 100 / |DD metric per 100 lots|)). When no capital is set, lots = 100 (backtester baseline)." /></th>
 
@@ -1741,14 +1741,14 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
 
                   {/* — % returns (sign-coloured) — */}
                   <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_margin) }}>{pct(r.avg_pct_return_on_margin)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit) }}>{pct(r.avg_pct_return_on_credit)}</td>
+                  {!isCal && <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit) }}>{pct(r.avg_pct_return_on_credit)}</td>}
                   <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_margin_winners) }}>{pct(r.avg_pct_return_on_margin_winners)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit_winners) }}>{pct(r.avg_pct_return_on_credit_winners)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_max_mtm_on_credit) }}>{pct(r.avg_pct_max_mtm_on_credit)}</td>
-                  <td style={{ ...tdR, color: pnlColor(r.avg_pct_min_mtm_on_credit) }}>{pct(r.avg_pct_min_mtm_on_credit)}</td>
+                  {!isCal && <td style={{ ...tdR, color: pnlColor(r.avg_pct_return_on_credit_winners) }}>{pct(r.avg_pct_return_on_credit_winners)}</td>}
+                  {!isCal && <td style={{ ...tdR, color: pnlColor(r.avg_pct_max_mtm_on_credit) }}>{pct(r.avg_pct_max_mtm_on_credit)}</td>}
+                  {!isCal && <td style={{ ...tdR, color: pnlColor(r.avg_pct_min_mtm_on_credit) }}>{pct(r.avg_pct_min_mtm_on_credit)}</td>}
 
                   {/* — Capital (scaled to the sized lots) — */}
-                  <td style={tdR}>{usd(sk(r.avg_credit))}</td>
+                  <td style={tdR}>{usd(isCal ? sk(r.avg_credit == null ? null : -r.avg_credit) : sk(r.avg_credit))}</td>
                   <td style={tdR}>{usd0(sk(r.avg_margin))}</td>
                   <td style={tdR}>{lots.toLocaleString()}</td>
 
