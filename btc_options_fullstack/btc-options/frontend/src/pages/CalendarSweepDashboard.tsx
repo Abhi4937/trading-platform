@@ -106,7 +106,7 @@ export function CalendarSweepDashboard() {
         </div>
       </div>
 
-      <M7HeadlineStrip summary={summary} loading={summaryLoading} />
+      <M7HeadlineStrip summary={summary} loading={summaryLoading} dataset={DATASET} />
 
       <M7IvBandBestComboTable
         onSelectionsChange={handleSelectionsChange}

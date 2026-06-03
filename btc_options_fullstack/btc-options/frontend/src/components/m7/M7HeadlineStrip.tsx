@@ -2,7 +2,8 @@ import React from 'react';
 import { InfoIcon } from './InfoIcon';
 import type { M7Summary } from '../../types/m7';
 
-export function M7HeadlineStrip({ summary, loading }: { summary: M7Summary | null; loading: boolean }) {
+export function M7HeadlineStrip({ summary, loading, dataset }: { summary: M7Summary | null; loading: boolean; dataset?: string }) {
+  const isCal = dataset === 'calendar';
   const cell: React.CSSProperties = {
     flex: 1, padding: '10px 14px', background: '#0d1421',
     border: '1px solid #1a2d42', borderRadius: 6,
@@ -35,8 +36,8 @@ export function M7HeadlineStrip({ summary, loading }: { summary: M7Summary | nul
           {loading ? '…' : fmtUsd(summary?.avg_net_pnl_usd)}</div></div>
       <div style={cell}><div style={lab}>Total net P&L <InfoIcon text="Sum of net P&L across all trades in the filter." /></div>
         <div style={{ ...val, color: pnlColor }}>{loading ? '…' : fmtUsd(summary?.total_net_pnl_usd)}</div></div>
-      <div style={cell}><div style={lab}>Avg credit <InfoIcon text="Mean upfront credit collected per trade." /></div>
-        <div style={val}>{loading ? '…' : fmtUsd(summary?.avg_credit_usd)}</div></div>
+      <div style={cell}><div style={lab}>{isCal ? 'Avg debit' : 'Avg credit'} <InfoIcon text={isCal ? "Mean net entry debit per trade (far premium − near premium); a calendar pays for the long far leg." : "Mean upfront credit collected per trade."} /></div>
+        <div style={val}>{loading ? '…' : fmtUsd(isCal && summary?.avg_credit_usd != null ? -summary.avg_credit_usd : summary?.avg_credit_usd)}</div></div>
       <div style={cell}><div style={lab}>Avg margin <InfoIcon text="Mean Delta Exchange portfolio margin required at entry." /></div>
         <div style={val}>{loading ? '…' : fmtUsd(summary?.avg_margin_usd)}</div></div>
     </div>
