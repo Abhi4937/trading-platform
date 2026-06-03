@@ -14,6 +14,7 @@
 // M7BestComboCoverageRow (extends M7IvBandBestComboRow).
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { dimLabels } from './dimLabels';
 import {
   fetchM7IvBandBestComboCoverage,
   type M7BestComboCoverageResponse,
@@ -63,6 +64,7 @@ interface Props {
 }
 
 export function M7BestComboCoverageTable(props: Props = {}) {
+  const L = dimLabels(props.dataset);
   const [mode, setMode] = useState<M7CoverageMode>(() => {
     const stored = window.localStorage.getItem(LS_KEY);
     return stored === 'touched_band' ? 'touched_band' : 'force_fit';
@@ -129,8 +131,9 @@ export function M7BestComboCoverageTable(props: Props = {}) {
           Full Coverage (Best Combo)
         </h3>
         <span style={{ fontSize: 12, opacity: 0.7 }}>
-          Same 10 picks as Best Combo, but each of 121 Fridays attributed to
-          exactly one band.
+          {L.isCal
+            ? 'Same picks as Best Combo, but each observation attributed to exactly one gap bucket.'
+            : 'Same 10 picks as Best Combo, but each of 121 Fridays attributed to exactly one band.'}
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 12, opacity: 0.7 }}>Mode:</span>
@@ -160,9 +163,9 @@ export function M7BestComboCoverageTable(props: Props = {}) {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead style={{ background: '#1c252f' }}>
               <tr>
-                <th style={th}>Band</th>
+                <th style={th}>{L.bandShort}</th>
                 <th style={th}>Hour</th>
-                <th style={th}>Expiry</th>
+                <th style={th}>{L.expiry}</th>
                 <th style={th}>Δ</th>
                 <th style={th}>Rule</th>
                 <th style={thNum}>n_trades</th>

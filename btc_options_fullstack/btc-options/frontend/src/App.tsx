@@ -11,9 +11,10 @@ import { M7SweepDashboard } from './pages/M7SweepDashboard';
 import { M7FridayBandDashboard } from './pages/M7FridayBandDashboard';
 import { MMonthSweepDashboard } from './pages/MMonthSweepDashboard';
 import { M9FridayWeeklyDashboard } from './pages/M9FridayWeeklyDashboard';
+import { CalendarSweepDashboard } from './pages/CalendarSweepDashboard';
 import './App.css';
 
-type AppMode = 'LIVE' | 'HISTORICAL' | 'BACKTEST' | 'LIVESIGNAL' | 'M4_RESULTS' | 'M7_SWEEP' | 'M7_FRIDAY_BAND' | 'M_MONTH_SWEEP' | 'M9_FRIDAY_WEEKLY';
+type AppMode = 'LIVE' | 'HISTORICAL' | 'BACKTEST' | 'LIVESIGNAL' | 'M4_RESULTS' | 'M7_SWEEP' | 'M7_FRIDAY_BAND' | 'M_MONTH_SWEEP' | 'M9_FRIDAY_WEEKLY' | 'CALENDAR_SWEEP';
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>('LIVE');
@@ -88,6 +89,7 @@ export default function App() {
            : mode === 'M7_FRIDAY_BAND' ? 'M7 — FRIDAY-LOCKED BAND DASHBOARD'
            : mode === 'M_MONTH_SWEEP' ? 'M-MONTH — MONTHLY + BIMONTHLY + LAST-FRI ROLLING'
            : mode === 'M9_FRIDAY_WEEKLY' ? 'M9 — FRIDAY WEEKLY / BIWEEKLY'
+           : mode === 'CALENDAR_SWEEP' ? 'CALENDAR SWEEP — BACKWARDATION DOUBLE-CALENDAR'
            : ''}
         </div>
 
@@ -104,7 +106,7 @@ export default function App() {
           display: 'inline-flex', background: '#0d1421',
           border: '1px solid #1a2d42', borderRadius: 6, overflow: 'hidden',
         }}>
-          {(['LIVE', 'HISTORICAL', 'BACKTEST', 'LIVESIGNAL', 'M4_RESULTS', 'M7_SWEEP', 'M7_FRIDAY_BAND', 'M_MONTH_SWEEP', 'M9_FRIDAY_WEEKLY'] as AppMode[]).map(m => (
+          {(['LIVE', 'HISTORICAL', 'BACKTEST', 'LIVESIGNAL', 'M4_RESULTS', 'M7_SWEEP', 'M7_FRIDAY_BAND', 'M_MONTH_SWEEP', 'M9_FRIDAY_WEEKLY', 'CALENDAR_SWEEP'] as AppMode[]).map(m => (
             <button
               key={m}
               onClick={() => setMode(m)}
@@ -123,7 +125,8 @@ export default function App() {
                : m === 'M7_SWEEP' ? 'M7 Sweep'
                : m === 'M7_FRIDAY_BAND' ? 'M7 Friday-Band'
                : m === 'M_MONTH_SWEEP' ? 'M-Month'
-               : 'M9 Fri Wk/Biwk'}
+               : m === 'M9_FRIDAY_WEEKLY' ? 'M9 Fri Wk/Biwk'
+               : 'Calendar Sweep'}
             </button>
           ))}
         </div>
@@ -174,8 +177,10 @@ export default function App() {
       )}
 
       {/* Main */}
-      <main className="main" style={mode === 'M7_SWEEP' || mode === 'M7_FRIDAY_BAND' || mode === 'M4_RESULTS' || mode === 'M_MONTH_SWEEP' || mode === 'M9_FRIDAY_WEEKLY' ? { overflowY: 'auto' } : undefined}>
-        {mode === 'M9_FRIDAY_WEEKLY' ? (
+      <main className="main" style={mode === 'M7_SWEEP' || mode === 'M7_FRIDAY_BAND' || mode === 'M4_RESULTS' || mode === 'M_MONTH_SWEEP' || mode === 'M9_FRIDAY_WEEKLY' || mode === 'CALENDAR_SWEEP' ? { overflowY: 'auto' } : undefined}>
+        {mode === 'CALENDAR_SWEEP' ? (
+          <CalendarSweepDashboard />
+        ) : mode === 'M9_FRIDAY_WEEKLY' ? (
           <M9FridayWeeklyDashboard />
         ) : mode === 'M_MONTH_SWEEP' ? (
           <MMonthSweepDashboard />

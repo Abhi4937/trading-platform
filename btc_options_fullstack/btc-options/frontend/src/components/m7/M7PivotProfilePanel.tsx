@@ -9,6 +9,7 @@ import { usePersistedState } from '../../hooks/usePersistedState';
 import { M7PivotProfileChart } from './M7PivotProfileChart';
 import { M7PivotProfileTable } from './M7PivotProfileTable';
 import { M7TradeDiagnosticModal } from './M7TradeDiagnosticModal';
+import { dimLabels } from './dimLabels';
 
 interface Props {
   dataset: M7Dataset;
@@ -19,6 +20,7 @@ type View = 'all' | 'winners' | 'losers'
           | 'best_win' | 'worst_dd_win' | 'losers_per_band';
 
 export function M7PivotProfilePanel({ dataset, cells }: Props) {
+  const L = dimLabels(dataset);
   const [data, setData] = useState<M7PivotProfileResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = usePersistedState<boolean>(
@@ -139,13 +141,13 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
                 style={{ background: 'transparent', border: 'none',
                          color: '#cfd9e3', cursor: 'pointer',
                          fontSize: 14, fontWeight: 600, padding: 0 }}>
-          {collapsed ? '▶' : '▼'} Pivot Profile by IV Band (5 IST segments)
+          {collapsed ? '▶' : '▼'} Pivot Profile {L.byBand} (5 IST segments)
         </button>
         <div style={{ flex: 1 }} />
         <ViewToggle view={view} setView={setView}
                      enabled={result != null && result.by_band_winners != null} />
         <span style={{ fontSize: 11, color: '#7a9bb5' }}>
-          Scoped to Best Combo per IV Band selection above ·{' '}
+          Scoped to Best Combo {L.perBand} selection above ·{' '}
           <strong style={{ color: '#cfd9e3' }}>
             {scopedCells.length} cells
           </strong>
@@ -172,7 +174,7 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
       )}
       {!collapsed && scopedCells.length === 0 && (
         <div style={{ color: '#7a9bb5', fontSize: 12, padding: 8 }}>
-          Pick best-combo cells in the IV-Band Best Combo table above to scope
+          Pick best-combo cells in the {L.band} Best Combo table above to scope
           this panel.
         </div>
       )}
@@ -223,13 +225,15 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
               the user always sees the band-level cards even while inspecting
               a different chart layout. */}
           <PerBandSpotlight
-            title="Best Winner per Band"
+            title={`Best Winner ${L.perBand}`}
+            bandWord={L.bandShort}
             accent="#3fb950"
             metric="net"
             byBand={result.best_winners_by_band}
             onOpen={openTrade} />
           <PerBandSpotlight
-            title="Winner w/ Worst min-MTM per Band"
+            title={`Winner w/ Worst min-MTM ${L.perBand}`}
+            bandWord={L.bandShort}
             accent="#d29922"
             metric="min_mtm"
             byBand={result.worst_dd_winners_by_band}
@@ -238,6 +242,7 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
           {view === 'losers_per_band' ? (
             <LosersStackedMiniCharts
               byBand={result.by_band_losers_individual}
+              bandWord={L.bandShort}
               minN={minN}
               onOpen={(tid, band, hour) => setSelectedTrade({
                 tradeId: tid,
@@ -253,6 +258,7 @@ export function M7PivotProfilePanel({ dataset, cells }: Props) {
           {view === 'losers' && result.losers_list_by_band && (
             <LosersListGrouped
               byBand={result.losers_list_by_band}
+              bandWord={L.bandShort}
               onOpen={openTrade} />
           )}
         </>
@@ -320,9 +326,10 @@ function ViewToggle({ view, setView, enabled }: {
 }
 
 function PerBandSpotlight({
-  title, accent, metric, byBand, onOpen,
+  title, bandWord, accent, metric, byBand, onOpen,
 }: {
   title: string;
+  bandWord: string;
   accent: string;
   metric: 'net' | 'min_mtm';
   byBand: Record<string, M7TradeRecord> | null | undefined;
@@ -361,7 +368,7 @@ function PerBandSpotlight({
                              color: '#cfd9e3' }}>
               <div style={{ fontSize: 10, color: '#7a9bb5',
                              fontFamily: 'monospace', marginBottom: 2 }}>
-                Band {band}
+                {bandWord} {band}
               </div>
               <div style={{ display: 'flex', alignItems: 'baseline',
                              gap: 6 }}>
@@ -392,9 +399,10 @@ function PerBandSpotlight({
 }
 
 function LosersListGrouped({
-  byBand, onOpen,
+  byBand, bandWord, onOpen,
 }: {
   byBand: Record<string, M7TradeRecord[]>;
+  bandWord: string;
   onOpen: (r: M7TradeRecord) => void;
 }) {
   const bands = Object.keys(byBand)
@@ -418,7 +426,7 @@ function LosersListGrouped({
             <div style={{ padding: '6px 10px', background: '#0a0e17',
                            fontSize: 11, color: '#7a9bb5',
                            fontFamily: 'monospace' }}>
-              Band {band} — {rows.length} loser{rows.length !== 1 ? 's' : ''}
+              {bandWord} {band} — {rows.length} loser{rows.length !== 1 ? 's' : ''}
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ borderCollapse: 'collapse', width: '100%',
@@ -473,9 +481,10 @@ function LosersListGrouped({
 }
 
 function LosersStackedMiniCharts({
-  byBand, minN, onOpen,
+  byBand, bandWord, minN, onOpen,
 }: {
   byBand: Record<string, M7LoserSegmentBlob[]> | null | undefined;
+  bandWord: string;
   minN: number;
   onOpen: (tradeId: string, band: string, hour: number) => void;
 }) {
@@ -503,7 +512,7 @@ function LosersStackedMiniCharts({
             <div style={{ padding: '6px 10px', background: '#0a0e17',
                            fontSize: 12, color: '#cfd9e3',
                            fontFamily: 'monospace' }}>
-              <strong style={{ color: '#f85149' }}>Band {band}</strong>{' '}
+              <strong style={{ color: '#f85149' }}>{bandWord} {band}</strong>{' '}
               — {losers.length} loser{losers.length !== 1 ? 's' : ''}
             </div>
             <div style={{ display: 'grid',

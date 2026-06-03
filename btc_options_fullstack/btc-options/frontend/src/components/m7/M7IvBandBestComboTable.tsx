@@ -30,6 +30,7 @@ import {
   type M7Dataset,
   type Stage1PerBandRule,
 } from '../../services/m7_api';
+import { dimLabels } from './dimLabels';
 
 // ── Metric catalog ──────────────────────────────────────────────────────────
 
@@ -505,7 +506,12 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       if (!active) return;
       setLoading(true);
       setErr(null);
-      const args: FetchBestComboArgs = { ranking: primary, rule_family: family };
+      // Calendar has a single hold_to_settlement rule + aggregated hours, so the
+      // exit-rule/hour/family/SL args don't apply — omitting them avoids a stale
+      // localStorage filter silently wiping the calendar picker.
+      const isCal = datasetProp === 'calendar';
+      const args: FetchBestComboArgs = { ranking: primary };
+      if (!isCal) args.rule_family = family;
       if (mode === 'tiebreak') {
         args.secondary = secondary;
         args.tolerance_pct = tolerancePct;
@@ -525,7 +531,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       }
       // Picker filters — always send (server defaults to 50 if absent, but we
       // want explicit control from UI state, including "disabled" = 0).
-      args.min_hit_pct = minHitPct;
+      if (!isCal) args.min_hit_pct = minHitPct;
       if (maxLossCapPct != null && maxLossCapPct > 0 && sizingMode === 'capital') {
         args.max_loss_cap_pct = maxLossCapPct;
       }
@@ -539,17 +545,18 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       if (maxLosingStreak != null && maxLosingStreak > 0) {
         args.max_losing_streak = maxLosingStreak;
       }
-      args.pick_mode = pickMode;
+      if (!isCal) args.pick_mode = pickMode;
       if (expiryFilter.length > 0) args.expiry_buckets = expiryFilter;
       if (deltaFilter.length > 0) args.delta_targets = deltaFilter;
-      if (hourFilter.length > 0) args.entry_hours = hourFilter;
+      if (!isCal && hourFilter.length > 0) args.entry_hours = hourFilter;
       if (bandFilter.length > 0) args.iv_bands = bandFilter;
-      if (exitHourFilter.length > 0) args.exit_hours = exitHourFilter;
-      if (slFilter.length > 0) args.premium_sl_pcts = slFilter;
-      // Phase B — bucketed tabs. 'band' is the default no-tab path.
-      args.tab = bucketTab;
-      if (ivrvBucket) args.ivrv_bucket = ivrvBucket;
-      if (slopeBucket && bucketTab !== 'band' && bucketTab !== 'band_ivrv') {
+      if (!isCal && exitHourFilter.length > 0) args.exit_hours = exitHourFilter;
+      if (!isCal && slFilter.length > 0) args.premium_sl_pcts = slFilter;
+      // Phase B — bucketed tabs. 'band' is the default no-tab path. Calendar has no
+      // term-structure (IVRV/slope) axis → always the plain band ('gap bucket') grid.
+      args.tab = isCal ? 'band' : bucketTab;
+      if (!isCal && ivrvBucket) args.ivrv_bucket = ivrvBucket;
+      if (!isCal && slopeBucket && bucketTab !== 'band' && bucketTab !== 'band_ivrv') {
         args.slope_bucket = slopeBucket;
       }
       fetchM7IvBandBestCombo(args, ac.signal, undefined, undefined, undefined,
@@ -597,7 +604,9 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
   // Same args we send to /iv_band_best_combo so the missed-Fridays panel
   // below computes its picks against the user's exact filter/sizing state.
   const missedFridaysArgs = useMemo<FetchBestComboArgs>(() => {
-    const a: FetchBestComboArgs = { ranking: primary, rule_family: family };
+    const isCal = datasetProp === 'calendar';
+    const a: FetchBestComboArgs = { ranking: primary };
+    if (!isCal) a.rule_family = family;
     if (mode === 'tiebreak') { a.secondary = secondary; a.tolerance_pct = tolerancePct; }
     if (sizingMode === 'capital' && totalCapitalUsd > 0) {
       a.total_capital_usd = totalCapitalUsd;
@@ -606,21 +615,21 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       const validCaps = ddCaps.filter(c => c.metric && c.threshold > 0);
       if (validCaps.length > 0) a.dd_caps = validCaps;
     }
-    a.min_hit_pct = minHitPct;
+    if (!isCal) a.min_hit_pct = minHitPct;
     if (maxLossCapPct != null && maxLossCapPct > 0 && sizingMode === 'capital') a.max_loss_cap_pct = maxLossCapPct;
     if (maxDropPct != null && maxDropPct > 0) a.max_drop_peak_to_trough_pct = maxDropPct;
     a.min_n_trades = minNTrades;
     if (minWinRate != null && minWinRate > 0) a.min_win_rate = minWinRate;
     if (maxLosingStreak != null && maxLosingStreak > 0) a.max_losing_streak = maxLosingStreak;
-    a.pick_mode = pickMode;
+    if (!isCal) a.pick_mode = pickMode;
     if (expiryFilter.length > 0) a.expiry_buckets = expiryFilter;
     if (deltaFilter.length > 0) a.delta_targets = deltaFilter;
-    if (hourFilter.length > 0) a.entry_hours = hourFilter;
+    if (!isCal && hourFilter.length > 0) a.entry_hours = hourFilter;
     if (bandFilter.length > 0) a.iv_bands = bandFilter;
-    if (exitHourFilter.length > 0) a.exit_hours = exitHourFilter;
-    if (slFilter.length > 0) a.premium_sl_pcts = slFilter;
+    if (!isCal && exitHourFilter.length > 0) a.exit_hours = exitHourFilter;
+    if (!isCal && slFilter.length > 0) a.premium_sl_pcts = slFilter;
     return a;
-  }, [primary, family, mode, secondary, tolerancePct, sizingMode,
+  }, [datasetProp, primary, family, mode, secondary, tolerancePct, sizingMode,
       totalCapitalUsd, pctDeploy, ddMetric, ddThreshold,
       JSON.stringify(ddCaps),
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, maxLosingStreak, pickMode,
@@ -629,6 +638,9 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
 
   const isWarming = resp?.status === 'warming';
   const rows: M7IvBandBestComboRow[] = resp?.rows ?? [];
+  // Dataset-aware labels + calendar flag for relabels / control hiding.
+  const L = dimLabels(datasetProp);
+  const isCal = L.isCal;
 
   // Notify the parent whenever the per-band rows change. Keyed on the rows'
   // (iv_band, expiry, delta, rule_label) signature so we don't churn the
@@ -701,6 +713,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       {/* Phase B — bucketed-tab strip. Default 'band' = legacy single-grid behavior.
           Other tabs lazy-build their grid on first click (~5-15s on warm exit cache;
           longer on cold). State persisted to localStorage. */}
+      {!isCal && (
       <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap',
                     alignItems: 'center' }}>
         <span style={{ fontSize: 11, color: '#7a9bb5', marginRight: 6 }}>Bucket:</span>
@@ -771,6 +784,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           </>
         )}
       </div>
+      )}
 
       {/* Header — controls + summary */}
       <div style={{
@@ -778,14 +792,26 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
         marginBottom: 8, gap: 12, flexWrap: 'wrap',
       }}>
         <div style={{ fontSize: 14, color: '#cfd9e3', fontWeight: 700 }}>
-          Best combo per IV band — premium SL ∈ &#123;{(slFilter.length > 0 ? slFilter : [...SL_OPTIONS]).join(', ')}&#125;
-          <span style={{
-            fontSize: 11, fontWeight: 400, color: '#7a9bb5', marginLeft: 10,
-          }}>
-            {((slFilter.length > 0 ? slFilter.length : SL_OPTIONS.length) * FAMILY_VARIANTS_PER_SL[family])} rule
-            variants × 7 expiries × 8 deltas. Pick the (expiry · Δ ·
-            exit rule) that wins per IV band on the chosen score.
-          </span>
+          {isCal ? (
+            <>
+              Best combo per gap bucket — backwardation double calendar
+              <span style={{ fontSize: 11, fontWeight: 400, color: '#7a9bb5', marginLeft: 10 }}>
+                Single rule (hold to near-expiry settlement) · hours aggregated. Pick the
+                (pair · Δ) that wins per gap bucket on the chosen score.
+              </span>
+            </>
+          ) : (
+            <>
+              Best combo per IV band — premium SL ∈ &#123;{(slFilter.length > 0 ? slFilter : [...SL_OPTIONS]).join(', ')}&#125;
+              <span style={{
+                fontSize: 11, fontWeight: 400, color: '#7a9bb5', marginLeft: 10,
+              }}>
+                {((slFilter.length > 0 ? slFilter.length : SL_OPTIONS.length) * FAMILY_VARIANTS_PER_SL[family])} rule
+                variants × 7 expiries × 8 deltas. Pick the (expiry · Δ ·
+                exit rule) that wins per IV band on the chosen score.
+              </span>
+            </>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {/* Score (primary) dropdown */}
@@ -802,6 +828,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
               </optgroup>
             ))}
           </select>
+          {!isCal && (<>
           {/* Rule-family filter */}
           <span style={{ fontSize: 11, color: '#7a9bb5' }}>Family:</span>
           <div style={{
@@ -869,6 +896,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
               );
             })}
           </div>
+          </>)}
           {/* Pure ⇄ Tiebreak toggle */}
           <div style={{
             display: 'inline-flex', border: '1px solid #1a2d42', borderRadius: 4,
@@ -1038,6 +1066,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             style={{ ...inputStyle, width: 70, opacity: sizingMode === 'capital' ? 0.4 : 1 }}
             title="Fixed lot count applied to every band. All $ cells scale by lots/100. Best-combo ranking stays at the per-100-lot baseline (constant scale doesn't change which cell wins). Default 100 (backtester baseline)." />
           {/* Phase 0/1 picker filters */}
+          {!isCal && (<>
           <span style={{ fontSize: 11, color: '#7a9bb5' }}>Hit % ≥</span>
           <input
             type="number" min={0} max={100} step={5}
@@ -1045,6 +1074,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             onChange={e => setMinHitPct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
             style={{ ...inputStyle, width: 55 }}
             title="Drop cells where the labelled rule fires on less than X% of trades. Hit % = (n_trades − n_hard_cap) / n_trades. Counts ANY non-hard-cap exit (rule_trigger, premium_sl, max_profit, margin_target, fixed_hour) as effective. Default 50 — set to 0 to disable." />
+          </>)}
           <span style={{ fontSize: 11, color: sizingMode === 'lots' ? '#3a4a5a' : '#7a9bb5' }}>Max loss %</span>
           <input
             type="number" min={0} max={100} step={5}
@@ -1097,6 +1127,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             }}
             style={{ ...inputStyle, width: 55 }}
             title="Drop cells whose max_consec_losses (longest run of consecutive losing trades) exceeds this. Leave blank to disable." />
+          {!isCal && (
           <button
             onClick={() => setPickMode(m => m === 'by_hour' ? 'aggregate_hours' : 'by_hour')}
             style={{
@@ -1109,6 +1140,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             title="When ON, the picker collapses the entry_hour_ist dimension so every Friday whose IV landed in a band — across ALL entry hours — is tested for that band's combo. n_trades reflects every hour the band touched. When OFF (default), one cell per (band, hour) and only the picked hour's Fridays are counted.">
             {pickMode === 'aggregate_hours' ? '∑ All hours' : '⏱ Per hour'}
           </button>
+          )}
           {/* Dimension whitelists — restrict the picker's search space.
               Empty = "All" (no filter on that dimension). "✓ All" buttons
               explicitly select every option. */}
@@ -1151,7 +1183,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             });
             return (<>
           <span style={{ fontSize: 11, color: expiryFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: expiryFilter.length ? 700 : 400 }}>
-            Expiry {expiryFilter.length ? `(${expiryFilter.length})` : '(All)'}
+            {L.expiry} {expiryFilter.length ? `(${expiryFilter.length})` : '(All)'}
           </span>
           <select
             multiple
@@ -1188,6 +1220,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           {deltaFilter.length > 0 && (
             <button onClick={() => setDeltaFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear delta filter (revert to All)">×</button>
           )}
+          {!isCal && (<>
           <span style={{ fontSize: 11, color: hourFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: hourFilter.length ? 700 : 400 }}>
             Hour {hourFilter.length ? `(${hourFilter.length})` : '(All)'}
           </span>
@@ -1207,8 +1240,9 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           {hourFilter.length > 0 && (
             <button onClick={() => setHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear hour filter (revert to All)">×</button>
           )}
+          </>)}
           <span style={{ fontSize: 11, color: bandFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: bandFilter.length ? 700 : 400 }}>
-            IV band {bandFilter.length ? `(${bandFilter.length})` : '(All)'}
+            {L.band} {bandFilter.length ? `(${bandFilter.length})` : '(All)'}
           </span>
           <select
             multiple
@@ -1224,8 +1258,9 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             ✓ All
           </button>
           {bandFilter.length > 0 && (
-            <button onClick={() => setBandFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear IV band filter (revert to All)">×</button>
+            <button onClick={() => setBandFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title={`Clear ${L.band} filter (revert to All)`}>×</button>
           )}
+          {!isCal && (<>
           <span style={{ fontSize: 11, color: exitHourFilter.length ? '#1f6feb' : '#3a4a5a', fontWeight: exitHourFilter.length ? 700 : 400 }}>
             Exit time {exitHourFilter.length ? `(${exitHourFilter.length})` : '(All)'}
           </span>
@@ -1245,9 +1280,11 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           {exitHourFilter.length > 0 && (
             <button onClick={() => setExitHourFilter([])} style={{ ...inputStyle, padding: '0 6px', cursor: 'pointer', color: '#f0b300' }} title="Clear exit-time filter (revert to All)">×</button>
           )}
+          </>)}
             </>);
           })()}
           {/* Conservative preset */}
+          {!isCal && (
           <button
             onClick={() => {
               setSizingMode('capital');
@@ -1271,6 +1308,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             title="Sets: Capital $600, Deploy 100%, Composite score primary, DD cap avg_min_mtm @ $30, Max loss 25%, Max drop 30%, Hit % ≥ 50, Min n trades = 10 (drops single-digit-sample 'lucky' cells), Pure mode. Picker chooses bounded-drawdown, rule-effective, statistically-credible combos.">
             ◇ Conservative
           </button>
+          )}
           <button
             onClick={() => setShowProMetrics(v => !v)}
             style={{
@@ -1343,7 +1381,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                 <th style={th}>Best entry hr <InfoIcon text={datasetProp === 'calendar' ? "Aggregated for the calendar sweep (∑ all hours) — best combo is per gap bucket × pair × Δ, not per entry hour." : "Hour-of-day IST when the trade was opened (Friday). The grid is swept per entry hour; this column shows the hour that won for this band."} /></th>
                 <th style={th}>{datasetProp === 'calendar' ? 'Best pair' : 'Best expiry'} <InfoIcon text={datasetProp === 'calendar' ? "Expiry pair (near-far selector pair) that wins for this gap bucket, e.g. current-next, weekly-next_weekly. Same strike across both expiries." : "Expiry bucket: current = same Saturday settlement; next = following Sunday; next_to_next = following Monday; weekly/biweekly/monthly = standard Delta expiries."} /></th>
                 <th style={th}>Best Δ <InfoIcon text="Target delta of each strangle/straddle leg at entry. 0.50 = ATM, 0.10 = OTM." /></th>
-                <th style={th}>Exit rule <InfoIcon text="Combined exit predicate (OR-of-clauses). SL{X} = premium stop-loss at X% (one leg's mark ≥ entry × (1+X/100)). MaxProfit Y% = exit when total MTM ≥ Y% of credit. MarginTgt Y% = exit when total MTM ≥ Y% of margin (take-profit). Exit @HH:MM = fixed Saturday IST exit. Whichever fires first wins; if none fires the trade rides to Sat 17:30 settlement (hard cap)." /></th>
+                {!isCal && <th style={th}>Exit rule <InfoIcon text="Combined exit predicate (OR-of-clauses). SL{X} = premium stop-loss at X% (one leg's mark ≥ entry × (1+X/100)). MaxProfit Y% = exit when total MTM ≥ Y% of credit. MarginTgt Y% = exit when total MTM ≥ Y% of margin (take-profit). Exit @HH:MM = fixed Saturday IST exit. Whichever fires first wins; if none fires the trade rides to Sat 17:30 settlement (hard cap)." /></th>}
 
                 {/* — Score — */}
                 <th style={thR}>{primaryDef.label} <InfoIcon text={`Primary score (currently '${primaryDef.label}'). The cell shown per band is the one that maxes (or mins) this metric across the grid.`} /></th>
@@ -1358,16 +1396,20 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                 <th style={thR}>n wins <InfoIcon text="Count of trades that ended with net P&L > 0 (after entry slip, entry brokerage, exit slip, exit brokerage)." /></th>
                 <th style={thR}>n loss <InfoIcon text="Count of trades that ended with net P&L ≤ 0." /></th>
                 <th style={thR}>Win % <InfoIcon text="n_wins / n_trades." /></th>
+                {!isCal && (<>
                 <th style={thR}>Hard cap <InfoIcon text="Trades that ran past all rules and exited at Saturday 17:30 IST (settlement)." /></th>
                 <th style={thR}>Hit % <InfoIcon text="(n_trades − n_hard_cap) / n_trades — fraction of trades where some deterministic exit fired (rule_trigger, premium_sl, max_profit, margin_target, fixed_hour) BEFORE hard cap. Phase 0B picker filter drops cells below the Hit % threshold by default (50%)." /></th>
                 <th style={thR}>Best fallback exit <InfoIcon text="When the picked rule doesn't fire, the trade rides to Sat 17:30 IST hard cap. This column shows the best-net-P&L `exit_hr_X` rule at the SAME (band, expiry, Δ, hour) — i.e. if instead of waiting for hard cap, the trade exited at this fixed time, what hour would yield the highest avg net P&L? Lets you see whether a hybrid 'primary rule + fallback exit time' would improve the outcome." /></th>
+                </>)}
                 <th style={th}>Analyze <InfoIcon text="🔍 button: opens a 2-tab analysis modal. Cross-band check shows how this rule performs across ALL 10 IV bands (regime fragility). Single-combo simulation shows the counterfactual P&L if you always traded this combo regardless of IV regime." /></th>
 
                 {/* — Rule mechanics — */}
+                {!isCal && (<>
                 <th style={thR}>Rule hits <InfoIcon text="Trades that exited because ANY rule fired (premium_sl OR max_profit OR margin_target). For take-profit families this INCLUDES profit-take fires, so 'Rule hits' can exceed losses — it's a 'rule triggered an exit' count, not a loss-cut count." /></th>
                 <th style={thR}>SL hits <InfoIcon text="Trades where the premium-SL specifically fired (one leg's mark crossed entry × (1 + premium_sl_pct/100)). Strict loss-cut count — excludes take-profit fires." /></th>
                 <th style={thR}>Max rule streak <InfoIcon text="Longest run of consecutive trades that exited via ANY rule fire (premium_sl + max_profit + margin_target). Companion of 'Rule hits' — same caveat (includes take-profit fires)." /></th>
                 <th style={thR}>Max SL streak <InfoIcon text="Longest run of consecutive trades that exited via real premium-SL (excludes take-profit fires)." /></th>
+                </>)}
 
                 {/* — Outcome streaks — */}
                 <th style={thR}>Max winning streak <InfoIcon text="Longest run of consecutive winning trades when Fridays are ordered chronologically." /></th>
@@ -1540,12 +1582,12 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                       </span>
                     )}
                   </td>
-                  <td style={td}>{r.entry_hour_ist == null
-                    ? <span style={{ color: '#9c27b0', fontWeight: 600 }} title="Aggregate-hours mode: this row is the weighted aggregate across every entry hour where this band's IV appeared.">All hours</span>
+                  <td style={td}>{(r.entry_hour_ist == null || isCal)
+                    ? <span style={{ color: '#9c27b0', fontWeight: 600 }} title="Aggregate-hours mode: this row is the weighted aggregate across every entry hour.">All hours</span>
                     : `${String(r.entry_hour_ist).padStart(2, '0')}:00`}</td>
                   <td style={td}>{r.expiry_bucket}</td>
                   <td style={td}>{r.delta_target.toFixed(2)}</td>
-                  <td style={{ ...td, color: '#f0b300' }}>{fmtRuleLabel(r.rule_label)}</td>
+                  {!isCal && <td style={{ ...td, color: '#f0b300' }}>{fmtRuleLabel(r.rule_label)}</td>}
 
                   {/* — Score (scaled when sizing is active) — */}
                   <td style={{
@@ -1569,6 +1611,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                   <td style={tdR}>{r.n_wins ?? '—'}</td>
                   <td style={tdR}>{r.n_losses ?? '—'}</td>
                   <td style={tdR}>{pct(r.win_rate)}</td>
+                  {!isCal && (<>
                   <td style={tdR}>{r.n_hard_cap ?? '—'}</td>
                   <td style={tdR}>{(() => {
                     const n = r.n_trades;
@@ -1588,6 +1631,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                       {`${String(h).padStart(2, '0')}:00 (${usd(scaled)})`}
                     </span>;
                   })()}</td>
+                  </>)}
                   <td style={td}>
                     <button
                       onClick={e => {
@@ -1613,10 +1657,12 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                   </td>
 
                   {/* — Rule mechanics — */}
+                  {!isCal && (<>
                   <td style={tdR}>{r.n_rule_trigger ?? '—'}</td>
                   <td style={tdR}>{r.n_premium_sl_hit ?? '—'}</td>
                   <td style={tdR}>{r.max_consec_sl_hits ?? '—'}</td>
                   <td style={tdR}>{r.max_consec_premium_sl_hits ?? '—'}</td>
+                  </>)}
 
                   {/* — Outcome streaks — */}
                   <td style={tdR}>{r.max_consec_wins ?? '—'}</td>
@@ -1767,9 +1813,11 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           marginTop: 8, fontSize: 11, color: '#7a9bb5',
           borderTop: '1px solid #1a2d42', paddingTop: 6,
         }}>
-          Swept {resp.n_cells ?? '—'} cells across {resp.n_rules ?? '—'} rule variants
-          {' '}(premium_sl ∈ &#123;50,75,100&#125; × &#123;baseline + 10 max_profit + 10 margin_target + 11 fixed_hour&#125;).
-          {family !== 'all' && (
+          {isCal
+            ? <>Swept {resp.n_cells ?? '—'} cells across gap buckets × pairs × Δ (single rule: hold to near-expiry settlement).</>
+            : <>Swept {resp.n_cells ?? '—'} cells across {resp.n_rules ?? '—'} rule variants
+              {' '}(premium_sl ∈ &#123;50,75,100&#125; × &#123;baseline + 10 max_profit + 10 margin_target + 11 fixed_hour&#125;).</>}
+          {!isCal && family !== 'all' && (
             <>
               {' '}<strong>Family:</strong>{' '}
               {family === 'max_profit' ? 'max_profit only' : 'margin_target only'}.

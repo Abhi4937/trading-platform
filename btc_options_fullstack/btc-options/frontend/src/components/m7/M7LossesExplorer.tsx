@@ -26,6 +26,7 @@ import {
 import type { M7ExitRule, M7Filters } from '../../types/m7';
 import { InfoIcon } from './InfoIcon';
 import { M7TradeDiagnosticModal } from './M7TradeDiagnosticModal';
+import { dimLabels } from './dimLabels';
 
 interface Props {
   filters: M7Filters;
@@ -72,6 +73,7 @@ function fmtUsd(v: number): string {
 export function M7LossesExplorer({ filters, exitRule, metric,
                                    useFridayBand = false, bandMode, d1Tiebreakers,
                                    cells, dataset }: Props) {
+  const L = dimLabels(dataset);
   // "cells mode" — the dashboard passed an explicit per-band selection list.
   // When active, scope/ranking UI is hidden and the explorer mirrors those
   // cells exactly. Empty array still counts as cells-mode (means the table
@@ -180,8 +182,8 @@ export function M7LossesExplorer({ filters, exitRule, metric,
 
   const scopeLabel = cellsMode
     ? (cells && cells.length > 0
-        ? `Best Combo per IV band (${cells.length} cells)`
-        : 'Best Combo per IV band — waiting for table')
+        ? `Best Combo ${L.perBand} (${cells.length} cells)`
+        : `Best Combo ${L.perBand} — waiting for table`)
     : scope === 'full_coverage'
       ? 'Full Coverage best cells'
       : scope === 'best_combo'
@@ -237,7 +239,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
               activeColor="#1f6feb"
             />
             <ScopeToggle
-              label="Best Combo per IV band"
+              label={`Best Combo ${L.perBand}`}
               active={scope === 'best_combo'}
               onClick={() => setScope(s => s === 'best_combo' ? null : 'best_combo')}
               activeColor="#bf6fde"
@@ -272,7 +274,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
               background: '#0d1f33', border: '1px solid #1a3d5e',
               borderRadius: 4, fontSize: 11, color: '#79c0ff',
             }} onClick={(e) => e.stopPropagation()}>
-              ⛓ Mirroring Best Combo per IV band — {cells.length} cells, each
+              ⛓ Mirroring Best Combo {L.perBand} — {cells.length} cells, each
               band's own exit rule. Change any control on the table above
               and the losses recompute.
             </div>
@@ -409,7 +411,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
               {/* By-band distribution bars */}
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 11, color: '#7a9bb5', marginBottom: 4 }}>
-                  Losses by IV band (n)
+                  Losses {L.perBand} (n)
                 </div>
                 {Object.entries(data.by_band)
                   .sort((a, b) => {
@@ -449,7 +451,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
               {data.by_band_stats && data.by_band_stats.length > 0 && (
                 <div style={{ marginTop: 14 }}>
                   <div style={{ fontSize: 11, color: '#7a9bb5', marginBottom: 4 }}>
-                    Loss stats by IV band (scoped to {scopeLabel.toLowerCase()})
+                    Loss stats {L.perBand} (scoped to {scopeLabel.toLowerCase()})
                   </div>
                   <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
                     <table style={{ borderCollapse: 'collapse', fontSize: 11,
@@ -552,7 +554,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
                         <option value="pnl_desc">Net P&amp;L (best first)</option>
                         <option value="friday_asc">Friday (oldest)</option>
                         <option value="friday_desc">Friday (newest)</option>
-                        <option value="band">IV band</option>
+                        <option value="band">{L.band}</option>
                       </select>
                       <label style={{ display: 'flex', alignItems: 'center',
                                       gap: 4, cursor: 'pointer' }}>
@@ -678,7 +680,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
                           onChange={e => setPrimaryDim(e.target.value)}
                           style={selectStyle}>
                     {DIMENSION_OPTIONS.map(o => (
-                      <option key={o.v} value={o.v}>{o.l}</option>
+                      <option key={o.v} value={o.v}>{L.isCal && o.v === 'entry_atm_iv_band' ? L.band : L.isCal && o.v === 'expiry_bucket' ? L.expiry : o.l}</option>
                     ))}
                   </select>
                   <span>×</span>
@@ -687,7 +689,7 @@ export function M7LossesExplorer({ filters, exitRule, metric,
                           style={selectStyle}>
                     <option value="">(none)</option>
                     {DIMENSION_OPTIONS.filter(o => o.v !== primaryDim).map(o => (
-                      <option key={o.v} value={o.v}>{o.l}</option>
+                      <option key={o.v} value={o.v}>{L.isCal && o.v === 'entry_atm_iv_band' ? L.band : L.isCal && o.v === 'expiry_bucket' ? L.expiry : o.l}</option>
                     ))}
                   </select>
                 </div>

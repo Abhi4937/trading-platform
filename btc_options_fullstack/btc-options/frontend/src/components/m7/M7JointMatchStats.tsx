@@ -174,8 +174,9 @@ export function M7JointMatchStats({ dataset }: Props) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Only fetch when on a non-default dataset. Render null otherwise.
-  const enabled = dataset !== 'delta_match';
+  // Joint-match stats are price-match-specific. Render null for delta_match AND calendar
+  // (calendar has no joint/fallback matching — single deterministic structure per obs).
+  const enabled = dataset === 'price_match';
 
   useEffect(() => {
     if (!enabled) {
