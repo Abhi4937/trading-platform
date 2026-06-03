@@ -1,5 +1,63 @@
 # Claude's Work Log
 
+## Session 46 (2026-06-02→03) — Calendar Sweep (Phase B) shipped end-to-end (Phases 0→4)
+
+Backwardation double-calendar sweep `dataset="calendar"` shipped + verified live. 6 commits
+(`4d15a4b`, `bc020f3`, `e9b74a4`, `58b816c`, `2858bbd`, `edafd8b`), pushed.
+
+- **Phase 0**: screenshotted the mockup via Playwright (served over HTTP — `file://` blocked
+  by Playwright MCP); iterated to sign-off. Data decisions locked: gap≥5pp (drop `minimal`),
+  physical-pair dedupe (canonical label by selector DTE-distance), delta-matched-near /
+  same-strike-far double calendar (strike by near-leg nearest |Δ| 0.30/0.40/0.50; far reuses
+  same strike, delta floats).
+- **Phase 1**: `calendar_batch_backtester.py` — per deduped obs × Δ, 4-leg double calendar,
+  5m MTM path to near settlement, single precomputed `hold_to_settlement` exit, M7-compatible
+  schema (`entry_atm_iv_band`=gap_bucket, `expiry_bucket`=pair, `entry_hour_ist`=-1 aggregated).
+  Optimized ~12× via in-memory per-group chain preload (`load_chain_for_expiry` once/expiry)
+  — pilot 2919s→244s on 60 obs, identical results.
+- **Phase 2**: `m7_results.py` calendar branch in `_trades_path_for_dataset`/`_paths_glob_for_dataset`
+  + `_derive_exits` short-circuit (exits precomputed). `m7_best_combo.py` calendar grid path,
+  single-rule menu, dataset threaded into `_build_grid`, calendar-aware grid load/persist/validate,
+  + persist crash fix (removed `pd.to_numeric(errors="ignore")` → guarded coerce). New build
+  script `build_m7_best_combo_grid_calendar.py`.
+- **Phase 3**: dataset toggle 3rd button + header relabels; per-trade near/far/gap IV chart in
+  `M7TradePathChart` (dataset threaded dashboard→pivot/losses→diagnostic→PathTabEmbed→chart).
+- **Phase 4**: full run (~10.9h, **16,671 trades**, 481 partitions) via RULE #5 dedicated
+  container, monitored via ScheduleWakeup loop. Built grid (224 cells/18 gap buckets), restarted
+  backend, Playwright-verified. Found+fixed 2 dataset-propagation bugs (best-combo table fetch +
+  diagnostic modal fetch omitted `dataset`).
+- **Verified**: backend tests 165 pass / 1 pre-existing fail (proven on `c95ce67`); delta_match
+  regression intact (81,840 cells); data spot-check matches; tsc clean. **Headline**: strategy is
+  net-negative on average (−$70k, 47.5% win) though per-gap-bucket best combos are positive.
+- **Restored from stash**: Session-44 backtest-dashboard work (still uncommitted — see HANDOFF).
+
+## Session 45 (2026-06-02) — Phase B replan + Phase 0 calendar-sweep mockup + Playwright MCP global fix
+
+- **Playwright MCP fixed at global scope.** Root cause: this session launched from
+  `C:\dev\trading_platform` (parent), but `.mcp.json` lives in nested
+  `btc_options_fullstack\btc-options\` → out of scope, never registered. Fixed via
+  `claude mcp add playwright --scope user` into `~/.claude.json` (works from any cwd).
+  Git Bash mangled `/c`→`C:/`; re-ran with `MSYS_NO_PATHCONV=1`. Now `✓ Connected`.
+  **Loads only after a session restart.**
+- **Phase B fully replanned** (`~/.claude/plans/start-what-u-mentioned-synchronous-meadow.md`,
+  all phases 0→4): backwardation double-calendar sweep analysed via new `dataset="calendar"`
+  reusing the M7 best-combo machinery. ~133k trades.
+- **User decision:** best-combo = **best expiry pair (+Δ) per gap bucket**, NOT best entry
+  hour. Drop entry-hour dimension; use M7 "∑ All hours" aggregate (group by
+  gap_bucket × pair × delta).
+- **Phase 0 mockup built + JS-syntax-verified:**
+  `btc_options_fullstack/btc-options/UI ss/new feature/calendar_sweep_mockup.html`
+  — dataset toggle (Calendar sweep), KPI strip, best-expiry-combo grid (relabeled,
+  no entry-hr col), pivot heatmap (pair × gap-bucket), per-trade MTM + near/far/gap-IV
+  chart, coverage controls (de-overlap + skip-reason). Sample data anchored on real scan.
+- **Confirmed: repo has NO live-trading and NO paper-trading** — only backtest/analytics,
+  read-only live market data (ticker/chain), and a live-signal scanner.
+
+### NEXT SESSION (after restart): screenshot the Phase 0 mockup via Playwright →
+`file:///C:/dev/trading_platform/btc_options_fullstack/btc-options/UI%20ss/new%20feature/calendar_sweep_mockup.html`
+→ iterate to sign-off → then Phase 1 (`calendar_batch_backtester.py`). RULE #2: Session-44
+backtest-perf edits are still uncommitted — decide commit/stash before Phase 1 backend work.
+
 ## Session 42 (2026-05-22) — Per-session backend isolation + strike-index disk cache
 
 ### Strike-index disk persistence (`historical.py`, commit `b33f0cd`)

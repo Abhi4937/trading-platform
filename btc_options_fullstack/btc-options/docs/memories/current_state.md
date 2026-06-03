@@ -2,6 +2,33 @@
 
 ## Active Projects
 
+- **Backwardation Calendar Sweep — Phase B SHIPPED (Session 46, 2026-06-02→03, COMMITTED+PUSHED
+  on `feature/black-screen-fix`, 6 commits `4d15a4b`→`edafd8b`):**
+  Every gap≥5pp backwardation observation traded as a delta-matched-near / same-strike-far
+  **double calendar** (strike by near-leg nearest |Δ| 0.30/0.40/0.50; far reuses same strike,
+  delta floats), held to near-expiry settlement, analysed through the M7 best-combo machinery
+  via a new `dataset="calendar"`. Plan: `~/.claude/plans/start-what-u-mentioned-synchronous-meadow.md`.
+  - **Data** (`~/btc-data/derived/calendar/`): `calendar_trades.parquet` = **16,671 trades**
+    (11,243 unique obs × 3Δ; 44,359 raw → gap≥5pp 13,254 → physical dedupe 11,243, 2,011
+    collisions folded); `calendar_paths/` 410 partitions (`near_iv`/`far_iv`/`iv_gap`/`gross_pnl_usd`/`spot`);
+    `calendar_best_combo_grid.parquet` 224 cells / 18 gap buckets. Full run ~10.9h.
+  - **Grid keys mapped**: `entry_atm_iv_band`=gap_bucket, `expiry_bucket`=pair,
+    `entry_hour_ist`=-1 (hours aggregated — best combo per gap bucket × pair × Δ).
+  - **Backend**: `calendar_batch_backtester.py` (new, in-memory per-group chain preload ~12×),
+    `build_m7_best_combo_grid_calendar.py` (new), additive calendar branches in `m7_results.py`
+    + `m7_best_combo.py` (exits precomputed → `_derive_exits` short-circuit). delta_match/price_match
+    unaffected.
+  - **Frontend**: dataset toggle 3rd button, IV band→Gap bucket / Expiry→Pair relabels,
+    per-trade near/far/gap IV overlay in `M7TradePathChart`.
+  - **Verified**: Playwright (grid + IV chart), backend tests 165 pass (1 pre-existing fail),
+    delta_match regression intact, data spot-check matches. Screenshots `calendar-sweep-verified.png`,
+    `calendar-iv-chart-verified.png`.
+  - **Headline**: net-NEGATIVE on average (−$70,099 total, −$4.2/trade, 47.5% win); per-gap-bucket
+    best combos positive. IV-crush edge real but < far-leg cost on average.
+  - **Remaining (cosmetic)**: calendar IV-button/title labels ("CE/PE/ATM"→near/far/gap, "1m"→"5m"),
+    best-combo footer/SL-chips are delta_match-specific, `trade_context_ohlc` 404s for calendar
+    (chart still works), `M7CellDrilldownModal` dataset threading.
+
 - **Backtest engine perf push (Session 44, 2026-05-27, PARTIALLY COMMITTED on `feature/black-screen-fix`):**
   Goal: make the Historical Backtest usable for multi-year ranges. Baseline measured:
   **1263s per Friday** for a 4-leg `closest_delta` strategy. After 3 shipped commits

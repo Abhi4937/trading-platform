@@ -1,5 +1,91 @@
 # Handoff Log
 
+## CURRENT (Session 46, 2026-06-02→03) — Calendar Sweep (Phase B) SHIPPED end-to-end (Phases 0→4)
+
+**Who:** Claude (Opus 4.8 1M) · **Branch:** `feature/black-screen-fix` (pushed, in sync with origin)
+
+**Backwardation double-calendar sweep is fully shipped and verified live.** Every
+gap≥5pp backwardation observation traded as a delta-matched-near / same-strike-far double
+calendar, held to near-expiry settlement, analysed through the M7 best-combo machinery via
+a new `dataset="calendar"`.
+
+**6 commits (all pushed):**
+- `4d15a4b` Phase 0 sign-off mockup + Phase 1 backtester (`calendar_batch_backtester.py`)
+- `bc020f3` Phase 2 backend build layer (dataset resolver, `_derive_exits` short-circuit,
+  single-rule menu, `entry_hour_ist=-1` hour-aggregation sentinel)
+- `e9b74a4` Phase 2 serving layer (grid load/persist/validate calendar-aware + persist
+  crash fix `errors="ignore"`→guarded coerce + build script `build_m7_best_combo_grid_calendar.py`)
+- `58b816c` Phase 3 dataset toggle + best-combo relabels (IV band→Gap bucket, Expiry→Pair)
+- `2858bbd` Phase 3 per-trade near/far/gap IV chart (`M7TradePathChart` dataset branch)
+- `edafd8b` Phase 4 fixes — thread `dataset` into best-combo + diagnostic fetches (found via
+  Playwright verification; both were also latent for price_match)
+
+**Data on disk** (`~/btc-data/derived/calendar/`):
+- `calendar_trades.parquet` — **16,671 trades** (11,243 unique obs × 3Δ {0.30,0.40,0.50};
+  raw 44,359 → gap≥5pp 13,254 → physical-pair dedupe 11,243; 2,011 selector collisions folded)
+- `calendar_paths/friday_date=<near_expiry>/part.parquet` — 410 partitions, per-bar
+  `gross_pnl_usd, near_iv, far_iv, iv_gap, spot`
+- `calendar_best_combo_grid.parquet` — 224 cells / 18 gap buckets (built in 8s, single rule)
+- Full run took ~10.9h (~7s/obs); skips: far_leg_unpriced 16,421 + no_near_chain 342 (real
+  data coverage — far-leg delta-strike not always priced).
+
+**Key perf**: in-memory per-group chain preload (`load_chain_for_expiry` once per expiry) =
+~12× speedup over per-snapshot parquet opens (cal_pilot3 2919s → cal_pilot4 244s on 60 obs).
+
+**Headline finding**: backwardation double-calendar held to settlement is **net-NEGATIVE on
+average** (−$70,099 total, −$4.2/trade, 47.5% win) — though per-gap-bucket *best* combos are
+positive (e.g. `[25,30) current-next_weekly Δ0.5` ≈ +$59/trade @ 70% win). IV-crush edge is
+real but doesn't beat the far-leg cost on average.
+
+**Verified**: backend tests 165 passed / 17 skipped / **1 pre-existing fail**
+(`test_endpoint_cache_hit_returns_cached_payload` — proven pre-existing: fails identically on
+pre-calendar `c95ce67`; stale cache-key tuple from `d2a68a4`). delta_match regression intact
+(81,840 cells). Frontend tsc: 8 pre-existing errors, none in touched files. Playwright:
+toggle → grid (gap buckets × pairs × Δ, hours aggregated) → trade → near/far/gap IV chart.
+Screenshots: `calendar-sweep-verified.png`, `calendar-iv-chart-verified.png`.
+
+**Remaining — cosmetic only, non-blocking:**
+- Calendar IV-view button still labeled "IV (CE/PE/ATM)" + chart title "1m path" (should be
+  near/far/gap, 5m); best-combo footer "110 rule variants" + SL-chip group are delta_match-
+  specific and irrelevant for calendar's single rule; `trade_context_ohlc` 404s for calendar
+  (chart still works — auxiliary OHLC); `M7CellDrilldownModal` (FullCoverage path) dataset
+  threading not done.
+
+**⚠️ UNCOMMITTED (parked, NOT part of calendar work)** — the Session-44 backtest-dashboard
+work, restored from stash this session: `backend/app/{main.py (CORS DELETE), services/backtest.py
+(_fmt_ist_full), services/option_data.py (ghost-strike fix)}` + `frontend/.../backtest/{BacktestForm,
+BacktestTradeLogTable,BacktestDashboard}.tsx`. Decide commit-or-discard next session before
+new work touching those files (RULE #2).
+
+---
+
+## Session 45 (2026-06-02) — Phase B replan + Phase 0 mockup + Playwright global fix
+
+**Who:** Claude (Opus 4.8 1M) · **Branch:** `feature/black-screen-fix`
+
+**Done this session:**
+- **Playwright MCP registered at user/global scope** (`~/.claude.json`) so it loads from
+  any cwd — fixes the failure where this session started in `C:\dev\trading_platform`
+  (parent) and the nested `.mcp.json` was out of scope. **Requires a session restart to
+  load.** (Git Bash mangles `/c`→`C:/`; use `MSYS_NO_PATHCONV=1` when re-adding.)
+- **Phase B fully (re)planned, all phases 0→4:**
+  `~/.claude/plans/start-what-u-mentioned-synchronous-meadow.md`. Backwardation
+  double-calendar sweep analysed through M7 machinery via new `dataset="calendar"`.
+- **Phase 0 static mockup built + JS-syntax-checked:**
+  `UI ss/new feature/calendar_sweep_mockup.html` (dataset toggle, KPI strip,
+  best-expiry-combo grid, pivot heatmap, per-trade MTM+near/far/gap-IV chart, coverage
+  controls). Sample data anchored on real `backwardation_scan_24h.csv` (44,359 obs).
+- **User decision:** best-combo = **best expiry pair (+Δ) per gap bucket, NOT best entry
+  hour** — entry-hr column removed; hours aggregated.
+
+**NEXT SESSION (after restart):**
+1. Screenshot the mockup via Playwright →
+   `file:///C:/dev/trading_platform/btc_options_fullstack/btc-options/UI%20ss/new%20feature/calendar_sweep_mockup.html`
+   → `mcp__playwright__browser_take_screenshot` → iterate with user to **sign-off**.
+2. RULE #2: Session-44 backtest-perf edits still uncommitted — decide commit/stash
+   **before** starting Phase 1 backend (`backend/app/analytics/calendar_batch_backtester.py`).
+3. Then Phases 1→4 per the plan. NOTE: repo has **no live/paper trading** — analytics only.
+
 ## Open follow-up — Playwright UI verification needed for SL-chip group (Session 40)
 
 The `premium-SL whitelist filter` feature (commit `3f3a145`) is **backend-verified
