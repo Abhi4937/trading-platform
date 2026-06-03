@@ -546,10 +546,16 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
         args.max_losing_streak = maxLosingStreak;
       }
       if (!isCal) args.pick_mode = pickMode;
-      if (expiryFilter.length > 0) args.expiry_buckets = expiryFilter;
-      if (deltaFilter.length > 0) args.delta_targets = deltaFilter;
+      // For calendar the persisted whitelists may hold stale M7 values (expiry
+      // buckets / IV bands) that match no calendar rows → empty grid. Keep only
+      // calendar-shaped values: pairs contain '-', gap buckets start with '['.
+      const expSel = isCal ? expiryFilter.filter(e => e.includes('-')) : expiryFilter;
+      const dltSel = isCal ? deltaFilter.filter(d => d === 0.30 || d === 0.40 || d === 0.50) : deltaFilter;
+      const bndSel = isCal ? bandFilter.filter(b => b.startsWith('[')) : bandFilter;
+      if (expSel.length > 0) args.expiry_buckets = expSel;
+      if (dltSel.length > 0) args.delta_targets = dltSel;
       if (!isCal && hourFilter.length > 0) args.entry_hours = hourFilter;
-      if (bandFilter.length > 0) args.iv_bands = bandFilter;
+      if (bndSel.length > 0) args.iv_bands = bndSel;
       if (!isCal && exitHourFilter.length > 0) args.exit_hours = exitHourFilter;
       if (!isCal && slFilter.length > 0) args.premium_sl_pcts = slFilter;
       // Phase B — bucketed tabs. 'band' is the default no-tab path. Calendar has no
@@ -622,10 +628,13 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
     if (minWinRate != null && minWinRate > 0) a.min_win_rate = minWinRate;
     if (maxLosingStreak != null && maxLosingStreak > 0) a.max_losing_streak = maxLosingStreak;
     if (!isCal) a.pick_mode = pickMode;
-    if (expiryFilter.length > 0) a.expiry_buckets = expiryFilter;
-    if (deltaFilter.length > 0) a.delta_targets = deltaFilter;
+    const expSel = isCal ? expiryFilter.filter(e => e.includes('-')) : expiryFilter;
+    const dltSel = isCal ? deltaFilter.filter(d => d === 0.30 || d === 0.40 || d === 0.50) : deltaFilter;
+    const bndSel = isCal ? bandFilter.filter(b => b.startsWith('[')) : bandFilter;
+    if (expSel.length > 0) a.expiry_buckets = expSel;
+    if (dltSel.length > 0) a.delta_targets = dltSel;
     if (!isCal && hourFilter.length > 0) a.entry_hours = hourFilter;
-    if (bandFilter.length > 0) a.iv_bands = bandFilter;
+    if (bndSel.length > 0) a.iv_bands = bndSel;
     if (!isCal && exitHourFilter.length > 0) a.exit_hours = exitHourFilter;
     if (!isCal && slFilter.length > 0) a.premium_sl_pcts = slFilter;
     return a;
@@ -1148,10 +1157,18 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             // Excluded by policy 2026-05-14: biweekly / monthly / quarterly
             // carry too few historical Fridays — backend drops them from
             // the in-memory grid at load time.
-            const ALL_EXPIRIES = ['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)'];
-            const ALL_DELTAS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
+            // Calendar uses different dimension VALUES than M7: Pair (10 near-far
+            // selector pairs) instead of expiry buckets, Gap buckets (derived from the
+            // grid rows) instead of IV bands, and only the 3 calendar deltas.
+            const CAL_PAIRS = ['current-next', 'current-next_to_next', 'current-next_weekly',
+              'current-weekly', 'next-next_to_next', 'next-next_weekly', 'next-weekly',
+              'next_to_next-next_weekly', 'next_to_next-weekly', 'weekly-next_weekly'];
+            const calGapBuckets = Array.from(new Set(rows.map(r => r.iv_band).filter(Boolean)))
+              .sort((a, b) => (parseInt(a.replace(/^\[/, ''), 10) || 0) - (parseInt(b.replace(/^\[/, ''), 10) || 0));
+            const ALL_EXPIRIES = isCal ? CAL_PAIRS : ['current (Sat)', 'next (Sun)', 'next_to_next (Mon)', 'weekly (7d)'];
+            const ALL_DELTAS = isCal ? [0.30, 0.40, 0.50] : [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
             const ALL_HOURS = [0, 1, 2, 3, 21, 22, 23];
-            const ALL_BANDS = ['0-20', '20-30', '30-40', '40-50', '50-60', '60-70', '70-80', '80-90', '90-100', '100+'];
+            const ALL_BANDS = isCal ? calGapBuckets : ['0-20', '20-30', '30-40', '40-50', '50-60', '60-70', '70-80', '80-90', '90-100', '100+'];
             // Fixed-exit hours from backend _FIXED_HOURS. Suffix '1729' = 17:29 (just before settlement).
             const ALL_EXIT_HOURS: { value: string; label: string }[] = [
               { value: '5',    label: '05:00' },
@@ -1210,7 +1227,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
             onChange={e => setDeltaFilter(Array.from(e.target.selectedOptions, o => parseFloat(o.value)))}
             style={{ ...inputStyle, width: 70, height: 22, opacity: deltaFilter.length ? 1 : 0.55 }}
             title="Optional — Ctrl/Cmd-click to whitelist delta targets. Empty selection (default) = all 8 deltas are considered. Select 1+ to restrict.">
-            {[0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50].map(d => (
+            {ALL_DELTAS.map(d => (
               <option key={d} value={d}>{d.toFixed(2)}</option>
             ))}
           </select>

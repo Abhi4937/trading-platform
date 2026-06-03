@@ -83,8 +83,10 @@ export function M7LossesExplorer({ filters, exitRule, metric,
   const [data, setData] = useState<M7LossesDistResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [primaryDim, setPrimaryDim] = useState('loss_cause');
-  const [secondaryDim, setSecondaryDim] = useState<string | ''>('entry_atm_iv_band');
+  // Calendar trades carry no loss_cause (the exit classifier is short-circuited),
+  // so default the faceted breakdown to gap bucket × Δ instead of loss_cause × band.
+  const [primaryDim, setPrimaryDim] = useState(dataset === 'calendar' ? 'entry_atm_iv_band' : 'loss_cause');
+  const [secondaryDim, setSecondaryDim] = useState<string | ''>(dataset === 'calendar' ? 'delta_target' : 'entry_atm_iv_band');
   const [scope, setScope] = useState<M7LossesScope>(null);
   const [ranking, setRanking] = useState<M7LossesRanking>('credit');
   const [rulesExpanded, setRulesExpanded] = useState(false);
