@@ -2221,6 +2221,19 @@ _SIMPLE_METRICS = {
     "share_gamma_squeeze":         ("_is_gamma_squeeze",           "mean"),
     "share_skew_flip":             ("_is_skew_flip",               "mean"),
     "share_unclassified":          ("_is_unclassified",            "mean"),
+    # Calendar entry-exposure (substitute for realized per-leg P&L, which the
+    # calendar trades parquet doesn't store). Mean of the per-leg ENTRY mark /
+    # delta — shows which leg (CE vs PE, near vs far) carries more premium /
+    # delta at entry. Only requested for dataset=calendar; the columns exist on
+    # the calendar frame. NaN/KeyError-safe: never requested for delta/price-match.
+    "avg_call_entry_mark":         ("call_entry_mark",             "mean"),
+    "avg_put_entry_mark":          ("put_entry_mark",              "mean"),
+    "avg_far_call_entry_mark":     ("far_call_entry_mark",         "mean"),
+    "avg_far_put_entry_mark":      ("far_put_entry_mark",          "mean"),
+    "avg_call_entry_delta":        ("call_entry_delta",            "mean"),
+    "avg_put_entry_delta":         ("put_entry_delta",             "mean"),
+    "avg_far_call_entry_delta":    ("far_call_entry_delta",        "mean"),
+    "avg_far_put_entry_delta":     ("far_put_entry_delta",         "mean"),
 }
 
 # Special-case metrics that don't fit the simple "column + agg" pattern.
@@ -4377,9 +4390,14 @@ def get_meta(
                           if "expiry_bucket" in df.columns else [],
         "deltas": sorted(df["delta_target"].dropna().unique().tolist()),
         "entry_hours": sorted(df["entry_hour_ist"].dropna().unique().tolist()),
-        "iv_bands": sorted(df["entry_atm_iv_band"].dropna().unique().tolist()),
-        "dte_buckets": sorted(df["dte_bucket"].dropna().unique().tolist()),
-        "ivp_buckets": sorted(df["ivp_bucket"].dropna().unique().tolist()),
+        "iv_bands": sorted(df["entry_atm_iv_band"].dropna().unique().tolist())
+                    if "entry_atm_iv_band" in df.columns else [],
+        # dte_bucket / ivp_bucket are M7-only derived cols — absent for the
+        # calendar dataset, so guard them (calendar meta would 500 otherwise).
+        "dte_buckets": sorted(df["dte_bucket"].dropna().unique().tolist())
+                       if "dte_bucket" in df.columns else [],
+        "ivp_buckets": sorted(df["ivp_bucket"].dropna().unique().tolist())
+                       if "ivp_bucket" in df.columns else [],
         "patterns": sorted(df["ctx_pattern"].dropna().unique().tolist())
                     if "ctx_pattern" in df.columns else [],
         "gex_regimes": sorted(df["ctx_gex_regime"].dropna().unique().tolist())
