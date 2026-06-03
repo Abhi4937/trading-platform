@@ -1529,7 +1529,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                   ? sk(r.secondary_score) : r.secondary_score;
                 return (
                 <tr key={`${r.iv_band}-${r.expiry_bucket}-${r.delta_target}-${r.entry_hour_ist}-${r.rule_label}`}
-                    onClick={() => {
+                    onClick={isCal ? undefined : () => {
                       if (r.entry_hour_ist == null) return;
                       setDrilldown({
                         band: r.iv_band,
@@ -1540,8 +1540,8 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
                         lots,
                       });
                     }}
-                    style={{ borderTop: '1px solid #1a2d42', cursor: 'pointer' }}
-                    title="Click to compare all 96 rules at this (band, expiry, Δ, hour) combo.">
+                    style={{ borderTop: '1px solid #1a2d42', cursor: isCal ? 'default' : 'pointer' }}
+                    title={isCal ? undefined : "Click to compare all 96 rules at this (band, expiry, Δ, hour) combo."}>
                   {/* — Identity — */}
                   <td style={{ ...td, fontWeight: 600 }}>
                     {r.iv_band}
@@ -1883,6 +1883,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
           delta_target={analysis.delta_target}
           entry_hour_ist={analysis.entry_hour_ist}
           rule_label={analysis.rule_label}
+          dataset={datasetProp as M7Dataset | undefined}
           totalCapitalUsd={sizingMode === 'capital' ? totalCapitalUsd : null}
           pctDeploy={pctDeploy}
           lots={analysis.lots}

@@ -8,7 +8,7 @@ import {
   fetchM7CellFridayDetail,
   type M7CrossBandCheckResponse, type M7SingleComboSimulationResponse,
   type M7CellFridayDetailResponse, type M7CellFridayDetailRow,
-  type M7IvBandBestComboRow,
+  type M7IvBandBestComboRow, type M7Dataset,
 } from '../../services/m7_api';
 import { InfoIcon } from './InfoIcon';
 
@@ -23,6 +23,7 @@ type Tab = 'cross_band' | 'single_combo' | 'friday_detail';
 
 export function M7CellAnalysisModal({
   band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
+  dataset,
   totalCapitalUsd, pctDeploy, lots = 100,
   endpointPrefix, bandMode, d1Tiebreakers,
   onClose,
@@ -32,6 +33,7 @@ export function M7CellAnalysisModal({
   delta_target: number;
   entry_hour_ist: number;
   rule_label: string;
+  dataset?: M7Dataset;
   totalCapitalUsd?: number | null;
   pctDeploy?: number;
   lots?: number;  // sized-lots from the parent table row; defaults to 100 (baseline)
@@ -68,12 +70,12 @@ export function M7CellAnalysisModal({
     Promise.all([
       fetchM7CrossBandCheck({
         band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
-        endpointPrefix, bandMode, d1Tiebreakers,
+        endpointPrefix, bandMode, d1Tiebreakers, dataset,
       }, ac.signal),
       fetchM7SingleComboSimulation({
         expiry_bucket, delta_target, entry_hour_ist, rule_label,
         total_capital_usd: totalCapitalUsd ?? null, pct_deploy: pctDeploy,
-        endpointPrefix, bandMode, d1Tiebreakers,
+        endpointPrefix, bandMode, d1Tiebreakers, dataset,
       }, ac.signal),
     ])
       .then(([cb, sc]) => { if (active) { setCrossBand(cb); setSingleCombo(sc); } })
@@ -81,7 +83,7 @@ export function M7CellAnalysisModal({
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; ac.abort(); };
   }, [band, expiry_bucket, delta_target, entry_hour_ist, rule_label, totalCapitalUsd, pctDeploy,
-      endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
+      endpointPrefix, bandMode, d1Tiebreakers?.join(','), dataset]);
 
   useEffect(() => {
     if (tab !== 'friday_detail' || fridayDetail !== null) return;
@@ -91,14 +93,14 @@ export function M7CellAnalysisModal({
     setFridayErr(null);
     fetchM7CellFridayDetail({
       band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
-      endpointPrefix, bandMode, d1Tiebreakers,
+      endpointPrefix, bandMode, d1Tiebreakers, dataset,
     }, ac.signal)
       .then(r => { if (active) setFridayDetail(r); })
       .catch(e => { if (active && e?.name !== 'AbortError') setFridayErr(String(e)); })
       .finally(() => { if (active) setFridayLoading(false); });
     return () => { active = false; ac.abort(); };
   }, [tab, band, expiry_bucket, delta_target, entry_hour_ist, rule_label,
-      endpointPrefix, bandMode, d1Tiebreakers?.join(',')]);
+      endpointPrefix, bandMode, d1Tiebreakers?.join(','), dataset]);
 
   // Reset the Friday-detail cache whenever the cell coordinates change so the
   // tab re-fetches for the new cell when reopened.

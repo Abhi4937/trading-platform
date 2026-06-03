@@ -463,7 +463,8 @@ export function fetchM7IvBandBestCombo(
     params.set('entry_hours', opts.entry_hours.map(h => String(h)).join(','));
   }
   if (opts.iv_bands && opts.iv_bands.length > 0) {
-    params.set('iv_bands', opts.iv_bands.join(','));
+    // ';' not ',' — calendar gap-bucket labels contain commas (e.g. "[5,10)").
+    params.set('iv_bands', opts.iv_bands.join(';'));
   }
   if (opts.exit_hours && opts.exit_hours.length > 0) {
     params.set('exit_hours', opts.exit_hours.join(','));

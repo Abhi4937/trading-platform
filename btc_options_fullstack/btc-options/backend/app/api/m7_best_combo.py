@@ -1743,7 +1743,9 @@ def _apply_dimension_filters(
     variants across every family). Unknown values are dropped silently.
     """
     if iv_bands:
-        keep_b = {s.strip() for s in iv_bands.split(",") if s.strip()}
+        # Split on ';' (NOT ',') — calendar gap-bucket labels contain commas
+        # (e.g. "[5,10)"); ';' appears in neither IV-band nor gap-bucket labels.
+        keep_b = {s.strip() for s in iv_bands.split(";") if s.strip()}
         if keep_b and "iv_band" in grid.columns:
             grid = grid[grid["iv_band"].astype(str).isin(keep_b)]
     if expiry_buckets:
@@ -2109,7 +2111,7 @@ def get_rule_comparison(
     band: str = Query(..., description="IV band, e.g. '20-30'"),
     expiry_bucket: str = Query(..., description="Expiry bucket label"),
     delta_target: float = Query(..., ge=0.0, le=1.0),
-    entry_hour_ist: int = Query(..., ge=0, le=23),
+    entry_hour_ist: int = Query(..., ge=-1, le=23),  # -1 = calendar aggregate
     total_capital_usd: Optional[float] = Query(None, ge=0,
         description="When set, apply per-rule sizing under the same constraints as the main picker."),
     pct_deploy: float = Query(100.0, ge=0, le=100),
@@ -2264,7 +2266,7 @@ def get_cross_band_check(
     band: str = Query(..., description="The picked cell's band (e.g. '0-20')"),
     expiry_bucket: str = Query(..., description="The picked cell's expiry bucket"),
     delta_target: float = Query(..., ge=0.0, le=1.0),
-    entry_hour_ist: int = Query(..., ge=0, le=23),
+    entry_hour_ist: int = Query(..., ge=-1, le=23),  # -1 = calendar aggregate
     rule_label: str = Query(..., description="Rule label of the picked cell, e.g. sl75_max_profit_25"),
     dataset: str = Query("delta_match",
         description="'delta_match' (default) or 'price_match'."),
@@ -2476,7 +2478,7 @@ def get_cell_friday_detail(
     band: str = Query(..., description="The picked cell's IV band (e.g. '0-20')"),
     expiry_bucket: str = Query(...),
     delta_target: float = Query(..., ge=0.0, le=1.0),
-    entry_hour_ist: int = Query(..., ge=0, le=23),
+    entry_hour_ist: int = Query(..., ge=-1, le=23),  # -1 = calendar aggregate
     rule_label: str = Query(..., description="Rule label of the picked cell, e.g. sl75_max_profit_25"),
     dataset: str = Query("delta_match",
         description="'delta_match' (default) or 'price_match'."),
@@ -2505,7 +2507,7 @@ def get_cell_friday_detail(
 def get_single_combo_simulation(
     expiry_bucket: str = Query(...),
     delta_target: float = Query(..., ge=0.0, le=1.0),
-    entry_hour_ist: int = Query(..., ge=0, le=23),
+    entry_hour_ist: int = Query(..., ge=-1, le=23),  # -1 = calendar aggregate
     rule_label: str = Query(...),
     total_capital_usd: Optional[float] = Query(None, ge=0.0),
     pct_deploy: float = Query(100.0, ge=0.0, le=100.0),
