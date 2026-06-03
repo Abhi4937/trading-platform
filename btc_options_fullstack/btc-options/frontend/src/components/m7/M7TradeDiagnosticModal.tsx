@@ -67,11 +67,11 @@ export function M7TradeDiagnosticModal({ tradeId, exitRule, onClose, dataset }: 
   useEffect(() => {
     const ac = new AbortController();
     setErr(null); setData(null);
-    fetchM7TradeDiagnostic(tradeId, exitRule, ac.signal)
+    fetchM7TradeDiagnostic(tradeId, exitRule, ac.signal, dataset)
       .then(setData)
       .catch(e => { if ((e as Error).name !== 'AbortError') setErr(String(e)); });
     return () => ac.abort();
-  }, [tradeId, JSON.stringify(exitRule)]);
+  }, [tradeId, JSON.stringify(exitRule), dataset]);
 
   // ESC closes modal.
   useEffect(() => {

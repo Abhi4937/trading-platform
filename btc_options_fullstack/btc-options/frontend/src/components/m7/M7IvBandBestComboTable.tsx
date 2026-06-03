@@ -27,6 +27,7 @@ import {
   type M7IvBandBestComboRow,
   type M7Ranking,
   type M7RuleFamily,
+  type M7Dataset,
   type Stage1PerBandRule,
 } from '../../services/m7_api';
 
@@ -551,7 +552,8 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       if (slopeBucket && bucketTab !== 'band' && bucketTab !== 'band_ivrv') {
         args.slope_bucket = slopeBucket;
       }
-      fetchM7IvBandBestCombo(args, ac.signal)
+      fetchM7IvBandBestCombo(args, ac.signal, undefined, undefined, undefined,
+                             datasetProp as M7Dataset | undefined)
         .then(r => {
           if (!active) return;
           setResp(r);
@@ -590,7 +592,7 @@ export function M7IvBandBestComboTable({ onSelectionsChange, onResolvedRulesChan
       minHitPct, maxLossCapPct, maxDropPct, minNTrades, minWinRate, maxLosingStreak, pickMode,
       JSON.stringify(expiryFilter), JSON.stringify(deltaFilter), JSON.stringify(hourFilter), JSON.stringify(bandFilter),
       JSON.stringify(exitHourFilter), JSON.stringify(slFilter),
-      bucketTab, ivrvBucket, slopeBucket]);
+      bucketTab, ivrvBucket, slopeBucket, datasetProp]);
 
   // Same args we send to /iv_band_best_combo so the missed-Fridays panel
   // below computes its picks against the user's exact filter/sizing state.
