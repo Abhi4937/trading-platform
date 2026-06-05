@@ -925,11 +925,20 @@ async def get_atm_iv_series(
     est = (rv_estimator or "cc").lower()
     if est not in _RV_ESTIMATORS:
         est = "cc"
-    return _api_cached(
-        "atm_iv_series",
-        {"expiry": expiry, "timeframe": timeframe, "rv_window_days": rv_window_days, "rv_estimator": est},
-        [SPOT_DATA_PATH, f"{_OPTIONS_BASE_DIR}/expiry={expiry}"],
-        lambda: _compute_atm_iv_series(expiry, timeframe, rv_window_days, est),
+    # Offload to a worker thread so the slow cold-parquet compute never blocks the
+    # single-worker event loop (which would stall /session-id, /option-chain, etc.
+    # and trip the frontend's 3s "backend slow/unreachable" guard). _api_cached only
+    # does file I/O and _compute_atm_iv_series opens its OWN DuckDB connection — both
+    # thread-safe and independent of the shared event-loop connection.
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: _api_cached(
+            "atm_iv_series",
+            {"expiry": expiry, "timeframe": timeframe, "rv_window_days": rv_window_days, "rv_estimator": est},
+            [SPOT_DATA_PATH, f"{_OPTIONS_BASE_DIR}/expiry={expiry}"],
+            lambda: _compute_atm_iv_series(expiry, timeframe, rv_window_days, est),
+        ),
     )
 
 
@@ -939,7 +948,6 @@ def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int, rv_
     For each timeframe bucket: spot → closest strike → average of CE+PE IV at that strike.
     Returns {time, atm_strike, atm_iv, rv, iv_minus_rv}.
     """
-    conn = get_conn()
     interval_map = {
         '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes',
         '30m': '30 minutes', '1h': '1 hour', '4h': '4 hours', '1d': '1 day',
@@ -963,6 +971,12 @@ def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int, rv_
         if not os.path.exists(sample_path):
             return {"data": []}
 
+    # Private DuckDB connection: the endpoint offloads this to a worker thread
+    # (run_in_executor) so the slow cold-parquet scan never blocks the single
+    # uvicorn event loop. A worker thread must NOT touch the shared global
+    # connection, so open a fresh one here (closed in the finally below).
+    import duckdb
+    conn = duckdb.connect()
     try:
         rng = conn.execute(
             f"SELECT MIN(timestamp_unix), MAX(timestamp_unix) FROM read_parquet('{sample_path}')"
@@ -1126,6 +1140,11 @@ def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int, rv_
     except Exception as e:
         logger.error(f"Error fetching ATM IV series for {expiry}: {e}")
         return {"data": []}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ── Spot OHLC + technical indicators ─────────────────────────────────────────
