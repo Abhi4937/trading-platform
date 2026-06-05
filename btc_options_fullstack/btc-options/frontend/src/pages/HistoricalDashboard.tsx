@@ -766,6 +766,22 @@ export const HistoricalDashboard: React.FC = () => {
         </div>
       </div>
 
+      {/* Vol Analytics — placed ABOVE the spot chart for prominence; visible in
+          both Chart & Strategy modes */}
+      {!maximized && simulationDate && (
+        <VolAnalyticsPanel
+          volData={volData}
+          volLoading={volLoading}
+          ivSeries={atmIvSeries}
+          ivLoading={ivSeriesLoading}
+          nowTs={currentSimTimestamp}
+          panelTimeframe={volPanelTimeframe}
+          setPanelTimeframe={setVolPanelTimeframe}
+          expanded={volPanelExpanded}
+          setExpanded={setVolPanelExpanded}
+        />
+      )}
+
       {/* Spot/leg chart with technical indicators */}
       {!maximized && simulationDate && (
         <div ref={spotChartRef} style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -784,21 +800,6 @@ export const HistoricalDashboard: React.FC = () => {
             premiumMode={chartSource === 'leg'}
           />
         </div>
-      )}
-
-      {/* Vol Analytics — collapsible, visible in both Chart & Strategy modes */}
-      {!maximized && simulationDate && (
-        <VolAnalyticsPanel
-          volData={volData}
-          volLoading={volLoading}
-          ivSeries={atmIvSeries}
-          ivLoading={ivSeriesLoading}
-          nowTs={currentSimTimestamp}
-          panelTimeframe={volPanelTimeframe}
-          setPanelTimeframe={setVolPanelTimeframe}
-          expanded={volPanelExpanded}
-          setExpanded={setVolPanelExpanded}
-        />
       )}
     </div>
   );

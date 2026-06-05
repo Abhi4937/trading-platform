@@ -116,16 +116,22 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
   );
 
   return (
-    <div style={{ margin: '4px 12px 12px', border: `1px solid ${COL.border}`, borderRadius: 8, background: COL.bg, overflow: 'hidden' }}>
-      {/* Collapsed/clickable header bar */}
+    <div style={{ margin: '8px 12px 12px', border: `1px solid ${COL.accent}`, borderRadius: 8, background: COL.bg, overflow: 'hidden', boxShadow: `0 0 0 1px ${COL.accent}22, 0 2px 10px #00d4ff14` }}>
+      {/* Collapsed/clickable header bar — prominent, accent-tinted */}
       <div
         onClick={() => setExpanded(!expanded)}
-        style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', cursor: 'pointer', userSelect: 'none', background: COL.bg3 }}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', cursor: 'pointer', userSelect: 'none',
+          background: 'linear-gradient(90deg, #0e2433, #0c1420)', borderLeft: `3px solid ${COL.accent}`,
+        }}
       >
-        <span style={{ color: COL.accent, fontSize: 12, width: 12 }}>{expanded ? '▾' : '▸'}</span>
-        <span style={{ color: COL.text, fontWeight: 700, fontSize: 13, letterSpacing: 0.3 }}>Vol Analytics</span>
-        <span style={{ flex: 1 }}>{summary}</span>
-        <span style={{ color: COL.text3, fontSize: 11 }}>{expanded ? 'click to collapse' : 'click to expand'}</span>
+        <span style={{ fontSize: 16 }}>📊</span>
+        <span style={{ color: COL.accent, fontWeight: 800, fontSize: 14, letterSpacing: 0.5, textTransform: 'uppercase' }}>RV / IV Analytics</span>
+        <span style={{ flex: 1, paddingLeft: 6 }}>{summary}</span>
+        <span style={{
+          color: COL.accent, fontSize: 11, fontWeight: 700, border: `1px solid ${COL.accent}`, borderRadius: 5,
+          padding: '3px 10px', whiteSpace: 'nowrap',
+        }}>{expanded ? '▾ Collapse' : '▸ Expand'}</span>
       </div>
 
       {expanded && (
