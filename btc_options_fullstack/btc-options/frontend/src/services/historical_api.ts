@@ -7,6 +7,7 @@ import type {
   SpotOhlcResponse,
   IndicatorsResponse,
   IndicatorConfig,
+  VolAnalyticsResponse,
 } from '../types/historical';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1';
@@ -56,6 +57,12 @@ export const historicalApi = {
   async getAtmIvSeries(expiry: string, timeframe: string, rvWindowDays: number = 7, signal?: AbortSignal): Promise<AtmIvSeriesResponse> {
     const res = await fetch(`${API_BASE}/historical/atm-iv-series?expiry=${expiry}&timeframe=${timeframe}&rv_window_days=${rvWindowDays}`, { signal });
     if (!res.ok) throw new Error('Failed to fetch ATM IV series');
+    return res.json();
+  },
+
+  async getVolAnalytics(expiry: string, timestamp: number, signal?: AbortSignal): Promise<VolAnalyticsResponse> {
+    const res = await fetch(`${API_BASE}/historical/vol-analytics?expiry=${expiry}&timestamp=${timestamp}`, { signal });
+    if (!res.ok) throw new Error('Failed to fetch vol analytics');
     return res.json();
   },
 

@@ -228,6 +228,150 @@ async def get_historical_expiries(
         return {"expiries": []}
 
 SPOT_DATA_PATH = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
+_OPTIONS_BASE_DIR = "/home/abhis/btc-data/data/options"
+
+
+# How far in time we'll snap to find the nearest available data when the exact
+# minute has none. The recorded spot/option parquet has multi-hour gaps; snapping
+# within this window lets the panel show the *nearest* IV instead of "no data",
+# while still reporting "no data" when truly outside the contract's coverage.
+_ATM_SNAP_WINDOW_SEC = 48 * 3600   # spot snap window
+_ATM_MARK_TOL_SEC = 3 * 3600       # per-strike option-mark tolerance around the snapped spot
+
+
+def compute_atm_iv(expiry: str, timestamp: int) -> dict:
+    """Robust point-in-time ATM IV for `expiry` (YYYY-MM-DD) at `timestamp` (unix secs).
+
+    Returns a dict:
+      {atm_strike, atm_iv_call, atm_iv_put, atm_iv_avg, spot, dte_hours, T,
+       ts_used, snapped}
+
+    IVs are in **percent** (e.g. 58.2), to match the option-chain's `iv_pct`.
+    `atm_iv_avg` is the mean of whichever of call/put solved to a valid IV.
+
+    Nearest-IV fallback: when the exact `timestamp` has no spot/option data (the
+    recorded parquet has multi-hour gaps), snap to the *nearest* available bar
+    within `_ATM_SNAP_WINDOW_SEC` and use that ATM IV. `ts_used` is the bar the
+    figures actually come from and `snapped` is True when it differs from the
+    request. All IV fields are 0.0 only when nothing priced exists within the
+    window (expiry not yet listed / already expired / outside coverage).
+
+    Mirrors the candidate-walk logic in `get_atm_iv_series`: start at the strike
+    closest to spot and walk outward by distance until a strike yields a valid IV.
+    """
+    from app.core.greeks import implied_vol as _iv
+
+    conn = get_conn()
+    r = 0.0
+    timestamp = int(timestamp)
+
+    def _time_to_expiry(ts: int):
+        try:
+            expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
+            secs_left = (expiry_dt - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+            return max(0.0001, secs_left / (365 * 24 * 3600)), max(0.0, secs_left / 3600.0)
+        except Exception:
+            return 0.0001, 0.0
+
+    # 1. Spot — exact minute, else nearest available within the snap window.
+    spot, ts_used = 0.0, timestamp
+    try:
+        row = conn.execute(
+            f"SELECT timestamp_unix, mark_close FROM read_parquet('{SPOT_DATA_PATH}') "
+            f"WHERE timestamp_unix BETWEEN {timestamp - _ATM_SNAP_WINDOW_SEC} AND {timestamp + _ATM_SNAP_WINDOW_SEC} "
+            f"ORDER BY abs(timestamp_unix - {timestamp}) LIMIT 1"
+        ).fetchone()
+        if row and row[1] is not None:
+            ts_used = int(row[0])
+            spot = float(row[1])
+    except Exception as e:
+        logger.error(f"compute_atm_iv spot fetch failed: {e}")
+
+    T, dte_hours = _time_to_expiry(ts_used)
+    snapped = ts_used != timestamp
+
+    empty = {
+        "atm_strike": 0, "atm_iv_call": 0.0, "atm_iv_put": 0.0, "atm_iv_avg": 0.0,
+        "spot": spot, "dte_hours": dte_hours, "T": T,
+        "ts_used": ts_used, "snapped": snapped,
+    }
+
+    strikes = get_strikes_for_expiry(expiry)
+    if not strikes:
+        return empty
+
+    strikes_sorted = sorted(strikes)
+    atm_strike_guess = (
+        min(strikes_sorted, key=lambda s: abs(s - spot)) if spot > 0
+        else strikes_sorted[len(strikes_sorted) // 2]
+    )
+    ref = spot if spot > 0 else atm_strike_guess
+    candidates = sorted(strikes_sorted, key=lambda s: abs(s - ref))[:15]
+
+    def _mark(opt: str, K: int):
+        """Nearest mark to ts_used within tolerance → (mark, ts_of_mark) or (0.0, None)."""
+        path = f"{_OPTIONS_BASE_DIR}/expiry={expiry}/strike={K}/{opt}.parquet"
+        if not os.path.exists(path):
+            return 0.0, None
+        try:
+            res = conn.execute(
+                f"SELECT timestamp_unix, mark_close FROM read_parquet('{path}') "
+                f"WHERE timestamp_unix BETWEEN {ts_used - _ATM_MARK_TOL_SEC} AND {ts_used + _ATM_MARK_TOL_SEC} "
+                f"ORDER BY abs(timestamp_unix - {ts_used}) LIMIT 1"
+            ).fetchone()
+            if res and res[1] is not None:
+                return float(res[1]), int(res[0])
+            return 0.0, None
+        except Exception:
+            return 0.0, None
+
+    price_basis = spot if spot > 0 else ref
+    for K in candidates:
+        c_mark, _ = _mark("CE", K)
+        p_mark, _ = _mark("PE", K)
+        c_iv = _iv(c_mark, price_basis, K, T, r, "call") if c_mark > 0 else 0.0
+        p_iv = _iv(p_mark, price_basis, K, T, r, "put") if p_mark > 0 else 0.0
+        valid = [v for v in (c_iv, p_iv) if v and v > 0]
+        if valid:
+            avg = sum(valid) / len(valid)
+            return {
+                "atm_strike": int(K),
+                "atm_iv_call": round(c_iv * 100, 2) if c_iv > 0 else 0.0,
+                "atm_iv_put": round(p_iv * 100, 2) if p_iv > 0 else 0.0,
+                "atm_iv_avg": round(avg * 100, 2),
+                "spot": spot if spot > 0 else float(K),
+                "dte_hours": dte_hours,
+                "T": T,
+                "ts_used": ts_used,
+                "snapped": snapped,
+            }
+
+    return empty
+
+
+@router.get("/vol-analytics")
+async def get_vol_analytics(
+    expiry: str = Query(..., description="Expiry date YYYY-MM-DD"),
+    timestamp: int = Query(..., description="UNIX seconds of the simulated moment"),
+):
+    """Point-in-time RV/IV vol-analytics snapshot for the selected expiry.
+
+    Drives the Historical Dashboard's collapsible Vol Analytics panel. Read-only
+    (parquet + greeks), so it works on any session slot. Shape matches
+    `app.models.models.VolAnalyticsResponse`.
+    """
+    from app.services.vol_analytics import build_vol_analytics
+    try:
+        # Run on the event-loop thread (NOT run_in_executor): build_vol_analytics
+        # reads the shared global DuckDB connection, and every other historical
+        # endpoint touches that connection only from the event-loop thread. Doing
+        # this work in a thread pool would access the single connection concurrently
+        # with those endpoints and can deadlock the worker.
+        return build_vol_analytics(expiry, int(timestamp))
+    except Exception as e:
+        logger.exception(f"vol-analytics failed for {expiry}@{timestamp}: {e}")
+        raise HTTPException(status_code=500, detail=f"vol-analytics failed: {e}")
+
 
 @router.get("/option-chain")
 async def get_historical_chain(

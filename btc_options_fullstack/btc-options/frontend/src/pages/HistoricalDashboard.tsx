@@ -7,7 +7,8 @@ import { HistoricalChart } from '../components/historical/HistoricalChart';
 import { StrategyPanel } from '../components/historical/StrategyPanel';
 import { SpotChart } from '../components/historical/SpotChart';
 import { IndicatorConfigPanel } from '../components/historical/IndicatorConfigPanel';
-import type { HistoricalChainRow, OHLCData, SpotOhlcBar, IndicatorConfig, IndicatorPoint } from '../types/historical';
+import { VolAnalyticsPanel } from '../components/historical/VolAnalyticsPanel';
+import type { HistoricalChainRow, OHLCData, SpotOhlcBar, IndicatorConfig, IndicatorPoint, VolAnalyticsResponse, AtmIvPoint } from '../types/historical';
 import type { Strategy, StrategyLeg } from '../types/strategy';
 
 export const HistoricalDashboard: React.FC = () => {
@@ -121,6 +122,16 @@ export const HistoricalDashboard: React.FC = () => {
   const legChainsAbortController = useRef<AbortController | null>(null);
 
   const [legChains, setLegChains] = useState<Map<string, HistoricalChainRow[]>>(new Map());
+
+  // ── Vol Analytics panel state ─────────────────────────────────────────────
+  const [volData, setVolData] = useState<VolAnalyticsResponse | null>(null);
+  const [volLoading, setVolLoading] = useState(false);
+  const [atmIvSeries, setAtmIvSeries] = useState<AtmIvPoint[]>([]);
+  const [ivSeriesLoading, setIvSeriesLoading] = useState(false);
+  // Panel-local timeframe for the lifetime IV/RV mini-chart (5m/15m/30m/1h/4h/1d).
+  const [volPanelTimeframe, setVolPanelTimeframe] = usePersistedState<string>('historical:volPanelTimeframe', '1h');
+  const volAbortController = useRef<AbortController | null>(null);
+  const ivSeriesAbortController = useRef<AbortController | null>(null);
 
   const currentSimTimestamp = useMemo(() => {
     if (!simulationDate || !simulationTime) return 0;
@@ -333,6 +344,39 @@ export const HistoricalDashboard: React.FC = () => {
 
     return () => { clearTimeout(timer); if (chainAbortController.current) chainAbortController.current.abort(); };
   }, [selectedExpiry, simulationDate, simulationTime, expiries, allLegs]);
+
+  // ── Vol Analytics snapshot — recomputes on date/time/expiry change ────────
+  useEffect(() => {
+    const isValidExpiry = expiries.some(e => e.date === selectedExpiry);
+    if (!selectedExpiry || !simulationDate || !simulationTime || !isValidExpiry) {
+      setVolData(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (volAbortController.current) volAbortController.current.abort();
+      volAbortController.current = new AbortController();
+      const timestamp = Math.floor(new Date(`${simulationDate}T${simulationTime}:00+05:30`).getTime() / 1000);
+      setVolLoading(true);
+      historicalApi.getVolAnalytics(selectedExpiry, timestamp, volAbortController.current.signal)
+        .then(res => { setVolData(res); })
+        .catch(err => { if (err.name !== 'AbortError') setVolData(null); })
+        .finally(() => setVolLoading(false));
+    }, 300);
+    return () => { clearTimeout(timer); if (volAbortController.current) volAbortController.current.abort(); };
+  }, [selectedExpiry, simulationDate, simulationTime, expiries]);
+
+  // ── Lifetime ATM IV/RV series — refetches only on expiry / panel-timeframe ─
+  useEffect(() => {
+    if (!selectedExpiry) { setAtmIvSeries([]); return; }
+    if (ivSeriesAbortController.current) ivSeriesAbortController.current.abort();
+    ivSeriesAbortController.current = new AbortController();
+    setIvSeriesLoading(true);
+    historicalApi.getAtmIvSeries(selectedExpiry, volPanelTimeframe, 14, ivSeriesAbortController.current.signal)
+      .then(res => { setAtmIvSeries(res.data || []); })
+      .catch(err => { if (err.name !== 'AbortError') setAtmIvSeries([]); })
+      .finally(() => setIvSeriesLoading(false));
+    return () => { if (ivSeriesAbortController.current) ivSeriesAbortController.current.abort(); };
+  }, [selectedExpiry, volPanelTimeframe]);
 
   useEffect(() => {
     if (!strategyMode || !simulationDate || !simulationTime || !allLegs.length) return;
@@ -716,6 +760,19 @@ export const HistoricalDashboard: React.FC = () => {
             premiumMode={chartSource === 'leg'}
           />
         </div>
+      )}
+
+      {/* Vol Analytics — collapsible, visible in both Chart & Strategy modes */}
+      {!maximized && simulationDate && (
+        <VolAnalyticsPanel
+          volData={volData}
+          volLoading={volLoading}
+          ivSeries={atmIvSeries}
+          ivLoading={ivSeriesLoading}
+          nowTs={currentSimTimestamp}
+          panelTimeframe={volPanelTimeframe}
+          setPanelTimeframe={setVolPanelTimeframe}
+        />
       )}
     </div>
   );
