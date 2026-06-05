@@ -155,6 +155,14 @@ async def get_latest_available_data():
 
 SPOT_DATA_PATH_RANGE = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
 
+# Cache for /data-range. The expensive parts are the MAX over the 79MB spot parquet
+# and the options-dir listing, both slow over the Docker mount. Key the cache on the
+# spot-file + options-dir mtimes so it stays correct when new data is recorded but is
+# instant otherwise. (The MAX is also read from the parquet footer statistics rather
+# than a full scan — ~0.05s vs ~10s — so even a cold first call is fast.)
+_data_range_cache: dict = {"key": None, "value": None}
+
+
 @router.get("/data-range")
 async def get_data_range():
     try:
@@ -162,24 +170,57 @@ async def get_data_range():
         if not os.path.exists(base_dir):
             return {"min_ts": 0, "max_ts": 0}
 
-        # min_ts: earliest expiry folder (options data start)
-        expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
+        # Cache key: refresh only when the spot file or options dir changes on disk.
+        try:
+            spot_mtime = os.path.getmtime(SPOT_DATA_PATH_RANGE)
+        except OSError:
+            spot_mtime = 0.0
+        try:
+            opt_mtime = os.path.getmtime(base_dir)
+        except OSError:
+            opt_mtime = 0.0
+        cache_key = (spot_mtime, opt_mtime)
+        if _data_range_cache["key"] == cache_key and _data_range_cache["value"] is not None:
+            return _data_range_cache["value"]
+
+        # min_ts: earliest expiry. Derive from the in-memory strike index (already
+        # built at startup) instead of re-listing 893 folders over the slow mount;
+        # fall back to a folder listing if the index isn't populated yet.
+        if not _strike_index_built:
+            _build_strike_index()
+        expiries = sorted(_strike_index.keys()) if _strike_index else sorted(
+            d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name
+        )
         if not expiries:
             return {"min_ts": 0, "max_ts": 0}
 
         min_date = expiries[0]
         min_ts = int(datetime.strptime(f"{min_date} 00:00:00 +0530", "%Y-%m-%d %H:%M:%S %z").timestamp())
 
-        # max_ts: latest actual recorded price from spot parquet — not expiry folder name
-        # This correctly reflects the last date data was collected, not the last contract expiry
+        # max_ts: latest actual recorded price from spot parquet — not expiry folder name.
+        # Read MAX(timestamp_unix) from the parquet's row-group statistics (footer only)
+        # instead of scanning the whole 79MB file: ~0.05s vs ~10s over the Docker mount.
+        # Fall back to a full scan if statistics are unavailable.
         conn = get_conn()
-        row = conn.execute(
-            f"SELECT MAX(timestamp_unix) FROM read_parquet('{SPOT_DATA_PATH_RANGE}')"
-        ).fetchone()
-        spot_max = row[0] if row else None
-        max_ts = int(spot_max) if spot_max else min_ts
+        max_ts = 0
+        try:
+            row = conn.execute(
+                f"SELECT MAX(CAST(stats_max AS BIGINT)) FROM parquet_metadata('{SPOT_DATA_PATH_RANGE}') "
+                f"WHERE path_in_schema = 'timestamp_unix'"
+            ).fetchone()
+            max_ts = int(row[0]) if row and row[0] is not None else 0
+        except Exception as e:
+            logger.warning(f"data-range footer-stats read failed, scanning: {e}")
+        if not max_ts:
+            row = conn.execute(
+                f"SELECT MAX(timestamp_unix) FROM read_parquet('{SPOT_DATA_PATH_RANGE}')"
+            ).fetchone()
+            max_ts = int(row[0]) if row and row[0] is not None else min_ts
 
-        return {"min_ts": min_ts, "max_ts": max_ts}
+        result = {"min_ts": min_ts, "max_ts": max_ts}
+        _data_range_cache["key"] = cache_key
+        _data_range_cache["value"] = result
+        return result
     except Exception as e:
         logger.error(f"Error in data-range: {e}")
         return {"min_ts": 0, "max_ts": 0}
