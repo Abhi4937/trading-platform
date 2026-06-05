@@ -77,6 +77,21 @@ export const SpotChart: React.FC<Props> = ({
     if (!containerRef.current) return;
     containerRef.current.innerHTML = '';
 
+    // Guard against sparse data: a single bar (or none) stretched by
+    // fitContent() renders as a full-pane solid candle "rectangle". Show an
+    // empty-state instead — common on dates with sparse chain snapshots.
+    if (ohlc.length < 2) {
+      const msg = document.createElement('div');
+      msg.style.cssText =
+        'display:flex;align-items:center;justify-content:center;height:100%;' +
+        'color:#4a6a85;font-size:13px;text-align:center;padding:0 16px;';
+      msg.textContent = ohlc.length === 0
+        ? 'No spot data for this time window.'
+        : 'Only one spot data point in this window — not enough to plot a chart.';
+      containerRef.current.appendChild(msg);
+      return;
+    }
+
     const overlayConfigs = configs.filter(c => classifyIndicator(c.type) === 'overlay');
     const paneConfigs    = configs.filter(c => classifyIndicator(c.type) === 'pane');
 
@@ -170,6 +185,12 @@ export const SpotChart: React.FC<Props> = ({
     });
 
     chart.timeScale().fitContent();
+
+    // For sparse windows, fitContent() would stretch a few bars to fill the
+    // pane (fat blocky candles). Cap bar spacing so they keep a normal width.
+    if (ohlc.length < 30) {
+      chart.timeScale().applyOptions({ barSpacing: 12 });
+    }
 
     // Pane sizing — defer to next frame so the chart has laid out.
     requestAnimationFrame(() => {

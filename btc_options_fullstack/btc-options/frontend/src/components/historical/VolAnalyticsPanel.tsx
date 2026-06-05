@@ -116,7 +116,7 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
   );
 
   return (
-    <div style={{ margin: '8px 12px 12px', border: `1px solid ${COL.accent}`, borderRadius: 8, background: COL.bg, overflow: 'hidden', boxShadow: `0 0 0 1px ${COL.accent}22, 0 2px 10px #00d4ff14` }}>
+    <div style={{ flexShrink: 0, margin: '8px 12px 12px', border: `1px solid ${COL.accent}`, borderRadius: 8, background: COL.bg, overflow: 'hidden', boxShadow: `0 0 0 1px ${COL.accent}22, 0 2px 10px #00d4ff14` }}>
       {/* Collapsed/clickable header bar — prominent, accent-tinted */}
       <div
         onClick={() => setExpanded(!expanded)}
