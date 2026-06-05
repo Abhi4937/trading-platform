@@ -25,6 +25,8 @@ from app.services.vol.constants import (
     SL_LOOKBACK,
     FRI_SAT_WEEKS,
     DEFAULT_HOLD_HOURS,
+    DEFAULT_ENTRY_HOUR_UTC,
+    DEFAULT_EXIT_HOUR_UTC,
 )
 from app.services.vol.rv_estimators import compute_all_estimators, daily_stats
 from app.services.vol.regime import detect_regime
@@ -161,6 +163,26 @@ def build_vol_analytics(expiry: str, timestamp: int) -> dict:
             ann_co = fs.get("annualized_co_vol")
             window_iv_rv = (iv_decimal / ann_co) if (ann_co and ann_co > 0) else None
             med_co = fs.get("median_co_pct")
+            # Per-window rows for the click-through details modal. raw_windows is a
+            # DataFrame (ascending by entry_time); serialize each weekend window.
+            raw = fs.get("raw_windows")
+            windows_out = []
+            if raw is not None and not raw.empty:
+                for _, w in raw.iterrows():
+                    o = float(w["open"]); c = float(w["close"])
+                    windows_out.append({
+                        "week_of": str(w["week_of"]),
+                        "entry_ts": int(w["entry_time"].timestamp()),
+                        "exit_ts": int(w["exit_time"].timestamp()),
+                        "open": _n(o, 2),
+                        "high": _n(float(w["high"]), 2),
+                        "low": _n(float(w["low"]), 2),
+                        "close": _n(c, 2),
+                        "n_candles": int(w["n_candles"]),
+                        "range_pct": _n(float(w["range_pct"]), 4),
+                        "co_pct": _n(float(w["co_pct"]), 4),
+                        "move_usd": _n(c - o, 2),  # signed close-open move
+                    })
             fri_sat = {
                 "window_count": int(fs["window_count"]),
                 "median_range_pct": _n(fs.get("median_range_pct"), 4),
@@ -170,6 +192,10 @@ def build_vol_analytics(expiry: str, timestamp: int) -> dict:
                 "annualized_co_vol": _n((ann_co or 0) * 100, 2),
                 "window_iv_rv": _n(window_iv_rv, 2),
                 "hold_hours": float(fs.get("hold_hours", DEFAULT_HOLD_HOURS)),
+                "entry_hour_utc": int(DEFAULT_ENTRY_HOUR_UTC),
+                "exit_hour_utc": int(DEFAULT_EXIT_HOUR_UTC),
+                "n_weeks": int(FRI_SAT_WEEKS),
+                "windows": windows_out,
             }
 
     # --- Stop-loss candidates from the short daily range window ---

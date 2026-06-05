@@ -155,6 +155,20 @@ export interface VolTermStructure {
   interpretation: string;
 }
 
+export interface VolFriSatWindow {
+  week_of: string;        // Friday date (YYYY-MM-DD)
+  entry_ts: number;       // unix sec (Fri entry)
+  exit_ts: number;        // unix sec (Sat exit)
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  n_candles: number;
+  range_pct: number | null;   // decimal (high-low)/open
+  co_pct: number | null;      // decimal |close-open|/open
+  move_usd: number | null;    // signed close-open in $
+}
+
 export interface VolFriSat {
   window_count: number;
   median_range_pct: number | null;   // decimal
@@ -164,6 +178,10 @@ export interface VolFriSat {
   annualized_co_vol: number | null;      // %
   window_iv_rv: number | null;
   hold_hours: number;
+  entry_hour_utc?: number;
+  exit_hour_utc?: number;
+  n_weeks?: number;
+  windows?: VolFriSatWindow[];
 }
 
 export interface VolSLTier {

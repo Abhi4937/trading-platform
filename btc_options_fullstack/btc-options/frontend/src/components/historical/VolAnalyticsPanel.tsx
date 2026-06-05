@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, Legend,
@@ -71,9 +71,21 @@ interface Props {
   setExpanded: (v: boolean) => void;
 }
 
-const Card: React.FC<{ title: string; children: React.ReactNode; style?: React.CSSProperties }> = ({ title, children, style }) => (
-  <div style={{ background: COL.bg2, border: `1px solid ${COL.border}`, borderRadius: 6, padding: 10, ...style }}>
-    <div style={{ color: COL.text2, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>{title}</div>
+const Card: React.FC<{
+  title: string; children: React.ReactNode; style?: React.CSSProperties;
+  onClick?: () => void; titleRight?: React.ReactNode;
+}> = ({ title, children, style, onClick, titleRight }) => (
+  <div
+    onClick={onClick}
+    style={{
+      background: COL.bg2, border: `1px solid ${COL.border}`, borderRadius: 6, padding: 10,
+      ...(onClick ? { cursor: 'pointer' } : {}), ...style,
+    }}
+  >
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+      <span style={{ color: COL.text2, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4 }}>{title}</span>
+      {titleRight}
+    </div>
     {children}
   </div>
 );
@@ -89,6 +101,7 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
   const header = volData?.header;
   const sig = header?.signal;
   const available = volData?.available ?? false;
+  const [friSatModal, setFriSatModal] = useState(false);
 
   const chartData = useMemo(
     () => (ivSeries || []).filter(p => p.atm_iv > 0).map(p => ({ time: p.time, iv: p.atm_iv, rv: p.rv > 0 ? p.rv : null })),
@@ -235,7 +248,13 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
                     </div>
                   ) : <span style={{ color: COL.text3 }}>—</span>}
                 </Card>
-                <Card title="Fri-Sat weekend window (12wk, σ-fixed)">
+                <Card
+                  title="Fri-Sat weekend window (12wk, σ-fixed)"
+                  onClick={volData!.fri_sat?.windows?.length ? () => setFriSatModal(true) : undefined}
+                  titleRight={volData!.fri_sat?.windows?.length
+                    ? <span style={{ color: COL.accent, fontSize: 11, fontWeight: 700 }}>details ›</span>
+                    : undefined}
+                >
                   {volData!.fri_sat ? (
                     <div style={{ fontSize: 12, color: COL.text2, lineHeight: 1.6 }}>
                       <div>Windows <b style={{ color: COL.text }}>{volData!.fri_sat.window_count}</b> · Median move <b style={{ color: COL.text }}>{usd(volData!.fri_sat.median_move_usd)}</b> ({pct((volData!.fri_sat.median_co_pct ?? 0) * 100)})</div>
@@ -276,6 +295,101 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
           )}
         </div>
       )}
+
+      {friSatModal && volData?.fri_sat && (
+        <FriSatDetailsModal
+          friSat={volData.fri_sat}
+          spot={header?.spot ?? null}
+          iv={header?.atm_iv_avg ?? null}
+          onClose={() => setFriSatModal(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+const FriSatDetailsModal: React.FC<{
+  friSat: NonNullable<VolAnalyticsResponse['fri_sat']>;
+  spot: number | null;
+  iv: number | null;
+  onClose: () => void;
+}> = ({ friSat, spot, iv, onClose }) => {
+  const wins = friSat.windows ?? [];
+  const istTime = (ts: number) =>
+    new Date(ts * 1000).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const cell: React.CSSProperties = { padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
+  const th: React.CSSProperties = { ...cell, color: COL.text3, fontWeight: 600, fontSize: 11, position: 'sticky', top: 0, background: COL.bg2 };
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 100000, background: '#000a',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: COL.bg, border: `1px solid ${COL.accent}`, borderRadius: 10, maxWidth: 900,
+          width: '100%', maxHeight: '86vh', overflow: 'auto', boxShadow: '0 8px 40px #000c',
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: `1px solid ${COL.border}`, position: 'sticky', top: 0, background: COL.bg, zIndex: 1 }}>
+          <span style={{ fontSize: 16 }}>📊</span>
+          <span style={{ color: COL.accent, fontWeight: 800, fontSize: 14, textTransform: 'uppercase', flex: 1 }}>
+            Fri-Sat weekend windows — {wins.length} of {friSat.n_weeks ?? wins.length}
+          </span>
+          <button onClick={onClose} style={{ background: 'transparent', color: COL.text2, border: `1px solid ${COL.border}`, borderRadius: 5, padding: '3px 10px', cursor: 'pointer', fontSize: 12 }}>✕ Close</button>
+        </div>
+
+        {/* Methodology */}
+        <div style={{ padding: '10px 16px', color: COL.text2, fontSize: 12, lineHeight: 1.6, borderBottom: `1px solid ${COL.border}` }}>
+          <div>Each window: <b style={{ color: COL.text }}>Fri {String(friSat.entry_hour_utc ?? 16).padStart(2, '0')}:00 → Sat {String(friSat.exit_hour_utc ?? 4).padStart(2, '0')}:00 UTC</b> (≈21:30→09:30 IST, {friSat.hold_hours}h hold), from <b style={{ color: COL.text }}>hourly</b> spot candles.</div>
+          <div><b style={{ color: COL.text }}>range%</b> = (high−low)/open · <b style={{ color: COL.text }}>co%</b> = |close−open|/open · <b style={{ color: COL.text }}>move$</b> = close−open.</div>
+          <div style={{ marginTop: 4 }}>
+            Median move <b style={{ color: COL.text }}>{usd(friSat.median_move_usd)}</b> ({pct((friSat.median_co_pct ?? 0) * 100)}) ·
+            {' '}Annualized σ <b style={{ color: COL.accent }}>{pct(friSat.annualized_co_vol)}</b> = RMS(co%) × √(365·24/{friSat.hold_hours}) ·
+            {' '}Window IV/RV <b style={{ color: ratioColor(friSat.window_iv_rv) }}>{num(friSat.window_iv_rv)}</b> = IV {pct(iv)} ÷ σ {pct(friSat.annualized_co_vol)}
+          </div>
+        </div>
+
+        {/* Per-window table */}
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, textAlign: 'left' }}>Weekend (Fri)</th>
+              <th style={{ ...th, textAlign: 'left' }}>Entry IST</th>
+              <th style={th}>Open</th>
+              <th style={th}>High</th>
+              <th style={th}>Low</th>
+              <th style={th}>Close</th>
+              <th style={th}>move$</th>
+              <th style={th}>co%</th>
+              <th style={th}>range%</th>
+              <th style={th}>bars</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...wins].reverse().map((w, i) => (
+              <tr key={w.entry_ts} style={{ background: i % 2 ? 'transparent' : COL.bg2 }}>
+                <td style={{ ...cell, textAlign: 'left', color: COL.text2 }}>{w.week_of}</td>
+                <td style={{ ...cell, textAlign: 'left', color: COL.text3 }}>{istTime(w.entry_ts)}</td>
+                <td style={{ ...cell, color: COL.text }}>{usd(w.open)}</td>
+                <td style={{ ...cell, color: COL.text3 }}>{usd(w.high)}</td>
+                <td style={{ ...cell, color: COL.text3 }}>{usd(w.low)}</td>
+                <td style={{ ...cell, color: COL.text }}>{usd(w.close)}</td>
+                <td style={{ ...cell, color: (w.move_usd ?? 0) >= 0 ? COL.green : COL.red }}>
+                  {(w.move_usd ?? 0) >= 0 ? '+' : ''}{usd(w.move_usd)}
+                </td>
+                <td style={{ ...cell, color: COL.text }}>{pct((w.co_pct ?? 0) * 100)}</td>
+                <td style={{ ...cell, color: COL.text2 }}>{pct((w.range_pct ?? 0) * 100)}</td>
+                <td style={{ ...cell, color: COL.text3 }}>{w.n_candles}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
