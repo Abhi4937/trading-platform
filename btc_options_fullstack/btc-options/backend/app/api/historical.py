@@ -108,6 +108,95 @@ def get_strikes_for_expiry(expiry: str) -> list[int]:
         _build_strike_index()
     return _strike_index.get(expiry, [])
 
+
+# ── Disk-persisted response cache for slow, parquet-heavy endpoints ──────────
+# The Docker mount reads at ~8-10 MB/s and doesn't cache, so cold parquet reads
+# are slow. Cache computed JSON responses under derived/ (shared, atomic writes),
+# keyed by request params and validated by source-file mtimes — so a historical
+# expiry is computed once and then instant forever, even across restarts.
+import hashlib
+
+_API_CACHE_DIR = "/home/abhis/btc-data/derived/api_cache"
+_api_mem: dict = {}  # in-process layer in front of disk: {(namespace,key): (token, value)}
+
+
+def _mtime_token(source_paths: list[str]):
+    """Tuple of mtimes for the cache's source files/dirs (None if missing)."""
+    token = []
+    for p in source_paths:
+        try:
+            token.append(os.path.getmtime(p))
+        except OSError:
+            token.append(None)
+    return token
+
+
+def _api_cached(namespace: str, key_parts, source_paths: list[str], compute_fn):
+    """Return compute_fn() with a disk+memory cache, invalidated by source mtimes.
+
+    Transparent: on any cache error it falls through to compute_fn(). `key_parts`
+    must be JSON-serialisable; `source_paths` are the files/dirs the result
+    depends on (mtime change → recompute).
+    """
+    key = hashlib.sha1(json.dumps(key_parts, sort_keys=True, default=str).encode()).hexdigest()
+    token = _mtime_token(source_paths)
+
+    mem = _api_mem.get((namespace, key))
+    if mem is not None and mem[0] == token:
+        return mem[1]
+
+    path = os.path.join(_API_CACHE_DIR, namespace, f"{key}.json")
+    try:
+        if os.path.exists(path):
+            with open(path) as f:
+                payload = json.load(f)
+            if payload.get("src") == token:
+                value = payload["value"]
+                _api_mem[(namespace, key)] = (token, value)
+                return value
+    except Exception as e:
+        logger.warning("api_cache read failed (%s/%s): %s", namespace, key, e)
+
+    value = compute_fn()
+
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {"key_parts": key_parts, "src": token, "value": value, "built_at": time.time()}
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        logger.warning("api_cache write failed (%s/%s): %s", namespace, key, e)
+
+    _api_mem[(namespace, key)] = (token, value)
+    return value
+
+
+# In-memory LRU for /option-chain. Its key includes the scrubbed timestamp (an
+# effectively unbounded keyspace), so it's memory-only (not worth persisting) — it
+# just makes scrubbing back to an already-viewed minute instant within a session.
+from collections import OrderedDict
+
+_CHAIN_LRU_CAP = 64
+_chain_lru: "OrderedDict" = OrderedDict()  # key -> (mtime_token, value)
+
+
+def _chain_lru_get(key, token):
+    v = _chain_lru.get(key)
+    if v is not None and v[0] == token:
+        _chain_lru.move_to_end(key)
+        return v[1]
+    return None
+
+
+def _chain_lru_put(key, token, value):
+    _chain_lru[key] = (token, value)
+    _chain_lru.move_to_end(key)
+    while len(_chain_lru) > _CHAIN_LRU_CAP:
+        _chain_lru.popitem(last=False)
+
+
 @router.get("/latest-available-data")
 async def get_latest_available_data():
     try:
@@ -115,43 +204,65 @@ async def get_latest_available_data():
         if not os.path.exists(base_dir):
             return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
 
-        # 1. Fast filesystem scan for latest expiry folder
-        expiries = sorted([d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name])
-        if not expiries:
-            return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
-        
-        latest_expiry = expiries[-1]
-        
-        # 2. Targeted scan of just the latest expiry's first available strike folder to get max timestamp
-        # This is 100x faster than scanning the whole dataset
-        try:
-            strike_dirs = list(Path(f"{base_dir}/expiry={latest_expiry}").iterdir())
-            if not strike_dirs:
-                return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
-            
-            # Just look at the first strike folder to find the day's timing
-            target_path = f"{strike_dirs[0]}/*.parquet"
-            query = f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')"
-            conn = get_conn()
-            max_ts = conn.execute(query).fetchone()[0]
-            
-            if not max_ts:
-                res = {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
-            else:
-                ist_tz = timezone(timedelta(hours=5, minutes=30))
-                dt = datetime.fromtimestamp(max_ts, tz=ist_tz)
-                res = {
-                    "latestDate": dt.strftime("%Y-%m-%d"),
-                    "latestTime": dt.strftime("%H:%M"),
-                    "latestExpiry": latest_expiry
-                }
-        except Exception:
-            res = {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
-        
-        return res
+        # Cached on the options-dir mtime: refreshes when a new expiry/data lands,
+        # otherwise instant (and persists across restarts).
+        return _api_cached(
+            "latest_available",
+            {"opt_mtime": _mtime_token([base_dir])[0]},
+            [base_dir],
+            lambda: _compute_latest_available_data(base_dir),
+        )
     except Exception as e:
         logger.error(f"Error in fast latest-data scan: {e}")
         return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
+
+
+def _compute_latest_available_data(base_dir: str) -> dict:
+    # 1. Latest expiry from the in-memory strike index (built at startup) — avoids
+    #    re-listing 893 folders over the slow mount.
+    if not _strike_index_built:
+        _build_strike_index()
+    expiries = sorted(_strike_index.keys()) if _strike_index else sorted(
+        d.name.split('=')[1] for d in Path(base_dir).iterdir() if d.is_dir() and '=' in d.name
+    )
+    if not expiries:
+        return {"latestDate": "2026-03-12", "latestTime": "00:00", "latestExpiry": "2026-03-12"}
+
+    latest_expiry = expiries[-1]
+
+    # 2. Max timestamp from the latest expiry's first strike folder. Read it from the
+    #    parquet footer statistics (footer only) instead of a full MAX scan; fall back
+    #    to a scan if stats are unavailable.
+    try:
+        strike_dirs = list(Path(f"{base_dir}/expiry={latest_expiry}").iterdir())
+        if not strike_dirs:
+            return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
+        target_path = f"{strike_dirs[0]}/*.parquet"
+        conn = get_conn()
+        max_ts = None
+        try:
+            row = conn.execute(
+                f"SELECT MAX(CAST(stats_max AS BIGINT)) FROM parquet_metadata('{target_path}') "
+                f"WHERE path_in_schema = 'timestamp_unix'"
+            ).fetchone()
+            max_ts = int(row[0]) if row and row[0] is not None else None
+        except Exception:
+            max_ts = None
+        if not max_ts:
+            row = conn.execute(f"SELECT max(timestamp_unix) FROM read_parquet('{target_path}')").fetchone()
+            max_ts = row[0] if row else None
+
+        if not max_ts:
+            return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        dt = datetime.fromtimestamp(int(max_ts), tz=ist_tz)
+        return {
+            "latestDate": dt.strftime("%Y-%m-%d"),
+            "latestTime": dt.strftime("%H:%M"),
+            "latestExpiry": latest_expiry,
+        }
+    except Exception:
+        return {"latestDate": latest_expiry, "latestTime": "00:00", "latestExpiry": latest_expiry}
 
 SPOT_DATA_PATH_RANGE = "/home/abhis/btc-data/data/spot/BTCUSD_1min.parquet"
 
@@ -421,8 +532,16 @@ async def get_historical_chain(
     timestamp: int = Query(...), # UNIX timestamp
     pin_strikes: str = Query(None) # comma-separated strikes to always include (e.g. strategy legs)
 ):
+    # In-memory LRU: scrubbing back to an already-viewed minute returns instantly
+    # (no parquet reads). Invalidated if this expiry's option dir mtime changes.
+    _chain_key = (target_date, int(timestamp), pin_strikes or "")
+    _chain_token = _mtime_token([f"{_OPTIONS_BASE_DIR}/expiry={target_date}"])[0]
+    _cached = _chain_lru_get(_chain_key, _chain_token)
+    if _cached is not None:
+        return _cached
+
     conn = get_conn()
-    
+
     # 1. Fetch Actual Spot Price for this minute
     try:
         spot_query = f"SELECT mark_close FROM read_parquet('{SPOT_DATA_PATH}') WHERE timestamp_unix = {timestamp}"
@@ -583,13 +702,15 @@ async def get_historical_chain(
             lambda: list(executor.map(compute_strike, filtered_strikes))
         )
         
-    return {
+    result = {
         "expiry": target_date,
         "timestamp": timestamp,
         "atm_strike": atm_strike,
         "spot_actual": spot,
         "chain": chain
     }
+    _chain_lru_put(_chain_key, _chain_token, result)
+    return result
 
 
 @router.get("/chart-data-with-greeks")
@@ -790,6 +911,21 @@ async def get_atm_iv_series(
     timeframe: str = Query(...),
     rv_window_days: int = Query(7),
 ):
+    """ATM IV time series across the contract lifetime (disk-cached).
+
+    Keyed on (expiry, timeframe, rv_window_days); invalidated when the spot parquet
+    or this expiry's option dir changes. A historical expiry computes once (~20s over
+    the slow mount) and is then instant on every repeat, including after a restart.
+    """
+    return _api_cached(
+        "atm_iv_series",
+        {"expiry": expiry, "timeframe": timeframe, "rv_window_days": rv_window_days},
+        [SPOT_DATA_PATH, f"{_OPTIONS_BASE_DIR}/expiry={expiry}"],
+        lambda: _compute_atm_iv_series(expiry, timeframe, rv_window_days),
+    )
+
+
+def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int) -> dict:
     """ATM IV time series across the contract lifetime.
 
     For each timeframe bucket: spot → closest strike → average of CE+PE IV at that strike.
