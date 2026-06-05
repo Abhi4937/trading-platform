@@ -67,9 +67,23 @@ interface Props {
   nowTs: number;
   panelTimeframe: string;
   setPanelTimeframe: (tf: string) => void;
+  rvWindow: number;
+  setRvWindow: (n: number) => void;
+  rvEstimator: string;
+  setRvEstimator: (e: string) => void;
   expanded: boolean;
   setExpanded: (v: boolean) => void;
 }
+
+// Contract-life RV selector options.
+const RV_WINDOWS = [3, 7, 14, 30, 60];
+const RV_ESTIMATOR_OPTS: { key: string; label: string }[] = [
+  { key: 'cc', label: 'CC' },
+  { key: 'co', label: 'CO' },
+  { key: 'parkinson', label: 'Park' },
+  { key: 'gk', label: 'GK' },
+  { key: 'rs', label: 'RS' },
+];
 
 const Card: React.FC<{
   title: string; children: React.ReactNode; style?: React.CSSProperties;
@@ -96,6 +110,7 @@ const Badge: React.FC<{ color: string; children: React.ReactNode }> = ({ color, 
 
 export const VolAnalyticsPanel: React.FC<Props> = ({
   volData, volLoading, ivSeries, ivLoading, nowTs, panelTimeframe, setPanelTimeframe,
+  rvWindow, setRvWindow, rvEstimator, setRvEstimator,
   expanded, setExpanded,
 }) => {
   const header = volData?.header;
@@ -176,7 +191,7 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
               {/* Mini-chart + RV grid row */}
               <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 10 }}>
                 <Card title="IV vs RV — contract life">
-                  <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                  <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {TIMEFRAMES.map(tf => (
                       <button
                         key={tf}
@@ -188,6 +203,36 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
                           color: panelTimeframe === tf ? COL.accent : COL.text2,
                         }}
                       >{tf}</button>
+                    ))}
+                  </div>
+                  {/* RV controls: lookback window (days) + estimator */}
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span style={{ color: COL.text3, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.3 }}>RV win</span>
+                    {RV_WINDOWS.map(d => (
+                      <button
+                        key={d}
+                        onClick={() => setRvWindow(d)}
+                        style={{
+                          fontSize: 11, padding: '2px 7px', borderRadius: 4, cursor: 'pointer',
+                          border: `1px solid ${rvWindow === d ? COL.gold : COL.border}`,
+                          background: rvWindow === d ? COL.bg3 : 'transparent',
+                          color: rvWindow === d ? COL.gold : COL.text2,
+                        }}
+                      >{d}d</button>
+                    ))}
+                    <span style={{ width: 1, height: 14, background: COL.border, margin: '0 2px' }} />
+                    {RV_ESTIMATOR_OPTS.map(e => (
+                      <button
+                        key={e.key}
+                        onClick={() => setRvEstimator(e.key)}
+                        title={e.key}
+                        style={{
+                          fontSize: 11, padding: '2px 7px', borderRadius: 4, cursor: 'pointer',
+                          border: `1px solid ${rvEstimator === e.key ? COL.gold : COL.border}`,
+                          background: rvEstimator === e.key ? COL.bg3 : 'transparent',
+                          color: rvEstimator === e.key ? COL.gold : COL.text2,
+                        }}
+                      >{e.label}</button>
                     ))}
                   </div>
                   <ResponsiveContainer width="100%" height={180}>
@@ -208,7 +253,7 @@ export const VolAnalyticsPanel: React.FC<Props> = ({
                       />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       <Line type="monotone" dataKey="iv" name="ATM IV" stroke={COL.accent} dot={false} strokeWidth={1.6} isAnimationActive={false} connectNulls />
-                      <Line type="monotone" dataKey="rv" name="RV" stroke={COL.text2} dot={false} strokeWidth={1.2} isAnimationActive={false} connectNulls />
+                      <Line type="monotone" dataKey="rv" name={`RV (${(RV_ESTIMATOR_OPTS.find(e => e.key === rvEstimator)?.label || 'CC')}, ${rvWindow}d)`} stroke={COL.text2} dot={false} strokeWidth={1.2} isAnimationActive={false} connectNulls />
                       {nowTs > 0 && <ReferenceLine x={nowTs} stroke={COL.gold} strokeDasharray="3 3" label={{ value: 'now', fill: COL.gold, fontSize: 10, position: 'top' }} />}
                     </ComposedChart>
                   </ResponsiveContainer>

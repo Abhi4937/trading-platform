@@ -905,27 +905,35 @@ async def get_chart_data(
         return {"data": []}
 
 
+_RV_ESTIMATORS = {"cc", "co", "parkinson", "gk", "rs"}
+
+
 @router.get("/atm-iv-series")
 async def get_atm_iv_series(
     expiry: str = Query(...),
     timeframe: str = Query(...),
     rv_window_days: int = Query(7),
+    rv_estimator: str = Query("cc", description="cc|co|parkinson|gk|rs"),
 ):
     """ATM IV time series across the contract lifetime (disk-cached).
 
-    Keyed on (expiry, timeframe, rv_window_days); invalidated when the spot parquet
-    or this expiry's option dir changes. A historical expiry computes once (~20s over
-    the slow mount) and is then instant on every repeat, including after a restart.
+    Keyed on (expiry, timeframe, rv_window_days, rv_estimator); invalidated when the
+    spot parquet or this expiry's option dir changes. A historical expiry computes once
+    (~20s over the slow mount) and is then instant on every repeat, including after a
+    restart. `rv_estimator` selects which realized-vol estimator drives the RV line.
     """
+    est = (rv_estimator or "cc").lower()
+    if est not in _RV_ESTIMATORS:
+        est = "cc"
     return _api_cached(
         "atm_iv_series",
-        {"expiry": expiry, "timeframe": timeframe, "rv_window_days": rv_window_days},
+        {"expiry": expiry, "timeframe": timeframe, "rv_window_days": rv_window_days, "rv_estimator": est},
         [SPOT_DATA_PATH, f"{_OPTIONS_BASE_DIR}/expiry={expiry}"],
-        lambda: _compute_atm_iv_series(expiry, timeframe, rv_window_days),
+        lambda: _compute_atm_iv_series(expiry, timeframe, rv_window_days, est),
     )
 
 
-def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int) -> dict:
+def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int, rv_estimator: str = "cc") -> dict:
     """ATM IV time series across the contract lifetime.
 
     For each timeframe bucket: spot → closest strike → average of CE+PE IV at that strike.
@@ -1008,27 +1016,52 @@ def _compute_atm_iv_series(expiry: str, timeframe: str, rv_window_days: int) -> 
                         pe_data = dict(zip(df['time'].astype(int), df['close'].astype(float)))
             strike_data[K] = {'ce': ce_data, 'pe': pe_data}
 
-        # RV — same window/annualization as chart-data-with-greeks
+        # RV — rolling realized vol at the chart timeframe, selectable estimator.
+        # Estimator math mirrors app.services.vol.rv_estimators (the same formulas
+        # the "RV term structure" grid uses): cc = variance of close-to-close log
+        # returns; co/parkinson/gk/rs = rolling mean of their per-bar variance term.
         import math as _math
         BARS_PER_DAY = {'1m': 1440, '5m': 288, '15m': 96, '30m': 48, '1h': 24, '4h': 6, '1d': 1}
         bars_per_day = BARS_PER_DAY.get(timeframe, 288)
         rv_rolling_bars = rv_window_days * bars_per_day
         annualize_factor = _math.sqrt(365 * bars_per_day)
         rv_lookback_start = max(0, min_ts - (rv_window_days + 5) * 86400)
+        est = (rv_estimator or 'cc').lower()
         rv_by_time: dict[int, float] = {}
         try:
             rv_df = conn.execute(f"""
                 SELECT
                     time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,
-                    last(mark_close ORDER BY timestamp_unix) AS spot_close
+                    first(mark_open  ORDER BY timestamp_unix) AS o,
+                    max(mark_high)                            AS h,
+                    min(mark_low)                             AS l,
+                    last(mark_close  ORDER BY timestamp_unix) AS c
                 FROM read_parquet('{SPOT_DATA_PATH}')
                 WHERE timestamp_unix >= {rv_lookback_start}
                 GROUP BY bucket ORDER BY bucket ASC
             """).df()
             if not rv_df.empty and len(rv_df) >= 2:
                 rv_df['time'] = rv_df['bucket'].apply(lambda x: int(x.timestamp()))
-                rv_df['log_ret'] = np.log(rv_df['spot_close'] / rv_df['spot_close'].shift(1))
-                rv_df['rv'] = rv_df['log_ret'].rolling(rv_rolling_bars).std() * annualize_factor * 100
+                ln = np.log
+                ln2 = np.log(2)
+                if est == 'co':
+                    term = ln(rv_df['c'] / rv_df['o']) ** 2
+                    var_series = term.rolling(rv_rolling_bars).mean()
+                elif est == 'parkinson':
+                    term = (ln(rv_df['h'] / rv_df['l']) ** 2) / (4 * ln2)
+                    var_series = term.rolling(rv_rolling_bars).mean()
+                elif est == 'gk':
+                    term = 0.5 * ln(rv_df['h'] / rv_df['l']) ** 2 \
+                        - (2 * ln2 - 1) * ln(rv_df['c'] / rv_df['o']) ** 2
+                    var_series = term.rolling(rv_rolling_bars).mean()
+                elif est == 'rs':
+                    term = ln(rv_df['h'] / rv_df['c']) * ln(rv_df['h'] / rv_df['o']) \
+                        + ln(rv_df['l'] / rv_df['c']) * ln(rv_df['l'] / rv_df['o'])
+                    var_series = term.rolling(rv_rolling_bars).mean()
+                else:  # 'cc' — close-to-close (variance of log returns)
+                    log_ret = ln(rv_df['c'] / rv_df['c'].shift(1))
+                    var_series = log_ret.rolling(rv_rolling_bars).var()
+                rv_df['rv'] = np.sqrt(var_series.clip(lower=0)) * annualize_factor * 100
                 valid = rv_df.dropna(subset=['rv'])
                 rv_by_time = dict(zip(valid['time'].astype(int), valid['rv'].astype(float)))
         except Exception as e:

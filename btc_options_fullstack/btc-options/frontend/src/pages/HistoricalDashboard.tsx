@@ -130,6 +130,8 @@ export const HistoricalDashboard: React.FC = () => {
   const [ivSeriesLoading, setIvSeriesLoading] = useState(false);
   // Panel-local timeframe for the lifetime IV/RV mini-chart (5m/15m/30m/1h/4h/1d).
   const [volPanelTimeframe, setVolPanelTimeframe] = usePersistedState<string>('historical:volPanelTimeframe', '1h');
+  const [volPanelRvWindow, setVolPanelRvWindow] = usePersistedState<number>('historical:volPanelRvWindow', 14);
+  const [volPanelRvEstimator, setVolPanelRvEstimator] = usePersistedState<string>('historical:volPanelRvEstimator', 'cc');
   // Expanded state is lifted here so the (expensive) vol fetches are skipped
   // entirely while the panel is collapsed — collapsed is the default, so by
   // default the panel adds zero backend load and never competes with the chain.
@@ -395,12 +397,12 @@ export const HistoricalDashboard: React.FC = () => {
     if (ivSeriesAbortController.current) ivSeriesAbortController.current.abort();
     ivSeriesAbortController.current = new AbortController();
     setIvSeriesLoading(true);
-    historicalApi.getAtmIvSeries(selectedExpiry, volPanelTimeframe, 14, ivSeriesAbortController.current.signal)
+    historicalApi.getAtmIvSeries(selectedExpiry, volPanelTimeframe, volPanelRvWindow, ivSeriesAbortController.current.signal, volPanelRvEstimator)
       .then(res => { setAtmIvSeries(res.data || []); })
       .catch(err => { if (err.name !== 'AbortError') setAtmIvSeries([]); })
       .finally(() => setIvSeriesLoading(false));
     return () => { if (ivSeriesAbortController.current) ivSeriesAbortController.current.abort(); };
-  }, [selectedExpiry, volPanelTimeframe, volPanelExpanded]);
+  }, [selectedExpiry, volPanelTimeframe, volPanelExpanded, volPanelRvWindow, volPanelRvEstimator]);
 
   useEffect(() => {
     if (!strategyMode || !simulationDate || !simulationTime || !allLegs.length) return;
@@ -777,6 +779,10 @@ export const HistoricalDashboard: React.FC = () => {
           nowTs={currentSimTimestamp}
           panelTimeframe={volPanelTimeframe}
           setPanelTimeframe={setVolPanelTimeframe}
+          rvWindow={volPanelRvWindow}
+          setRvWindow={setVolPanelRvWindow}
+          rvEstimator={volPanelRvEstimator}
+          setRvEstimator={setVolPanelRvEstimator}
           expanded={volPanelExpanded}
           setExpanded={setVolPanelExpanded}
         />

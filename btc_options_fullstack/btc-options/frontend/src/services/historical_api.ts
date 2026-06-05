@@ -54,8 +54,8 @@ export const historicalApi = {
     return res.json();
   },
 
-  async getAtmIvSeries(expiry: string, timeframe: string, rvWindowDays: number = 7, signal?: AbortSignal): Promise<AtmIvSeriesResponse> {
-    const res = await fetch(`${API_BASE}/historical/atm-iv-series?expiry=${expiry}&timeframe=${timeframe}&rv_window_days=${rvWindowDays}`, { signal });
+  async getAtmIvSeries(expiry: string, timeframe: string, rvWindowDays: number = 7, signal?: AbortSignal, rvEstimator: string = 'cc'): Promise<AtmIvSeriesResponse> {
+    const res = await fetch(`${API_BASE}/historical/atm-iv-series?expiry=${expiry}&timeframe=${timeframe}&rv_window_days=${rvWindowDays}&rv_estimator=${rvEstimator}`, { signal });
     if (!res.ok) throw new Error('Failed to fetch ATM IV series');
     return res.json();
   },
