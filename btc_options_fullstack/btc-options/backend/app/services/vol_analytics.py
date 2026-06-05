@@ -95,11 +95,17 @@ def _empty(expiry: str, timestamp: int, atm: dict, reason: str) -> dict:
 def build_vol_analytics(expiry: str, timestamp: int) -> dict:
     """Return the Vol Analytics snapshot for `expiry` (YYYY-MM-DD) at `timestamp`."""
     # Lazy import to break the historical.py <-> vol_analytics.py import cycle.
+    import duckdb
     from app.api.historical import compute_atm_iv, _bucketed_spot_ohlc
     from app.core.greeks import compute_greeks
 
     timestamp = int(timestamp)
-    atm = compute_atm_iv(expiry, timestamp)
+    # Private DuckDB connection: this runs in a worker thread, and the shared
+    # global connection must only be touched from the event-loop thread. A fresh
+    # connection can read_parquet() independently with no contention. It is closed
+    # when this function returns (short-lived, GC-collected).
+    conn = duckdb.connect()
+    atm = compute_atm_iv(expiry, timestamp, conn=conn)
 
     if not atm or atm.get("atm_iv_avg", 0) <= 0:
         return _empty(expiry, timestamp, atm or {}, "No ATM IV for this expiry at this time")
@@ -115,7 +121,7 @@ def build_vol_analytics(expiry: str, timestamp: int) -> dict:
 
     # --- Daily spot OHLC: ~40 days before ref_ts (covers the 30d lookback +1) ---
     daily_start = ref_ts - 41 * 86400
-    daily = _bucketed_spot_ohlc(daily_start, ref_ts, "1d")
+    daily = _bucketed_spot_ohlc(daily_start, ref_ts, "1d", conn=conn)
     if daily is None or len(daily) < 2:
         return _empty(expiry, timestamp, atm, "Insufficient daily spot history")
 
@@ -143,7 +149,7 @@ def build_vol_analytics(expiry: str, timestamp: int) -> dict:
 
     # --- Fri-Sat weekend-window stats: hourly OHLC ~ (FRI_SAT_WEEKS+1) weeks back ---
     hourly_start = ref_ts - (FRI_SAT_WEEKS + 1) * 7 * 86400
-    hourly = _bucketed_spot_ohlc(hourly_start, ref_ts, "1h")
+    hourly = _bucketed_spot_ohlc(hourly_start, ref_ts, "1h", conn=conn)
     fri_sat = None
     if hourly is not None and len(hourly) > 6:
         hourly_fs = hourly.rename(columns={"time": "timestamp"}).copy()

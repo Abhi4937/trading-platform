@@ -130,6 +130,10 @@ export const HistoricalDashboard: React.FC = () => {
   const [ivSeriesLoading, setIvSeriesLoading] = useState(false);
   // Panel-local timeframe for the lifetime IV/RV mini-chart (5m/15m/30m/1h/4h/1d).
   const [volPanelTimeframe, setVolPanelTimeframe] = usePersistedState<string>('historical:volPanelTimeframe', '1h');
+  // Expanded state is lifted here so the (expensive) vol fetches are skipped
+  // entirely while the panel is collapsed — collapsed is the default, so by
+  // default the panel adds zero backend load and never competes with the chain.
+  const [volPanelExpanded, setVolPanelExpanded] = usePersistedState<boolean>('historical:volPanelExpanded', false);
   const volAbortController = useRef<AbortController | null>(null);
   const ivSeriesAbortController = useRef<AbortController | null>(null);
 
@@ -263,15 +267,33 @@ export const HistoricalDashboard: React.FC = () => {
   }, [dataRange]);
 
   useEffect(() => {
-    historicalApi.getDataRange().then(range => {
-      setDataRange(range);
-      // Only seed defaults if no persisted value exists. Without this guard,
-      // every mode switch / reload would clobber the user's last selection.
-      if (!simulationDate) {
-        setSimulationDate(new Date(range.max_ts * 1000).toISOString().split('T')[0]);
-      }
-      if (!simulationTime) setSimulationTime('00:00');
-    }).catch(console.error);
+    // getDataRange gates the whole dashboard (no dataRange → no expiries → no
+    // chain). On a cold/just-restarted single-worker backend this one-shot fetch
+    // can be dropped (the Live-mode WS reconnect burst competes for the worker),
+    // which used to leave the dashboard permanently empty. Retry with backoff so
+    // a transient failure self-heals instead of wedging the UI.
+    let cancelled = false;
+    const load = (attempt: number) => {
+      historicalApi.getDataRange().then(range => {
+        if (cancelled) return;
+        setDataRange(range);
+        // Only seed defaults if no persisted value exists. Without this guard,
+        // every mode switch / reload would clobber the user's last selection.
+        if (!simulationDate) {
+          setSimulationDate(new Date(range.max_ts * 1000).toISOString().split('T')[0]);
+        }
+        if (!simulationTime) setSimulationTime('00:00');
+      }).catch(err => {
+        if (cancelled) return;
+        if (attempt < 6) {
+          setTimeout(() => load(attempt + 1), Math.min(1000 * (attempt + 1), 4000));
+        } else {
+          console.error('getDataRange failed after retries', err);
+        }
+      });
+    };
+    load(0);
+    return () => { cancelled = true; };
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -346,9 +368,10 @@ export const HistoricalDashboard: React.FC = () => {
   }, [selectedExpiry, simulationDate, simulationTime, expiries, allLegs]);
 
   // ── Vol Analytics snapshot — recomputes on date/time/expiry change ────────
+  // Only runs while the panel is EXPANDED — collapsed (default) does no work.
   useEffect(() => {
     const isValidExpiry = expiries.some(e => e.date === selectedExpiry);
-    if (!selectedExpiry || !simulationDate || !simulationTime || !isValidExpiry) {
+    if (!volPanelExpanded || !selectedExpiry || !simulationDate || !simulationTime || !isValidExpiry) {
       setVolData(null);
       return;
     }
@@ -363,11 +386,12 @@ export const HistoricalDashboard: React.FC = () => {
         .finally(() => setVolLoading(false));
     }, 300);
     return () => { clearTimeout(timer); if (volAbortController.current) volAbortController.current.abort(); };
-  }, [selectedExpiry, simulationDate, simulationTime, expiries]);
+  }, [selectedExpiry, simulationDate, simulationTime, expiries, volPanelExpanded]);
 
   // ── Lifetime ATM IV/RV series — refetches only on expiry / panel-timeframe ─
+  // Also gated on expanded so the contract-life series isn't fetched when collapsed.
   useEffect(() => {
-    if (!selectedExpiry) { setAtmIvSeries([]); return; }
+    if (!volPanelExpanded || !selectedExpiry) { setAtmIvSeries([]); return; }
     if (ivSeriesAbortController.current) ivSeriesAbortController.current.abort();
     ivSeriesAbortController.current = new AbortController();
     setIvSeriesLoading(true);
@@ -376,7 +400,7 @@ export const HistoricalDashboard: React.FC = () => {
       .catch(err => { if (err.name !== 'AbortError') setAtmIvSeries([]); })
       .finally(() => setIvSeriesLoading(false));
     return () => { if (ivSeriesAbortController.current) ivSeriesAbortController.current.abort(); };
-  }, [selectedExpiry, volPanelTimeframe]);
+  }, [selectedExpiry, volPanelTimeframe, volPanelExpanded]);
 
   useEffect(() => {
     if (!strategyMode || !simulationDate || !simulationTime || !allLegs.length) return;
@@ -772,6 +796,8 @@ export const HistoricalDashboard: React.FC = () => {
           nowTs={currentSimTimestamp}
           panelTimeframe={volPanelTimeframe}
           setPanelTimeframe={setVolPanelTimeframe}
+          expanded={volPanelExpanded}
+          setExpanded={setVolPanelExpanded}
         />
       )}
     </div>

@@ -239,7 +239,7 @@ _ATM_SNAP_WINDOW_SEC = 48 * 3600   # spot snap window
 _ATM_MARK_TOL_SEC = 3 * 3600       # per-strike option-mark tolerance around the snapped spot
 
 
-def compute_atm_iv(expiry: str, timestamp: int) -> dict:
+def compute_atm_iv(expiry: str, timestamp: int, conn=None) -> dict:
     """Robust point-in-time ATM IV for `expiry` (YYYY-MM-DD) at `timestamp` (unix secs).
 
     Returns a dict:
@@ -261,7 +261,7 @@ def compute_atm_iv(expiry: str, timestamp: int) -> dict:
     """
     from app.core.greeks import implied_vol as _iv
 
-    conn = get_conn()
+    conn = conn or get_conn()
     r = 0.0
     timestamp = int(timestamp)
 
@@ -361,13 +361,13 @@ async def get_vol_analytics(
     `app.models.models.VolAnalyticsResponse`.
     """
     from app.services.vol_analytics import build_vol_analytics
+    loop = asyncio.get_event_loop()
     try:
-        # Run on the event-loop thread (NOT run_in_executor): build_vol_analytics
-        # reads the shared global DuckDB connection, and every other historical
-        # endpoint touches that connection only from the event-loop thread. Doing
-        # this work in a thread pool would access the single connection concurrently
-        # with those endpoints and can deadlock the worker.
-        return build_vol_analytics(expiry, int(timestamp))
+        # Run in a worker thread so this (slow, parquet-heavy) computation never
+        # blocks the event loop / the option-chain. build_vol_analytics opens its
+        # OWN DuckDB connection, so it does NOT touch the shared global connection
+        # concurrently with the event-loop thread (which would deadlock the worker).
+        return await loop.run_in_executor(None, build_vol_analytics, expiry, int(timestamp))
     except Exception as e:
         logger.exception(f"vol-analytics failed for {expiry}@{timestamp}: {e}")
         raise HTTPException(status_code=500, detail=f"vol-analytics failed: {e}")
@@ -932,16 +932,18 @@ _TF_TO_INTERVAL = {
 }
 
 
-def _bucketed_spot_ohlc(start_ts: int, end_ts: int, timeframe: str, lookback_extra_sec: int = 0) -> 'pd.DataFrame':
+def _bucketed_spot_ohlc(start_ts: int, end_ts: int, timeframe: str, lookback_extra_sec: int = 0, conn=None) -> 'pd.DataFrame':
     """Pull bucketed spot OHLCV from the parquet for the given range.
 
     Returns DataFrame with columns: time, open, high, low, close, volume.
     `lookback_extra_sec` extends the start backwards (warm-up for indicators).
+    `conn` lets a background thread pass its own DuckDB connection instead of the
+    shared global one (which must only be touched from the event-loop thread).
     """
     import pandas as pd
     interval, _ = _TF_TO_INTERVAL.get(timeframe, _TF_TO_INTERVAL['5m'])
     fetch_start = max(0, int(start_ts) - max(0, int(lookback_extra_sec)))
-    conn = get_conn()
+    conn = conn or get_conn()
     q = f"""
     SELECT
         time_bucket(INTERVAL '{interval}', to_timestamp(timestamp_unix)) AS bucket,

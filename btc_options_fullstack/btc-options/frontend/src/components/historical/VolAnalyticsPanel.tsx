@@ -3,7 +3,6 @@ import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, Legend,
 } from 'recharts';
-import { usePersistedState } from '../../hooks/usePersistedState';
 import type { AtmIvPoint, VolAnalyticsResponse, VolGridRow } from '../../types/historical';
 
 // Panel-local timeframe options (drives the lifetime IV/RV mini-chart only).
@@ -68,6 +67,8 @@ interface Props {
   nowTs: number;
   panelTimeframe: string;
   setPanelTimeframe: (tf: string) => void;
+  expanded: boolean;
+  setExpanded: (v: boolean) => void;
 }
 
 const Card: React.FC<{ title: string; children: React.ReactNode; style?: React.CSSProperties }> = ({ title, children, style }) => (
@@ -83,9 +84,8 @@ const Badge: React.FC<{ color: string; children: React.ReactNode }> = ({ color, 
 
 export const VolAnalyticsPanel: React.FC<Props> = ({
   volData, volLoading, ivSeries, ivLoading, nowTs, panelTimeframe, setPanelTimeframe,
+  expanded, setExpanded,
 }) => {
-  const [expanded, setExpanded] = usePersistedState<boolean>('historical:volPanelExpanded', false);
-
   const header = volData?.header;
   const sig = header?.signal;
   const available = volData?.available ?? false;
